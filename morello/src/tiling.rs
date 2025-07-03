@@ -215,7 +215,7 @@ mod tests {
                 }
 
                 let steps = tiling.steps_dim(dim as u8, origin_shape[dim]);
-                assert_eq!(steps, steps_began, "Steps computed as {} but expected {}", steps, steps_began);
+                assert_eq!(steps, steps_began, "Steps computed as {steps} but expected {steps_began}");
             }
         }
 
@@ -233,7 +233,7 @@ mod tests {
                     if origin_idx >= origin_shape[dim].get() {
                         // We've hit a boundary. Check that it has the right size.
                         let boundary_size = tiling.boundary_size(dim as u8, origin_shape[dim]);
-                        assert_eq!(boundary_size, pt_idx, "Boundary size computed as {} but expected {}", boundary_size, pt_idx);
+                        assert_eq!(boundary_size, pt_idx, "Boundary size computed as {boundary_size} but expected {pt_idx}");
                         break;
                     }
                 }

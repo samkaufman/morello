@@ -453,11 +453,7 @@ impl PrimitiveBasics {
                 };
                 debug_assert!(
                     h >= fh && w >= fw,
-                    "Conv spatial dims. {}x{} were larger than filter {}x{}",
-                    h,
-                    w,
-                    fh,
-                    fw
+                    "Conv spatial dims. {h}x{w} were larger than filter {fh}x{fw}"
                 );
                 match idx {
                     0 => smallvec![b, c, h, w],
@@ -1441,8 +1437,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
             } => {
                 debug_assert!(
                     components.len() >= 2,
-                    "Compose must have at least 2 components, but components are: {:?}",
-                    components
+                    "Compose must have at least 2 components, but components are: {components:?}"
                 );
 
                 let mut result = vec![];
@@ -1965,7 +1960,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
                     *accum = true;
                 }
-                _ => panic!("Cannot clone_as_accum: {:?}", self),
+                _ => panic!("Cannot clone_as_accum: {self:?}"),
             },
             LogicalSpec::Compose { components, .. } => match &mut components[0].typ {
                 PrimitiveSpecType::Matmul { accum }
@@ -1975,7 +1970,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
                     *accum = true;
                 }
-                _ => panic!("Cannot clone_as_accum: {:?}", self),
+                _ => panic!("Cannot clone_as_accum: {self:?}"),
             },
         }
         cloned
@@ -2021,19 +2016,19 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
         }
 
         let header = match self {
-            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => format!("{}", typ),
+            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => format!("{typ}"),
             LogicalSpec::Compose { .. } => todo!(),
         };
 
         let operand_str = self
             .parameters()
             .iter()
-            .map(|o| format!("{}", o))
+            .map(|o| format!("{o}"))
             .collect::<Vec<_>>()
             .join(", ");
         let serial_str = if self.serial_only() { ", serial" } else { "" };
 
-        write!(f, "{}({}{})", header, operand_str, serial_str)
+        write!(f, "{header}({operand_str}{serial_str})")
     }
 }
 
@@ -2268,7 +2263,7 @@ impl BiMap for PrimitiveBasicsBimap {
         let shifted_shape = spec_shape.iter().map(|d| d.get()).map(|d| {
             if self.binary_scale_shapes {
                 if !d.is_power_of_two() {
-                    panic!("Given non-zero/power-of-two shape {}", d);
+                    panic!("Given non-zero/power-of-two shape {d}");
                 }
                 bit_length_u32(prev_power_of_two_u32(d - 1))
             } else {
@@ -2575,7 +2570,7 @@ impl BiMap for ShapeBimap {
             .map(|d| {
                 if self.0 {
                     if !d.is_power_of_two() {
-                        panic!("Given non-zero/power-of-two shape {}", d);
+                        panic!("Given non-zero/power-of-two shape {d}");
                     }
                     bit_length_u32(prev_power_of_two_u32(d - 1))
                 } else {
@@ -2856,9 +2851,7 @@ pub fn conv_infer_output_shape(image_shape: &[DimSize], filters_shape: &[DimSize
             |(&img_dim, &filt_dim)| {
                 assert!(
                     img_dim >= filt_dim,
-                    "Image dimension {} was smaller than filter dimension {}",
-                    img_dim,
-                    filt_dim
+                    "Image dimension {img_dim} was smaller than filter dimension {filt_dim}"
                 );
                 DimSize::new(img_dim.get() - filt_dim.get() + 1).unwrap()
             },
@@ -2962,7 +2955,7 @@ fn compose_parameter_count(components: &[PrimitiveBasics]) -> usize {
             c.typ
                 .operand_count()
                 .checked_sub(2)
-                .unwrap_or_else(|| panic!("Component {:?} has too few operands", c))
+                .unwrap_or_else(|| panic!("Component {c:?} has too few operands"))
         })
         .sum::<usize>()
         + 2
@@ -3541,7 +3534,7 @@ mod tests {
                     for p in logical_spec.parameters() {
                         let mut recanonicalized = p.clone();
                         recanonicalized.canonicalize().unwrap_or_else(|e| {
-                            panic!("Couldn't canonicalize parameter {} even though {} was canon: {}", p, logical_spec, e);
+                            panic!("Couldn't canonicalize parameter {p} even though {logical_spec} was canon: {e}");
                         });
                         assert_eq!(p, recanonicalized);
                     }
@@ -3594,7 +3587,7 @@ mod tests {
                 unreachable!();
             };
             let tile_out_result = Action::TileOut(TileOut::MultiLoop { output_shape: shape![1; spec_shape.len()], parallel: false })
-                .apply(&spec).unwrap_or_else(|e| panic!("Couldn't tile Spec {} to single value: {e:?}", spec));
+                .apply(&spec).unwrap_or_else(|e| panic!("Couldn't tile Spec {spec} to single value: {e:?}"));
             let ImplNode::SpecApp(child_spec_app) = &tile_out_result.children()[0] else {
                 panic!("First child was not a SpecApp; was: {:?}", tile_out_result.children()[0]);
             };
@@ -3617,7 +3610,7 @@ mod tests {
             for action in X86Target::actions(&spec.0) {
                 if let Ok(ImplNode::Alloc(alloc)) = action.apply(&spec) {
                     assert_ne!(&alloc.source_spec, alloc.introduced.spec(),
-                        "Copying Alloc introduced by action {:?}", action);
+                        "Copying Alloc introduced by action {action:?}");
                 }
             }
         }
@@ -3628,8 +3621,7 @@ mod tests {
         ) {
             let lower_spec = Spec(spec.0.clone(), lower_limit);
             assert!(X86Target::actions(&lower_spec.0).contains(&action),
-                "Action {:?} was not present in lower-limits Spec {:?}",
-                action, lower_spec);
+                "Action {action:?} was not present in lower-limits Spec {lower_spec:?}");
         }
 
         #[test]
@@ -3948,9 +3940,7 @@ mod tests {
                         .copied()
                         .enumerate()
                         .all(|(i, a)| a <= limits_memvec.get_unscaled(i)),
-                    "Lower bound {:?} was greater than Spec's memory limits {:?}",
-                    corrected_lower_bound,
-                    limits_memvec
+                    "Lower bound {corrected_lower_bound:?} was greater than Spec's memory limits {limits_memvec:?}"
                 );
                 let candidate_lower = MemVec::new(corrected_lower_bound);
                 let lower_limit_strategy =

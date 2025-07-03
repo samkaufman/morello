@@ -64,7 +64,7 @@ impl<A: View> Impl<A::Tgt> for KernelApp<A> {
             .iter()
             .map(|a| names.get_name_or_display(a))
             .join(", ");
-        Some(format!("{}({})", name, args_str))
+        Some(format!("{name}({args_str})"))
     }
 
     fn spec(&self) -> Option<&Spec<A::Tgt>> {

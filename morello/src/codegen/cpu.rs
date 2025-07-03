@@ -239,7 +239,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             indent(depth),
             parameter_buf_names
                 .iter()
-                .map(|n| format!(", {}", n))
+                .map(|n| format!(", {n}"))
                 .join("")
         )?;
         writeln!(main_body_str, "{}if (load_result != 0) {{", indent(depth))?;
@@ -964,8 +964,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_size = first_spec.vector_size().unwrap_or_else(|| {
                             second_spec.vector_size().unwrap_or_else(|| {
                                 panic!(
-                                    "neither Spec had a vector size: {} and {}",
-                                    first_spec, second_spec
+                                    "neither Spec had a vector size: {first_spec} and {second_spec}"
                                 )
                             })
                         });
@@ -2019,7 +2018,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             CBuffer::SingleVecVar { name, .. } => {
                 if let Some(reinterpret) = reinterpret {
                     debug_assert_eq!(*expr, 0);
-                    format!("*({} *)(&{})", reinterpret, name)
+                    format!("*({reinterpret} *)(&{name})")
                 } else {
                     format!(
                         "{}[{}]",
@@ -2038,7 +2037,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 };
                 if let Some(reinterpret) = reinterpret {
                     debug_assert_eq!(vec_offset, 0);
-                    format!("*({} *)(&{})", reinterpret, name)
+                    format!("*({reinterpret} *)(&{name})")
                 } else {
                     format!("{}[{}]", name, expr_to_c(&vec_offset))
                 }
@@ -2064,7 +2063,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             }
             CBuffer::SingleVecVar { name, .. } => {
                 if *expr != 0 {
-                    panic!("expr must be 0, but was: {:?}", expr);
+                    panic!("expr must be 0, but was: {expr:?}");
                 }
                 if reinterpret.is_some() {
                     unimplemented!();
@@ -2080,7 +2079,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     unreachable!();
                 };
                 if vec_offset != 0 {
-                    panic!("vec_offset must be 0, but was: {:?}", vec_offset);
+                    panic!("vec_offset must be 0, but was: {vec_offset:?}");
                 }
                 if reinterpret.is_some() {
                     unimplemented!();
@@ -2126,7 +2125,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     unimplemented!();
                 };
                 if *expr == 0 {
-                    format!("&{}", name)
+                    format!("&{name}")
                 } else {
                     format!("&{}", self.c_index(buffer, expr, None))
                 }
@@ -2275,7 +2274,7 @@ fn expr_to_c(e: &AffineForm<NonAffine<CName>>) -> String {
                 if *coef == 1 {
                     sym_string
                 } else {
-                    format!("{} * {}", coef, sym_string)
+                    format!("{coef} * {sym_string}")
                 }
             })
             .join(" + ");
@@ -2289,7 +2288,7 @@ fn expr_to_c(e: &AffineForm<NonAffine<CName>>) -> String {
     if buf.is_empty() {
         buf = String::from("0");
     }
-    format!("({})", buf)
+    format!("({buf})")
 }
 
 fn cexpr_subexpr_to_c(subexpr: &NonAffine<CName>) -> String {

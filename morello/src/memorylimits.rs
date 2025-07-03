@@ -399,7 +399,7 @@ impl MemVec {
     /// Panics if `value > 127`.
     fn encode_raw(value: u64) -> u8 {
         if value > 127 {
-            panic!("Raw encoded value {} exceeds maximum of 127", value);
+            panic!("Raw encoded value {value} exceeds maximum of 127");
         }
         u8::try_from(value).unwrap() | 0x80
     }
@@ -410,7 +410,7 @@ impl MemVec {
     fn encode_bit_length(value: u64) -> u8 {
         let bit_len = bit_length(value);
         if bit_len > 127 {
-            panic!("Bit length {} exceeds maximum of 127", bit_len);
+            panic!("Bit length {bit_len} exceeds maximum of 127");
         }
         bit_len.try_into().unwrap()
     }
@@ -677,9 +677,9 @@ impl fmt::Debug for MemVec {
             }
             let decoded_value = Self::decode_value(byte);
             if byte & 0x80 == 0 {
-                write!(f, "{}*", decoded_value)?;
+                write!(f, "{decoded_value}*")?;
             } else {
-                write!(f, "{}", decoded_value)?;
+                write!(f, "{decoded_value}")?;
             }
         }
         write!(f, "])")

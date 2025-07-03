@@ -556,7 +556,7 @@ impl<Tgt: Target> Subschedule<Tgt> for ImplNode<Tgt> {
             if children.is_empty() {
                 match this {
                     ImplNode::SpecApp(spec_app) => specapp_apply(spec_app, f).into(),
-                    _ => panic!("subschedule path chose non-Spec leaf: {:?}", this),
+                    _ => panic!("subschedule path chose non-Spec leaf: {this:?}"),
                 }
             } else if children.len() == 1 {
                 this.replace_children(iter::once(inner(&children[0], path, f)))

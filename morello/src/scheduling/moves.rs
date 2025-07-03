@@ -374,7 +374,7 @@ mod tests {
                 if let ImplNode::SpecApp(SpecApp(spec, _)) = child {
                     spec.clone()
                 } else {
-                    panic!("expected a SpecApp child, got {:?}", child)
+                    panic!("expected a SpecApp child, got {child:?}")
                 }
             })
             .collect()
@@ -415,7 +415,7 @@ mod tests {
                     )
                 ));
             }
-            children => panic!("expected one Matmul Spec child, got {:?}", children),
+            children => panic!("expected one Matmul Spec child, got {children:?}"),
         };
     }
 }

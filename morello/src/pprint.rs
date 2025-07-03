@@ -133,7 +133,7 @@ fn pprint_inner<'a, Tgt>(
             ImplPrintStyle::Compact => {
                 let path_info = extra_column_values.pop().unwrap();
                 extra_column_values.retain(|s| !s.is_empty());
-                extra_column_values.push(format!("path: {}", path_info));
+                extra_column_values.push(format!("path: {path_info}"));
 
                 if !extra_column_values.is_empty() {
                     let joined = extra_column_values.join(", ");

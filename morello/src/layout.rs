@@ -86,10 +86,7 @@ impl Layout {
             let mut seen = vec![false; usize::from(logical_rank) + 1];
             for (d, fixed_size) in &dims {
                 if matches!(fixed_size, PhysDim::Dynamic) && seen[usize::from(*d)] {
-                    panic!(
-                        "Non-first occurrence of logical dimension {} is PhysDim::Dynamic",
-                        d
-                    );
+                    panic!("Non-first occurrence of logical dimension {d} is PhysDim::Dynamic");
                 }
                 seen[usize::from(*d)] = true;
             }
@@ -223,9 +220,7 @@ impl Layout {
 
         assert!(
             usize::from(contig) <= dims.len(),
-            "Invalid contig: {} for dims: {:?}",
-            contig,
-            dims
+            "Invalid contig: {contig} for dims: {dims:?}"
         );
 
         let first_contig_idx = dims.len() - usize::from(contig);
@@ -521,7 +516,7 @@ impl Layout {
                 }
                 (PhysDim::OddEven(_), PhysDim::OddEven(_)) => todo!(),
                 (PhysDim::Dynamic, PhysDim::Dynamic) => {
-                    panic!("Repeating non-packed dimensions is undefined: {:?}", self)
+                    panic!("Repeating non-packed dimensions is undefined: {self:?}")
                 }
             }
         }
@@ -660,8 +655,7 @@ impl Layout {
             let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
             debug_assert_ne!(
                 remaining_size, &0,
-                "Logical dimension {} with unpacked sized already seen in {:?}",
-                dim, dims
+                "Logical dimension {dim} with unpacked sized already seen in {dims:?}"
             );
             match phys_dim {
                 PhysDim::OddEven(s) | PhysDim::Packed(s) => {
@@ -857,14 +851,14 @@ impl Display for Layout {
                     .collect::<Vec<_>>()
                     .join(","),
                 dims.iter()
-                    .map(|(_, s)| format!("{:?}", s))
+                    .map(|(_, s)| format!("{s:?}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             )?;
         }
 
         if !self.is_fully_contiguous() {
-            write!(f, ":c{}", contig)?;
+            write!(f, ":c{contig}")?;
         }
 
         Ok(())
@@ -884,8 +878,8 @@ impl Default for LayoutArbRankBounds {
 impl Display for BufferVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BufferVar::TileIdx(dim, _) => write!(f, "t{}", dim),
-            BufferVar::Pt(dim, _) => write!(f, "p{}", dim),
+            BufferVar::TileIdx(dim, _) => write!(f, "t{dim}"),
+            BufferVar::Pt(dim, _) => write!(f, "p{dim}"),
         }
     }
 }
@@ -1466,7 +1460,7 @@ mod tests {
         let expected = NonAffineExpr::constant(0)
             + Term(4, NonAffine::Leaf(BufferVar::Pt(0, expr_id)))
             + Term(1, NonAffine::Leaf(BufferVar::Pt(1, expr_id)));
-        assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+        assert_eq!(iexpr, expected, "{iexpr} != {expected}");
     }
 
     #[test]
@@ -1477,7 +1471,7 @@ mod tests {
 
         let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id));
         let expected = (pt.clone() % 8) / 2 + (pt % 2) * 4i32;
-        assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+        assert_eq!(iexpr, expected, "{iexpr} != {expected}");
     }
 
     #[test]
@@ -1491,7 +1485,7 @@ mod tests {
 
         let pt = NonAffineExpr::from(BufferVar::Pt(0, expr_id));
         let expected = (pt.clone() / 8) * 8 + (pt.clone() % 8) / 2 + (pt % 2) * 4;
-        assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+        assert_eq!(iexpr, expected, "{iexpr} != {expected}");
     }
 
     #[test]
@@ -1506,7 +1500,7 @@ mod tests {
         let pt0 = NonAffineExpr::from(BufferVar::Pt(0, expr_id));
         let pt1 = NonAffineExpr::from(BufferVar::Pt(1, expr_id));
         let expected = pt0.clone() * 8 + (pt1.clone() % 8) / 2 + (pt1 % 2) * 4;
-        assert_eq!(iexpr, expected, "{} != {}", iexpr, expected);
+        assert_eq!(iexpr, expected, "{iexpr} != {expected}");
     }
 
     #[test]

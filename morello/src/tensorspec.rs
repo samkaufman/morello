@@ -108,7 +108,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     pub fn new_noncanon_with_aux(shape: Shape, dtype: Dtype, aux: TensorSpecAux<Tgt>) -> Self {
         if shape.is_empty() {
-            panic!("Invalid shape: {:?}", shape);
+            panic!("Invalid shape: {shape:?}");
         }
         match (aux.vector_size, aux.level.vector_bytes()) {
             (None, []) => {}
@@ -218,9 +218,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         assert_eq!(
             level.vector_rf(),
             vector_size.is_some(),
-            "Cannot set level to {:?} with vector shape {:?}",
-            level,
-            vector_size
+            "Cannot set level to {level:?} with vector shape {vector_size:?}"
         );
         self.aux.level = level;
         self.aux.vector_size = vector_size;
@@ -259,9 +257,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             assert_eq!(
                 new_shape[usize::from(dim)].get(),
                 1,
-                "Cannot drop non-degenerate dimension {} of shape {:?}",
-                dim,
-                new_shape
+                "Cannot drop non-degenerate dimension {dim} of shape {new_shape:?}"
             );
             new_shape.remove(dim.into());
         }
@@ -341,7 +337,7 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
         if aux_part.is_empty() {
             write!(f, ")")
         } else {
-            write!(f, ", {})", aux_part)
+            write!(f, ", {aux_part})")
         }
     }
 }
@@ -459,7 +455,7 @@ impl<Tgt: Target> Display for TensorSpecAux<Tgt> {
         if aux_part.is_empty() {
             write!(f, "(_)")
         } else {
-            write!(f, "({})", aux_part)
+            write!(f, "({aux_part})")
         }
     }
 }

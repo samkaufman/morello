@@ -323,9 +323,7 @@ impl FilesDatabase {
                 let MemoryLimits::Standard(limits) = &spec.1;
                 &c.peaks <= limits
             }),
-            "peak memory of an action exceeds memory limits of {}: {:?}",
-            spec,
-            decisions
+            "peak memory of an action exceeds memory limits of {spec}: {decisions:?}"
         );
 
         #[cfg(feature = "db-stats")]
@@ -895,7 +893,7 @@ fn analyze_visit_dir<Tgt>(
                     log::warn!("Error reading superblock: {:?}", e);
                     continue;
                 }
-                panic!("Error reading superblock: {:?}", e);
+                panic!("Error reading superblock: {e:?}");
             }
         };
 
@@ -905,7 +903,7 @@ fn analyze_visit_dir<Tgt>(
                 .block_writer
                 .write_record([
                     &entry_path_str,
-                    &format!("{:?}", block_pt),
+                    &format!("{block_pt:?}"),
                     &r.rect_count().to_string(),
                 ])
                 .unwrap();
@@ -1262,7 +1260,7 @@ mod tests {
             }
             let expected = ActionCostVec(top_actions_costs);
             let get_result = db.get(&top_spec).expect("Spec should be in database");
-            assert_eq!(get_result, expected, "Entries differed at {}", top_spec);
+            assert_eq!(get_result, expected, "Entries differed at {top_spec}");
         }
 
         // TODO: Add tests for top-2, etc. Impls
@@ -1306,7 +1304,7 @@ mod tests {
                     let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
                     let spec_to_check = Spec(top_logical_spec.clone(), limit_to_check);
                     let get_result = db.get(&spec_to_check).expect("Spec should be in database");
-                    assert_eq!(get_result, expected, "Entries differed at {}", spec_to_check);
+                    assert_eq!(get_result, expected, "Entries differed at {spec_to_check}");
                 });
         }
 

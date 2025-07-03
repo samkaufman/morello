@@ -90,7 +90,7 @@ mod tests {
         };
 
         let iexpr = layout.buffer_indexing_expr(OpaqueSymbol::new(), parent.shape());
-        println!("initial indexing expr = {}", iexpr);
+        println!("initial indexing expr = {iexpr}");
 
         let parent_as_param = Param::new(0, parent);
         let parent = parent_as_param.spec();
@@ -100,7 +100,7 @@ mod tests {
                 .layout()
                 .buffer_indexing_expr(OpaqueSymbol::new(), parent.shape()),
         );
-        println!("tiled indexing expr = {}", iexpr);
+        println!("tiled indexing expr = {iexpr}");
 
         // TODO: The buffer indexing exporession should be tiled.
 
@@ -110,7 +110,7 @@ mod tests {
                 .multi_cartesian_product();
             let mut per_tile_index_expressions =
                 tile_coordinates.map(|tile_coordinate| -> AffineForm<NonAffine<BufferVar>> {
-                    println!("{:?}", tile_coordinate);
+                    println!("{tile_coordinate:?}");
                     iexpr.clone().map_vars(&mut |v| match v {
                         BufferVar::TileIdx(d, _) => NonAffineExpr::constant(
                             tile_coordinate[usize::from(d)].try_into().unwrap(),
@@ -119,7 +119,7 @@ mod tests {
                     })
                 });
             per_tile_index_expressions.all(|new_iexpr| {
-                println!("new_iexpr = {}", new_iexpr);
+                println!("new_iexpr = {new_iexpr}");
                 (new_iexpr.as_constant().unwrap() * i32::from(parent.dtype().size()))
                     % i32::try_from(X86Target::line_size()).unwrap()
                     == 0

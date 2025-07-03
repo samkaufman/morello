@@ -1539,7 +1539,7 @@ impl BiMap for CpuMemoryLevelBimap {
             1 => CpuMemoryLevel::VRF,
             2 => CpuMemoryLevel::L1,
             3 => CpuMemoryLevel::GL,
-            _ => panic!("Invalid index: {}", i),
+            _ => panic!("Invalid index: {i}"),
         }
     }
 }

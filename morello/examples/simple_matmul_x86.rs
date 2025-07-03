@@ -169,7 +169,7 @@ fn main() {
     println!("\nThe above Impl lowered to C:");
     implementation
         .emit(false, None, &mut ToWriteFmt(io::stdout()))
-        .unwrap_or_else(|e| panic!("Failed to generate code: {}", e));
+        .unwrap_or_else(|e| panic!("Failed to generate code: {e}"));
 
     // If the verification flag is set, let's additionally double-check that the lowered
     // code builds and produces the correct results.
@@ -182,7 +182,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                panic!("Failed to build generated code: {}", e);
+                panic!("Failed to build generated code: {e}");
             }
         }
     }
@@ -191,7 +191,7 @@ fn main() {
     const ITERS: u32 = 100;
     let result = implementation
         .bench(ITERS, None)
-        .unwrap_or_else(|e| panic!("Failed to benchmark: {}", e));
+        .unwrap_or_else(|e| panic!("Failed to benchmark: {e}"));
     let kernel_runtime =
         (result.best_inner_loop_runtime() / result.inner_loop_iterations).as_secs_f64();
     let throughput =

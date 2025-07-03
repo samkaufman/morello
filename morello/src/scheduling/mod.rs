@@ -355,7 +355,7 @@ impl Display for NotApplicableReason {
             NotApplicableReason::MultipleOutputs => {
                 write!(f, "Spec has multiple outputs")
             }
-            NotApplicableReason::Other(Some(reason_string)) => write!(f, "{}", reason_string),
+            NotApplicableReason::Other(Some(reason_string)) => write!(f, "{reason_string}"),
             NotApplicableReason::Other(None) => write!(f, "Unknown reason"),
         }
     }
@@ -707,7 +707,7 @@ mod tests {
                 }
                 Err(ApplyError::NotApplicable(_)) => (),
                 // TODO: Replace panic with a proptest-friendly result
-                Err(e) => panic!("unexpected error: {:?}", e),
+                Err(e) => panic!("unexpected error: {e:?}"),
             };
         }
         Ok(())

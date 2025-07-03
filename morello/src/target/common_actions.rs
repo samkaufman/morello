@@ -425,8 +425,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             actual, expected,
-            "gen_tile_sizes({:?}, drop_given={}, serial={}) returned {:?}, expected {:?}",
-            tensor_shape, drop_given, multi_dim, actual, expected
+            "gen_tile_sizes({tensor_shape:?}, drop_given={drop_given}, serial={multi_dim}) returned {actual:?}, expected {expected:?}"
         );
     }
 
@@ -461,8 +460,7 @@ mod tests {
             }
             assert_eq!(
                 duplicate_count, 0,
-                "Found {} duplicate Move actions",
-                duplicate_count
+                "Found {duplicate_count} duplicate Move actions"
             );
         }
 

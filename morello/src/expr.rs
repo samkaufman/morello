@@ -392,10 +392,10 @@ impl<T: Display> Display for AffineForm<T> {
 impl<T: Display> Display for NonAffine<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NonAffine::Constant(v) => write!(f, "{}", v),
-            NonAffine::Leaf(v) => write!(f, "{}", v),
-            NonAffine::FloorDiv(v, d) => write!(f, "({}) / {}", v, d),
-            NonAffine::Mod(v, m) => write!(f, "({}) % {}", v, m),
+            NonAffine::Constant(v) => write!(f, "{v}"),
+            NonAffine::Leaf(v) => write!(f, "{v}"),
+            NonAffine::FloorDiv(v, d) => write!(f, "({v}) / {d}"),
+            NonAffine::Mod(v, m) => write!(f, "({v}) % {m}"),
         }
     }
 }
