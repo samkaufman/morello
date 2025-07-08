@@ -54,7 +54,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
         let default_child = Some(stages.len() - 1);
         Ok(ImplNode::Block(Block {
             stages,
-            parameters: operands,
             spec: Some(spec.clone()),
             default_child,
         }))

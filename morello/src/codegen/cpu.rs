@@ -72,8 +72,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         bench: bool,
         out: &mut W,
     ) -> fmt::Result {
-        debug_assert_eq!(top_arg_tensors.len(), usize::from(imp.parameter_count()));
-
         let mut main_body_str = String::new();
         writeln!(
             main_body_str,
@@ -82,11 +80,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         )?;
 
         let thread_extra_args = self.thread_style_extra_args();
-        let parameter_count = usize::from(imp.parameter_count());
+        let parameter_count = top_arg_tensors.len();
         let fn_arg_count = parameter_count + thread_extra_args.len();
 
         let mut operand_idx = 0;
-        for (operand, tensor) in imp.parameters().zip(top_arg_tensors) {
+        for tensor in top_arg_tensors {
             let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
@@ -96,7 +94,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 } else {
                     ""
                 },
-                c_type(operand.dtype),
+                c_type(tensor.spec().dtype()),
                 parameter_name,
                 if operand_idx + 1 < fn_arg_count {
                     ", "
@@ -132,7 +130,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             .map(|tensor| ViewE::from(Rc::as_ref(tensor).clone()))
             .collect::<Vec<_>>();
 
-        let beta_reduced_imp = imp.clone().bind(&tensors_as_viewe);
+        let beta_reduced_imp = imp
+            .clone()
+            .bind(&mut |param_idx| tensors_as_viewe.get(usize::from(param_idx)).cloned());
         self.emit(&mut main_body_str, &beta_reduced_imp, 1)?;
 
         writeln!(main_body_str, "}}")?;
@@ -1832,19 +1832,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         l: &Loop<Tgt>,
         depth: usize,
     ) -> fmt::Result {
-        for body in l.bodies.iter().skip(1) {
-            for (arg_shape, parameter) in body
-                .spec()
-                .unwrap()
-                .0
-                .parameter_shapes()
-                .iter()
-                .zip(body.parameters())
-            {
-                debug_assert_eq!(&arg_shape[..], parameter.shape());
-            }
-        }
-
         let nontrivial_axes = get_axis_steps(l);
         self.emit_main_loop_nest(w, l, &nontrivial_axes, depth)?;
         self.emit_boundary_regions(w, l, depth)

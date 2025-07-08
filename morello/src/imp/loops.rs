@@ -9,7 +9,6 @@ use crate::tensorspec::TensorSpec;
 use crate::views::{BoundaryTile, Tile, TileError, View, ViewE};
 use itertools::Itertools;
 use std::fmt::{self, Debug};
-use std::iter;
 
 const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
 
@@ -36,7 +35,6 @@ const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
 #[derive(Clone)]
 pub struct Loop<Tgt: Target> {
     pub tiles: Vec<LoopTile<Tgt>>,
-    // pub boundary_tiles: Vec<Vec<BoundaryLoopTile<Tgt>>>,
     /// Implementations for different regions of the loop. This is never empty; the
     /// first body is the main, largest sub-Impl.
     ///
@@ -70,34 +68,6 @@ pub struct LoopTile<Tgt: Target> {
 impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     type BindOut = Self;
 
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-        debug_assert!(
-            self.tiles
-                .iter()
-                .tuple_windows::<(_, _)>()
-                .all(|(a, b)| a.parameter_index < b.parameter_index),
-            "tile weren't sorted"
-        );
-
-        // Return an iterator over parameters from loop tiles where they apply and the inner body
-        // elsewhere.
-        let mut next_tile_idx = 0;
-        let mut body_parameters = self.bodies[0].parameters().enumerate();
-        Box::new(iter::from_fn(move || match body_parameters.next() {
-            None => {
-                debug_assert_eq!(next_tile_idx, self.tiles.len());
-                None
-            }
-            Some((i, body_param)) => match self.tiles.get(next_tile_idx) {
-                Some(next_tile) if i == usize::from(next_tile.parameter_index) => {
-                    next_tile_idx += 1;
-                    Some(next_tile.tile.view.spec())
-                }
-                _ => Some(body_param),
-            },
-        }))
-    }
-
     fn children(&self) -> &[ImplNode<Tgt>] {
         &self.bodies
     }
@@ -129,44 +99,53 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
         }
     }
 
-    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
-        debug_assert_eq!(args.len(), self.parameters().count());
-
-        let mut new_tiles = vec![];
-        new_tiles.reserve_exact(self.tiles.len());
-        let mut inner_args = args.to_vec();
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
+        let mut new_tiles = Vec::with_capacity(self.tiles.len());
         for tile in &self.tiles {
-            let ViewE::Tile(bound) = tile.tile.clone().bind(args) else {
+            let ViewE::Tile(bound) = tile.tile.clone().bind(get_argument) else {
                 unreachable!()
             };
             new_tiles.push(LoopTile {
                 parameter_index: tile.parameter_index,
                 axes: tile.axes.clone(),
-                tile: bound.clone(),
+                tile: bound,
             });
-            inner_args[usize::from(tile.parameter_index)] = ViewE::Tile(bound);
         }
 
-        let mut bodies = Vec::with_capacity(self.bodies.len());
-        bodies.push(self.bodies[0].clone().bind(&inner_args));
-        // debug_assert!(matches!(bodies[0], ImplNode::SpecApp(_)));  // Temporarily disabled
-
-        // Bind boundary region bodies (indices 1..) with boundary tiles
-        for (body_idx, region_id) in self.region_ids.iter().enumerate() {
-            let boundary_body = &self.bodies[body_idx + 1]; // +1 because region_ids corresponds to bodies[1..]
-
-            // Create boundary tile arguments for this region
-            let mut boundary_args = inner_args.clone();
-            for loop_tile in &new_tiles {
-                let boundary_tile = self
-                    .create_boundary_tile_for_region(loop_tile, *region_id)
-                    .expect("Failed to create boundary tile");
-                boundary_args[usize::from(loop_tile.parameter_index)] =
-                    ViewE::BoundaryTile(boundary_tile);
+        // Closure that returns bound tiles or falls back to get_argument
+        let mut get_inner_argument = |param_idx: u8| -> Option<ViewE<Tgt>> {
+            // Check if this parameter has a bound tile
+            // TODO: Speed this up with a little map data stucture
+            for new_tile in &new_tiles {
+                if new_tile.parameter_index == param_idx {
+                    return Some(ViewE::Tile(new_tile.tile.clone()));
+                }
             }
+            get_argument(param_idx)
+        };
 
-            // Bind the boundary region body with boundary tiles.
-            bodies.push(boundary_body.clone().bind(&boundary_args));
+        let mut bodies = Vec::with_capacity(self.bodies.len());
+        bodies.push(self.bodies[0].clone().bind(&mut get_inner_argument));
+
+        // Bind boundary region bodies with boundary tiles
+        for (body_idx, &region_id) in self.region_ids.iter().enumerate() {
+            let boundary_body = &self.bodies[body_idx + 1];
+
+            // Create closure for boundary arguments
+            let mut get_boundary_argument = |param_idx: u8| -> Option<ViewE<Tgt>> {
+                // Check if this parameter has a boundary tile for this region
+                for new_tile in &new_tiles {
+                    if new_tile.parameter_index == param_idx {
+                        let boundary_tile = self
+                            .create_boundary_tile_for_region(new_tile, region_id)
+                            .expect("Failed to create boundary tile");
+                        return Some(ViewE::BoundaryTile(boundary_tile));
+                    }
+                }
+                get_argument(param_idx)
+            };
+
+            bodies.push(boundary_body.clone().bind(&mut get_boundary_argument));
         }
 
         Loop {
@@ -201,6 +180,18 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
         self.spec.as_ref()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Tgt>),
+    {
+        for tile in &self.tiles {
+            tile.tile.visit_params(visitor);
+        }
+        for child in self.children() {
+            child.visit_params(visitor);
+        }
     }
 }
 

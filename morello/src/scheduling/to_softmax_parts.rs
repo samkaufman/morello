@@ -110,7 +110,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             wirings: vec![StageWiring {
                 intermediate_tensors: vec![Rc::new(denominator_tensor), Rc::new(exps_tensor)],
             }],
-            parameters: operands,
             spec: Some(spec.clone()),
         }))
     }
@@ -191,7 +190,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
             wirings: vec![StageWiring {
                 intermediate_tensors: vec![Rc::new(max_tensor), Rc::new(denominator_tensor)],
             }],
-            parameters: operands,
             spec: Some(spec.clone()),
         }))
     }

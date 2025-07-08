@@ -1172,7 +1172,7 @@ mod tests {
         assert_eq!(param_indices, [0, 3]);
 
         // Check shapes of the body SpecApp
-        let body_params: Vec<_> = bodies[0].parameters().collect();
+        let body_params = bodies[0].collect_unbound_parameters();
         let expected_shapes = [
             &[nz!(4u32), nz!(8u32), nz!(8u32)][..], // Parameter 0: input (tiled)
             &[nz!(4u32), nz!(8u32), nz!(1u32)][..], // Parameter 1: max (reduced)

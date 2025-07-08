@@ -107,7 +107,6 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
             wirings: vec![StageWiring {
                 intermediate_tensors: vec![Rc::new(broadcast_destination)],
             }],
-            parameters: operands,
             spec: Some(spec.clone()),
         }))
     }

@@ -76,21 +76,6 @@ impl<Tgt: Target> Alloc<Tgt> {
 impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
     type BindOut = Self;
 
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-        Box::new(
-            self.main_stage()
-                .parameters()
-                .enumerate()
-                .map(|(i, body_param)| {
-                    if i == usize::from(self.parameter_idx) {
-                        &self.source_spec
-                    } else {
-                        body_param
-                    }
-                }),
-        )
-    }
-
     fn children(&self) -> &[ImplNode<Tgt>] {
         &self.children
     }
@@ -122,12 +107,12 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
         }
     }
 
-    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
-        let introduced = self.introduced.clone().bind(args);
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
+        let introduced = self.introduced.clone().bind(get_argument);
         let new_children = self
             .children
             .into_iter()
-            .map(|child| child.bind(args))
+            .map(|child| child.bind(get_argument))
             .collect();
         Self {
             introduced,
@@ -155,6 +140,15 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
         self.spec.as_ref()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Tgt>),
+    {
+        for child in self.children() {
+            child.visit_params(visitor);
+        }
     }
 }
 

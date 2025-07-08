@@ -12,6 +12,7 @@ use crate::{
     views::ViewE,
 };
 use enum_dispatch::enum_dispatch;
+use std::collections::BTreeMap;
 
 pub mod allocs;
 pub mod blocks;
@@ -24,12 +25,6 @@ pub mod subspecs;
 #[enum_dispatch]
 pub trait Impl<Tgt: Target> {
     type BindOut: Impl<Tgt>;
-
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_>;
-
-    fn parameter_count(&self) -> u8 {
-        self.parameters().count().try_into().unwrap()
-    }
 
     fn children(&self) -> &[ImplNode<Tgt>];
 
@@ -50,10 +45,10 @@ pub trait Impl<Tgt: Target> {
     fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self;
 
     // Replaces [Param] references within this Impl with concrete [ViewE] instances from
-    // the provided `args` array, recursively transforming the entire subtree to
+    // the provided getter function, recursively transforming the entire subtree to
     // eliminate parameterization.
     #[must_use]
-    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut;
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut;
 
     fn pprint_line(&self, names: &mut NameEnv) -> Option<String>;
 
@@ -62,6 +57,11 @@ pub trait Impl<Tgt: Target> {
     /// This is not necessarily the only Spec the Impl satisifes. Instead, it is the concrete Spec
     /// goal used during scheduling.
     fn spec(&self) -> Option<&Spec<Tgt>>;
+
+    /// Visit parameters from this Impl using the provided visitor function.
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Tgt>);
 }
 
 crate::impl_impl_for_enum!(
@@ -75,90 +75,41 @@ crate::impl_impl_for_enum!(
     SpecApp => SpecApp<ViewE<Tgt>>,
 );
 
-// TODO: Move this mod down
-pub mod macros {
-    #[macro_export]
-    macro_rules! impl_impl_for_enum {
-        ($(#[$meta:meta])* $enum_name:ident $(, $variant:ident => $type:ty) *$(,)*) => {
-            $(#[$meta])*
-            #[derive(Debug, Clone)]
-            pub enum $enum_name<Tgt: Target> {
-                $(
-                    $variant($type),
-                )*
-            }
+// TODO: Make this a blanket impl for all `Impl`s
+impl<Tgt: Target> ImplNode<Tgt> {
+    /// Returns unbound parameters from Impl in parameter index order.
+    pub fn collect_unbound_parameters(&self) -> Vec<TensorSpec<Tgt>> {
+        let mut param_map = BTreeMap::new();
+        self.visit_params(&mut |index, spec| {
+            let previous_spec = param_map.insert(index, spec.clone());
+            assert!(
+                previous_spec.is_none() || previous_spec.as_ref().unwrap() == spec,
+                "duplicate parameter index {index}; replacing {} with {spec}",
+                previous_spec.unwrap()
+            );
+        });
+        param_map.into_values().collect()
+    }
 
-            impl<Tgt: Target> Impl<Tgt> for $enum_name<Tgt> {
-                type BindOut = Self;
-
-                fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-                    match self {
-                        $(Self::$variant(inner) => inner.parameters(),)*
-                    }
-                }
-
-                fn parameter_count(&self) -> u8 {
-                    match self {
-                        $(Self::$variant(inner) => inner.parameter_count(),)*
-                    }
-                }
-
-                fn children(&self) -> &[ImplNode<Tgt>] {
-                    match self {
-                        $(Self::$variant(inner) => inner.children(),)*
-                    }
-                }
-
-                fn default_child(&self) -> Option<usize> {
-                    match self {
-                        $(Self::$variant(inner) => inner.default_child(),)*
-                    }
-                }
-
-                fn memory_allocated(&self) -> MemoryAllocation {
-                    match self {
-                        $(Self::$variant(inner) => inner.memory_allocated(),)*
-                    }
-                }
-
-                fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-                    match self {
-                        $(Self::$variant(inner) => inner.compute_main_cost(child_costs),)*
-                    }
-                }
-
-                fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-                    match self {
-                        $(Self::$variant(inner) => Self::$variant(inner.replace_children(new_children)),)*
-                    }
-                }
-
-                fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
-                    match self {
-                        $(Self::$variant(inner) => inner.bind(args).into(),)*
-                    }
-                }
-
-                fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
-                    match self {
-                        $(Self::$variant(inner) => inner.pprint_line(names),)*
-                    }
-                }
-
-                fn spec(&self) -> Option<&Spec<Tgt>> {
-                    match self {
-                        $(Self::$variant(inner) => inner.spec(),)*
-                    }
+    /// Calls the given function on all nested [ImplNode]s without children.
+    ///
+    /// The closure may return `false` to short-circuit, which will be propagated to the
+    /// caller.
+    pub fn visit_leaves<F>(&self, f: &mut F) -> bool
+    where
+        F: FnMut(&ImplNode<Tgt>) -> bool,
+    {
+        let children = self.children();
+        if children.is_empty() {
+            f(self)
+        } else {
+            for child in children {
+                let should_continue = child.visit_leaves(f);
+                if !should_continue {
+                    return false;
                 }
             }
-
-            $(
-                impl<Tgt: Target> From<$type> for $enum_name<Tgt> {
-                    fn from(inner: $type) -> Self {
-                        Self::$variant(inner)
-                    }
-                }
-            )*
+            true
         }
     }
 }
@@ -193,26 +144,86 @@ where
     }
 }
 
-/// Calls the given function on all leaves of an Impl.
-///
-/// The given may return `false` to short-circuit, which will be propogated to the caller of this
-/// function.
-pub fn visit_leaves<Tgt, F>(imp: &ImplNode<Tgt>, f: &mut F) -> bool
-where
-    Tgt: Target,
-    F: FnMut(&ImplNode<Tgt>) -> bool,
-{
-    let children = imp.children();
-    if children.is_empty() {
-        f(imp)
-    } else {
-        let c = imp.children();
-        for child in c {
-            let should_complete = visit_leaves(child, f);
-            if !should_complete {
-                return false;
+pub mod macros {
+    #[macro_export]
+    macro_rules! impl_impl_for_enum {
+        ($(#[$meta:meta])* $enum_name:ident $(, $variant:ident => $type:ty) *$(,)*) => {
+            $(#[$meta])*
+            #[derive(Debug, Clone)]
+            pub enum $enum_name<Tgt: Target> {
+                $(
+                    $variant($type),
+                )*
             }
+
+            impl<Tgt: Target> Impl<Tgt> for $enum_name<Tgt> {
+                type BindOut = Self;
+
+                fn children(&self) -> &[ImplNode<Tgt>] {
+                    match self {
+                        $(Self::$variant(inner) => inner.children(),)*
+                    }
+                }
+
+                fn default_child(&self) -> Option<usize> {
+                    match self {
+                        $(Self::$variant(inner) => inner.default_child(),)*
+                    }
+                }
+
+                fn memory_allocated(&self) -> MemoryAllocation {
+                    match self {
+                        $(Self::$variant(inner) => inner.memory_allocated(),)*
+                    }
+                }
+
+                fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
+                    match self {
+                        $(Self::$variant(inner) => inner.compute_main_cost(child_costs),)*
+                    }
+                }
+
+                fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
+                    match self {
+                        $(Self::$variant(inner) => Self::$variant(inner.replace_children(new_children)),)*
+                    }
+                }
+
+                fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
+                    match self {
+                        $(Self::$variant(inner) => inner.bind(get_argument).into(),)*
+                    }
+                }
+
+                fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
+                    match self {
+                        $(Self::$variant(inner) => inner.pprint_line(names),)*
+                    }
+                }
+
+                fn spec(&self) -> Option<&Spec<Tgt>> {
+                    match self {
+                        $(Self::$variant(inner) => inner.spec(),)*
+                    }
+                }
+
+                fn visit_params<F>(&self, visitor: &mut F)
+                where
+                    F: FnMut(u8, &TensorSpec<Tgt>),
+                {
+                    match self {
+                        $(Self::$variant(inner) => inner.visit_params(visitor),)*
+                    }
+                }
+            }
+
+            $(
+                impl<Tgt: Target> From<$type> for $enum_name<Tgt> {
+                    fn from(inner: $type) -> Self {
+                        Self::$variant(inner)
+                    }
+                }
+            )*
         }
-        true
     }
 }

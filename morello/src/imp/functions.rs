@@ -13,16 +13,12 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct FunctionApp<Tgt: Target> {
     pub body: Box<ImplNode<Tgt>>,
-    pub parameters: Vec<ViewE<Tgt>>,
+    pub parameters: Vec<ViewE<Tgt>>, // TODO: Remove?
     pub spec: Option<Spec<Tgt>>,
 }
 
 impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
     type BindOut = ImplNode<Tgt>;
-
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-        Box::new(self.parameters.iter().map(|p| p.spec()))
-    }
 
     fn children(&self) -> &[ImplNode<Tgt>] {
         std::slice::from_ref(&self.body)
@@ -47,13 +43,15 @@ impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
         new_function
     }
 
-    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
         let body_args = self
             .parameters
             .iter()
-            .map(|p| p.bind(args))
+            .map(|p| p.bind(get_argument))
             .collect::<Vec<_>>();
-        self.body.bind(&body_args)
+        self.body.bind(&mut |param_idx| {
+            body_args.get(usize::from(param_idx)).cloned()
+        })
     }
 
     fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
@@ -62,6 +60,16 @@ impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
         self.spec.as_ref()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Tgt>),
+    {
+        for param in &self.parameters {
+            param.visit_params(visitor);
+        }
+        self.body.visit_params(visitor);
     }
 
     fn default_child(&self) -> Option<usize> {

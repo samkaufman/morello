@@ -600,7 +600,7 @@ fn tile_to_apply_err(err: TileError) -> ApplyError {
 mod tests {
     use super::*;
     use crate::{
-        imp::visit_leaves,
+        imp::ImplNode,
         memorylimits::MemVec,
         spec::arb_canonical_spec,
         target::{ArmTarget, X86Target},
@@ -685,7 +685,7 @@ mod tests {
             match action.apply(&spec) {
                 Ok(rewritten) => {
                     let mut mismatch: Option<SpecApp<_>> = None;
-                    visit_leaves(&rewritten, &mut |leaf| {
+                    rewritten.visit_leaves(&mut |leaf| {
                         if let ImplNode::SpecApp(spec_app) = leaf {
                             // TODO: Do we really need this?
                             // Also skip Move sub-Specs, which can be introduced by actions other
@@ -740,7 +740,7 @@ mod tests {
                 continue;
             };
             let mut found_self = false;
-            visit_leaves(&rewritten, &mut |leaf| {
+            rewritten.visit_leaves(&mut |leaf| {
                 if let ImplNode::SpecApp(spec_app) = leaf {
                     if spec_app.0 == spec {
                         found_self = true;

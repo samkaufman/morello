@@ -37,15 +37,20 @@ pub trait View: Clone {
     // TODO: Rename
     fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar>;
 
-    /// Replace any nested [Param]s with the corresponding [View]s from `args`.
+    /// Replace any nested [Param]s with the corresponding [View]s from the given
+    /// function.
     #[must_use]
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>;
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>)
+        -> ViewE<Self::Tgt>;
 
     fn to_param(&self) -> Option<&Param<Self::Tgt>> {
         None
     }
+
+    /// Visit parameters from this View using the provided visitor function.
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>);
 }
 
 // TODO: Replace with an impl on all smart pointers? Maybe a macro?
@@ -71,11 +76,11 @@ where
         (**self).make_buffer_indexing_expr_with_layout(layout)
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
-        (*self).clone().bind(args)
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
+        (*self).clone().bind(get_argument)
     }
 
     fn to_param(&self) -> Option<&Param<Self::Tgt>> {
@@ -88,6 +93,13 @@ where
 
     fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
         (**self).make_buffer_indexing_expr()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        (**self).visit_params(visitor)
     }
 }
 
@@ -113,11 +125,11 @@ where
         (**self).make_buffer_indexing_expr_with_layout(layout)
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
-        (*self).clone().bind(args)
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
+        (*self).clone().bind(get_argument)
     }
 
     fn to_param(&self) -> Option<&Param<Self::Tgt>> {
@@ -130,6 +142,13 @@ where
 
     fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
         (**self).make_buffer_indexing_expr()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        (**self).visit_params(visitor)
     }
 }
 
@@ -155,11 +174,11 @@ where
         (**self).make_buffer_indexing_expr_with_layout(layout)
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
-        (*self).clone().bind(args)
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
+        (*self).clone().bind(get_argument)
     }
 
     fn to_param(&self) -> Option<&Param<Self::Tgt>> {
@@ -172,6 +191,13 @@ where
 
     fn make_buffer_indexing_expr(&self) -> NonAffineExpr<BufferVar> {
         (**self).make_buffer_indexing_expr()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        (**self).visit_params(visitor)
     }
 }
 
@@ -313,19 +339,19 @@ impl<Tgt: Target> View for ViewE<Tgt> {
         }
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         match self {
-            ViewE::Tensor(tensor) => tensor.bind(args),
-            ViewE::Param(param) => param.bind(args),
-            ViewE::CacheView(cache_view) => cache_view.bind(args),
-            ViewE::Tile(tile) => tile.bind(args),
-            ViewE::BoundaryTile(boundary_tile) => boundary_tile.bind(args),
-            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.bind(args),
-            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.bind(args),
-            ViewE::TransposeView(transpose_view) => transpose_view.bind(args),
+            ViewE::Tensor(tensor) => tensor.bind(get_argument),
+            ViewE::Param(param) => param.bind(get_argument),
+            ViewE::CacheView(cache_view) => cache_view.bind(get_argument),
+            ViewE::Tile(tile) => tile.bind(get_argument),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.bind(get_argument),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.bind(get_argument),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.bind(get_argument),
+            ViewE::TransposeView(transpose_view) => transpose_view.bind(get_argument),
         }
     }
 
@@ -367,6 +393,22 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.to_param(),
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.to_param(),
             ViewE::TransposeView(transpose_view) => transpose_view.to_param(),
+        }
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        match self {
+            ViewE::Tensor(tensor) => tensor.visit_params(visitor),
+            ViewE::Param(param) => param.visit_params(visitor),
+            ViewE::CacheView(cache_view) => cache_view.visit_params(visitor),
+            ViewE::Tile(tile) => tile.visit_params(visitor),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.visit_params(visitor),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.visit_params(visitor),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.visit_params(visitor),
+            ViewE::TransposeView(transpose_view) => transpose_view.visit_params(visitor),
         }
     }
 }
@@ -515,13 +557,13 @@ where
         }
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         match self {
-            ParamOr::Param(p) => p.borrow().clone().bind(args),
-            ParamOr::Other(v) => v.bind(args),
+            ParamOr::Param(p) => p.borrow().clone().bind(get_argument),
+            ParamOr::Other(v) => v.bind(get_argument),
         }
     }
 
@@ -529,6 +571,16 @@ where
         match self {
             ParamOr::Param(p) => Some(p.borrow()),
             ParamOr::Other(v) => v.to_param(),
+        }
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        match self {
+            ParamOr::Param(p) => p.borrow().visit_params(visitor),
+            ParamOr::Other(v) => v.visit_params(visitor),
         }
     }
 }
@@ -651,15 +703,22 @@ impl<Tgt: Target> View for Param<Tgt> {
         todo!()
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
-        args[usize::from(self.0)].clone().into()
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
+        get_argument(self.0).unwrap_or_else(|| self.into())
     }
 
     fn to_param(&self) -> Option<&Param<Tgt>> {
         Some(self)
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Tgt>),
+    {
+        visitor(self.0, &self.1);
     }
 }
 
@@ -694,11 +753,18 @@ impl<Tgt: Target> View for Tensor<Tgt> {
         layout.buffer_indexing_expr(self.1, self.shape())
     }
 
-    fn bind<A>(self, _args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        _get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         self.into()
+    }
+
+    fn visit_params<F>(&self, _visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        // Tensors have no parameters
     }
 }
 
@@ -717,16 +783,23 @@ impl<V: View> View for CacheView<V> {
         &self.spec
     }
 
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        self.source.visit_params(visitor);
+    }
+
     fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
         self.source.make_buffer_indexing_expr_with_layout(layout)
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         ViewE::from(CacheView {
-            source: self.source.bind(args),
+            source: self.source.bind(get_argument),
             spec: self.spec.clone(),
             unique_id: self.unique_id,
         })
@@ -843,18 +916,25 @@ impl<T: View> View for Tile<T> {
         self.compose_buffer_indexing_expr(self.view.make_buffer_indexing_expr_with_layout(layout))
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         ViewE::from(Tile {
-            view: self.view.bind(args),
+            view: self.view.bind(get_argument),
             unique_id: self.unique_id,
             shape: self.shape,
             step_sizes: self.step_sizes,
             expr_term_id: self.expr_term_id,
             spec: self.spec,
         })
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        self.view.visit_params(visitor);
     }
 }
 
@@ -877,16 +957,23 @@ impl<T: View> View for SqueezeDimsView<T> {
         todo!()
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         ViewE::from(SqueezeDimsView {
-            inner: self.inner.bind(args),
+            inner: self.inner.bind(get_argument),
             dims: self.dims,
             spec: self.spec,
             unique_id: self.unique_id,
         })
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        self.inner.visit_params(visitor);
     }
 }
 
@@ -909,15 +996,22 @@ impl<T: View> View for OnePrefixView<T> {
         todo!()
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         ViewE::from(OnePrefixView {
-            inner: self.inner.bind(args),
+            inner: self.inner.bind(get_argument),
             spec: self.spec,
             unique_id: self.unique_id,
         })
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        self.inner.visit_params(visitor);
     }
 }
 
@@ -940,15 +1034,22 @@ impl<T: View> View for TransposeView<T> {
         todo!()
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         ViewE::from(TransposeView {
-            inner: self.inner.bind(args),
+            inner: self.inner.bind(get_argument),
             spec: self.spec,
             unique_id: self.unique_id,
         })
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        self.inner.visit_params(visitor);
     }
 }
 
@@ -1001,17 +1102,24 @@ impl<T: View> View for BoundaryTile<T> {
         self.compose_buffer_indexing_expr(self.view.make_buffer_indexing_expr_with_layout(layout))
     }
 
-    fn bind<A>(self, args: &[A]) -> ViewE<Self::Tgt>
-    where
-        A: View<Tgt = Self::Tgt> + Into<ViewE<Self::Tgt>>,
-    {
+    fn bind(
+        self,
+        get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Self::Tgt>>,
+    ) -> ViewE<Self::Tgt> {
         ViewE::from(BoundaryTile {
-            view: self.view.bind(args),
+            view: self.view.bind(get_argument),
             unique_id: self.unique_id,
             shape: self.shape,
             offsets: self.offsets,
             expr_term_id: self.expr_term_id,
             spec: self.spec,
         })
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Self::Tgt>),
+    {
+        self.view.visit_params(visitor);
     }
 }

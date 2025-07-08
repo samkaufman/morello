@@ -61,10 +61,6 @@ impl<A: View> SpecApp<A> {
 impl<A: View> Impl<A::Tgt> for SpecApp<A> {
     type BindOut = SpecApp<ViewE<A::Tgt>>;
 
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<A::Tgt>> + '_> {
-        Box::new(self.1.iter().map(|p| p.spec()))
-    }
-
     fn children(&self) -> &[ImplNode<A::Tgt>] {
         &[]
     }
@@ -83,9 +79,9 @@ impl<A: View> Impl<A::Tgt> for SpecApp<A> {
         self.clone()
     }
 
-    fn bind(self, args: &[ViewE<A::Tgt>]) -> Self::BindOut {
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<A::Tgt>>) -> Self::BindOut {
         debug_assert_eq!(self.0 .0.operand_count(), self.1.len());
-        SpecApp(self.0, self.1.into_iter().map(|a| a.bind(args)).collect())
+        SpecApp(self.0, self.1.into_iter().map(|a| a.bind(get_argument)).collect())
     }
 
     fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
@@ -103,6 +99,15 @@ impl<A: View> Impl<A::Tgt> for SpecApp<A> {
 
     fn spec(&self) -> Option<&Spec<A::Tgt>> {
         Some(self.0.borrow())
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<A::Tgt>),
+    {
+        for arg in &self.1 {
+            arg.visit_params(visitor);
+        }
     }
 }
 

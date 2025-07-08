@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
@@ -9,12 +7,12 @@ use crate::target::Target;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Tensor, View, ViewE};
 use itertools::Itertools as _;
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct Pipeline<Tgt: Target> {
     pub stages: Vec<ImplNode<Tgt>>, // all stages are [ImplNode::SpecApp]s
     pub wirings: Vec<StageWiring<Tgt>>,
-    pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
 }
 
@@ -25,10 +23,6 @@ pub struct StageWiring<Tgt: Target> {
 
 impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     type BindOut = Self;
-
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-        Box::new(self.parameters.iter())
-    }
 
     fn children(&self) -> &[ImplNode<Tgt>] {
         &self.stages
@@ -67,14 +61,13 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
         let new_impl = Pipeline {
             stages: new_children.collect(),
             wirings: self.wirings.clone(),
-            parameters: self.parameters.clone(),
             spec: self.spec.clone(),
         };
         assert_eq!(new_impl.stages.len(), self.stages.len());
         new_impl
     }
 
-    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
         debug_assert_eq!(self.stages.len(), self.wirings.len() + 1);
         let new_wirings = self
             .wirings
@@ -84,7 +77,8 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
                     .intermediate_tensors
                     .into_iter()
                     .map(|tensor| {
-                        let ViewE::Tensor(tensor) = Rc::unwrap_or_clone(tensor).bind(args) else {
+                        let ViewE::Tensor(tensor) = Rc::unwrap_or_clone(tensor).bind(get_argument)
+                        else {
                             unreachable!();
                         };
                         Rc::new(tensor)
@@ -96,10 +90,9 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
             stages: self
                 .stages
                 .iter()
-                .map(|stage| stage.clone().bind(args))
+                .map(|stage| stage.clone().bind(&mut |param_idx| get_argument(param_idx)))
                 .collect(),
             wirings: new_wirings,
-            parameters: self.parameters,
             spec: self.spec,
         }
     }
@@ -117,5 +110,14 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
         self.spec.as_ref()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Tgt>),
+    {
+        for child in self.children() {
+            child.visit_params(visitor);
+        }
     }
 }

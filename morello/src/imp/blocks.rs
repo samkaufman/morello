@@ -10,17 +10,12 @@ use crate::views::ViewE;
 #[derive(Debug, Clone)]
 pub struct Block<Tgt: Target> {
     pub stages: Vec<ImplNode<Tgt>>,
-    pub parameters: Vec<TensorSpec<Tgt>>,
     pub spec: Option<Spec<Tgt>>,
     pub default_child: Option<usize>,
 }
 
 impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
     type BindOut = Self;
-
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<Tgt>> + '_> {
-        Box::new(self.parameters.iter())
-    }
 
     fn children(&self) -> &[ImplNode<Tgt>] {
         &self.stages
@@ -49,15 +44,14 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
         debug_assert_eq!(stages.len(), self.stages.len());
         Self {
             stages,
-            parameters: self.parameters.clone(),
             spec: self.spec.clone(),
             default_child: self.default_child,
         }
     }
 
-    fn bind(self, args: &[ViewE<Tgt>]) -> Self::BindOut {
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
         Self {
-            stages: self.stages.into_iter().map(|s| s.bind(args)).collect(),
+            stages: self.stages.into_iter().map(|s| s.bind(get_argument)).collect(),
             ..self
         }
     }
@@ -68,5 +62,14 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
 
     fn spec(&self) -> Option<&Spec<Tgt>> {
         self.spec.as_ref()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<Tgt>),
+    {
+        for child in self.children() {
+            child.visit_params(visitor);
+        }
     }
 }

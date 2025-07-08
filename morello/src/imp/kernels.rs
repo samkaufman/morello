@@ -19,14 +19,6 @@ pub struct KernelApp<A: View> {
 impl<A: View> Impl<A::Tgt> for KernelApp<A> {
     type BindOut = KernelApp<ViewE<A::Tgt>>;
 
-    fn parameters(&self) -> Box<dyn Iterator<Item = &TensorSpec<A::Tgt>> + '_> {
-        debug_assert_eq!(
-            usize::from(self.kernel_type.argument_count()),
-            self.arguments.len()
-        );
-        Box::new(self.arguments.iter().map(|param| param.spec()))
-    }
-
     fn children(&self) -> &[ImplNode<A::Tgt>] {
         &[]
     }
@@ -45,13 +37,13 @@ impl<A: View> Impl<A::Tgt> for KernelApp<A> {
         self.clone()
     }
 
-    fn bind(self, args: &[ViewE<A::Tgt>]) -> Self::BindOut {
+    fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<A::Tgt>>) -> Self::BindOut {
         debug_assert_eq!(
             usize::from(self.kernel_type.argument_count()),
             self.arguments.len()
         );
         KernelApp {
-            arguments: self.arguments.into_iter().map(|a| a.bind(args)).collect(),
+            arguments: self.arguments.into_iter().map(|a| a.bind(get_argument)).collect(),
             kernel_type: self.kernel_type,
             spec: self.spec,
         }
@@ -69,6 +61,15 @@ impl<A: View> Impl<A::Tgt> for KernelApp<A> {
 
     fn spec(&self) -> Option<&Spec<A::Tgt>> {
         self.spec.as_ref()
+    }
+
+    fn visit_params<F>(&self, visitor: &mut F)
+    where
+        F: FnMut(u8, &TensorSpec<A::Tgt>),
+    {
+        for arg in &self.arguments {
+            arg.visit_params(visitor);
+        }
     }
 }
 

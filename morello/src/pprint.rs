@@ -1,10 +1,8 @@
 use crate::cost::Cost;
-use crate::imp::ImplNode;
+use crate::imp::{Impl, ImplNode};
 use crate::nameenv::NameEnv;
 use crate::target::Target;
 use crate::utils::indent;
-use crate::views::ViewE;
-use crate::{imp::Impl, views::Param};
 
 use by_address::ByThinAddress;
 use prettytable::{self, format, row, Cell};
@@ -59,13 +57,7 @@ where
     };
     table.set_titles(titles);
 
-    let args = root
-        .parameters()
-        .enumerate()
-        .map(|(i, s)| ViewE::from(Param::new(i.try_into().unwrap(), s.clone())))
-        .collect::<Vec<_>>();
-
-    let beta_subbed = root.clone().bind(&args);
+    let beta_subbed = root.clone().bind(&mut |_| None);
     pprint_inner(
         &mut table,
         &beta_subbed,

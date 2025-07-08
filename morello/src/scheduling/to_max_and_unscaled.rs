@@ -94,7 +94,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
             wirings: vec![StageWiring {
                 intermediate_tensors: vec![Rc::new(max_tensor)],
             }],
-            parameters: operands,
             spec: Some(spec.clone()),
         }))
     }

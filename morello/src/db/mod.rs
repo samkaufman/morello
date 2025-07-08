@@ -1163,7 +1163,7 @@ fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
 mod tests {
     use super::*;
     use crate::{
-        imp::visit_leaves,
+        imp::ImplNode,
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
         spec::arb_canonical_spec,
@@ -1521,7 +1521,7 @@ mod tests {
     ) -> Decision<Tgt> {
         let mut children = Vec::new();
         let mut unsat = false;
-        visit_leaves(partial_impl, &mut |leaf| {
+        partial_impl.visit_leaves(&mut |leaf| {
             if let ImplNode::SpecApp(spec_app) = leaf {
                 let cd = recursively_decide_actions_with_visited(&spec_app.0, visited);
                 if cd.actions_costs.is_empty() {

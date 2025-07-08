@@ -3249,7 +3249,7 @@ pub mod __private {
 mod tests {
     use super::*;
     use crate::grid::general::AsBimap;
-    use crate::imp::{visit_leaves, Impl, ImplNode};
+    use crate::imp::{Impl, ImplNode};
     use crate::layout::row_major;
     use crate::memorylimits::{arb_memorylimits_ext, MemVec, MemoryAllocation};
     use crate::scheduling::tiling::TileOut;
@@ -3746,7 +3746,7 @@ mod tests {
                 let Ok(applied) = action.apply(&spec) else {
                     return;
                 };
-                visit_leaves(&applied, &mut |leaf| {
+                applied.visit_leaves(&mut |leaf| {
                     if let ImplNode::SpecApp(spec_app) = leaf {
                         assert!(
                             spec_app.0.is_canonical(),
@@ -3871,7 +3871,7 @@ mod tests {
                 None
             );
             let spec_parameters = compose_spec.0.parameters();
-            let pipeline_parameters = pipeline.parameters().cloned().collect::<Vec<_>>();
+            let pipeline_parameters = pipeline.collect_unbound_parameters();
             prop_assert_eq!(spec_parameters, pipeline_parameters);
         }
     }
@@ -3910,7 +3910,7 @@ mod tests {
             let Ok(applied) = action.apply(spec) else {
                 return;
             };
-            visit_leaves(&applied, &mut |leaf| {
+            applied.visit_leaves(&mut |leaf| {
                 if let ImplNode::SpecApp(spec_app) = leaf {
                     assert!(
                         spec.0 != spec_app.0 .0 || spec_app.0 .1 <= spec.1,

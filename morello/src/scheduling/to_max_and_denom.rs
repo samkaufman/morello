@@ -62,7 +62,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
 
         Ok(ImplNode::Block(Block {
             stages: vec![max_app, denom_app],
-            parameters: operands,
             spec: Some(spec.clone()),
             default_child: None,
         }))

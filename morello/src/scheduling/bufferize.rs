@@ -108,7 +108,6 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
 
         Ok(ImplNode::Pipeline(Pipeline {
             stages: vec![inner_compose, outer_compose],
-            parameters: spec.0.parameters(),
             wirings: vec![StageWiring {
                 intermediate_tensors: vec![Rc::new(intermediate_tensor)],
             }],

@@ -8,8 +8,7 @@ use crate::codegen::clang::clang_path;
 use crate::codegen::cpu::CpuCodeGenerator;
 use crate::color::do_color;
 use crate::common::Dtype;
-use crate::imp::Impl;
-use crate::imp::ImplNode;
+use crate::imp::{Impl, ImplNode};
 use crate::pprint::ImplPrintStyle;
 use crate::target::CpuTarget;
 use crate::target::{Target, TargetId};
@@ -169,17 +168,21 @@ where
         thread_style: CpuCodeGenThreadStyle,
         out: &mut W,
     ) -> fmt::Result {
-        let top_arg_tensors = self
-            .parameters()
-            .map(|parameter| Rc::new(Tensor::new(parameter.clone())))
+        // TODO: Avoid this clone.
+        let bound = self.clone().bind(&mut |_| None); // Apply internal bindings.
+
+        let top_arg_tensors = bound
+            .collect_unbound_parameters()
+            .into_iter()
+            .map(|parameter| Rc::new(Tensor::new(parameter)))
             .collect::<Vec<_>>();
         let mut generator = CpuCodeGenerator::<Tgt>::new();
         generator.thread_style = thread_style;
         if let Some(impl_style) = include_impl {
-            generator.emit_impl_comment(self, impl_style, out)?;
+            generator.emit_impl_comment(&bound, impl_style, out)?;
             writeln!(out)?;
         }
-        generator.emit_kernel(self, &top_arg_tensors, benchmark, out)?;
+        generator.emit_kernel(&bound, &top_arg_tensors, benchmark, out)?;
         out.write_char('\n')?;
         if benchmark {
             generator.emit_benchmarking_main(&top_arg_tensors, out)?;
@@ -196,10 +199,13 @@ where
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 
+        let bound = self.clone().bind(&mut |_| None); // Apply internal bindings.
+
         let source_file = std::fs::File::create(&source_path)
             .expect("should be able to create source file in just-created temp. dir.");
         // TODO: The following may not prop. IO errors hidden by ToWriteFmt.
-        self.emit(benchmark, None, &mut ToWriteFmt(source_file))
+        bound
+            .emit(benchmark, None, &mut ToWriteFmt(source_file))
             .expect("codegen should not fail");
 
         let Some(compiler_path) = Self::compiler_path() else {
@@ -238,7 +244,11 @@ where
             binary_path,
             source_path,
             dirname,
-            self.parameters().map(|p| p.dtype()).collect(),
+            bound
+                .collect_unbound_parameters()
+                .into_iter()
+                .map(|p| p.dtype())
+                .collect(),
         ))
     }
 }
