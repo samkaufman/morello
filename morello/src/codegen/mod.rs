@@ -29,8 +29,8 @@ use tempfile::tempdir;
 pub use self::cpu::CpuCodeGenThreadStyle;
 
 const CLI_FLAGS: [&str; 4] = ["-std=gnu99", "-O3", "-rtlib=compiler-rt", "-o"];
+const OPENMP_FLAG: &str = "-fopenmp";
 
-// TODO: Add -fopenmp if we're using an OpenMP pool.
 const X86_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
 const ARM_CLI_VEC_FLAGS: [&str; 0] = [];
 const X86_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
@@ -215,8 +215,11 @@ where
         if do_color() {
             clang_cmd.arg("-fcolor-diagnostics");
         }
+        clang_cmd.args(Self::cli_vec_flags());
+        if has_openmp_parallel_loops(&bound) {
+            clang_cmd.arg(OPENMP_FLAG);
+        }
         let clang_proc_result = clang_cmd
-            .args(Self::cli_vec_flags())
             .args(CLI_FLAGS)
             .arg(binary_path.to_string_lossy().as_ref())
             .arg(source_path.to_string_lossy().as_ref())
@@ -319,6 +322,21 @@ impl RobustTimingResult {
     pub fn best_mean(&self) -> Duration {
         self.best_inner_loop_runtime() / self.inner_loop_iterations
     }
+}
+
+/// Check if an ImplNode tree contains any parallel loops that use OpenMP
+fn has_openmp_parallel_loops<Tgt: Target>(node: &ImplNode<Tgt>) -> bool {
+    if let ImplNode::Loop(loop_impl) = node {
+        if loop_impl.parallel {
+            return true;
+        }
+    }
+    for child in node.children() {
+        if has_openmp_parallel_loops(child) {
+            return true;
+        }
+    }
+    false
 }
 
 fn parse_benchmark_output(output: &str) -> Result<Duration, ()> {
