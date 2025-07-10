@@ -49,9 +49,8 @@ impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
             .iter()
             .map(|p| p.bind(get_argument))
             .collect::<Vec<_>>();
-        self.body.bind(&mut |param_idx| {
-            body_args.get(usize::from(param_idx)).cloned()
-        })
+        self.body
+            .bind(&mut |param_idx| body_args.get(usize::from(param_idx)).cloned())
     }
 
     fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {

@@ -81,7 +81,10 @@ impl<A: View> Impl<A::Tgt> for SpecApp<A> {
 
     fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<A::Tgt>>) -> Self::BindOut {
         debug_assert_eq!(self.0 .0.operand_count(), self.1.len());
-        SpecApp(self.0, self.1.into_iter().map(|a| a.bind(get_argument)).collect())
+        SpecApp(
+            self.0,
+            self.1.into_iter().map(|a| a.bind(get_argument)).collect(),
+        )
     }
 
     fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {

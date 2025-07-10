@@ -4,7 +4,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
-use crate::scheduling::{ActionSolver, ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionSolver, ActionT, ApplyError, MoveActionSolver, NotApplicableReason};
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{MemoryLevel, Target, LEVEL_COUNT};
 use crate::tensorspec::{self, TensorSpec};
@@ -115,13 +115,14 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
         )?;
         let base_main_cost = move_cost(plan.outer_moved_operand_spec, &plan.new_spec);
         let allocation = alloc_memory_allocation(&plan.new_spec);
-        Ok(ActionSolver::Move {
+        Ok(MoveActionSolver {
             prologue: plan.prologue_spec,
             body: plan.new_body_spec,
             epilogue: plan.epilogue_spec,
             base_main_cost,
             allocation,
-        })
+        }
+        .into())
     }
 }
 

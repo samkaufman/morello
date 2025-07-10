@@ -51,7 +51,11 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
 
     fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
         Self {
-            stages: self.stages.into_iter().map(|s| s.bind(get_argument)).collect(),
+            stages: self
+                .stages
+                .into_iter()
+                .map(|s| s.bind(get_argument))
+                .collect(),
             ..self
         }
     }

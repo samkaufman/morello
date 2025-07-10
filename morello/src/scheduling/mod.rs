@@ -59,7 +59,7 @@ pub trait ActionT<Tgt: Target> {
     /// logic error.
     fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
         self.apply_unchecked_canon(spec)
-            .map(|applied| ActionSolver::Fallback(applied))
+            .map(|applied| ActionSolver::Fallback(Box::new(applied)))
     }
 }
 
@@ -104,18 +104,24 @@ pub enum Action<Tgt: Target> {
 
 #[derive(Debug)]
 pub enum ActionSolver<Tgt: Target> {
-    PrimitiveTileOut {
-        outer_spec: Spec<Tgt>,
-        body_specs: Vec<Spec<Tgt>>,
-    },
-    Move {
-        prologue: Option<Spec<Tgt>>,
-        body: Spec<Tgt>,
-        epilogue: Option<Spec<Tgt>>,
-        base_main_cost: MainCost,
-        allocation: MemoryAllocation,
-    },
-    Fallback(ImplNode<Tgt>),
+    PrimitiveTileOut(Box<PrimitiveTileOutSolver<Tgt>>),
+    Move(Box<MoveActionSolver<Tgt>>),
+    Fallback(Box<ImplNode<Tgt>>),
+}
+
+#[derive(Debug)]
+pub struct PrimitiveTileOutSolver<Tgt: Target> {
+    outer_spec: Spec<Tgt>,
+    body_specs: Vec<Spec<Tgt>>,
+}
+
+#[derive(Debug)]
+pub struct MoveActionSolver<Tgt: Target> {
+    prologue: Option<Spec<Tgt>>,
+    body: Spec<Tgt>,
+    epilogue: Option<Spec<Tgt>>,
+    base_main_cost: MainCost,
+    allocation: MemoryAllocation,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -146,25 +152,16 @@ pub enum NotApplicableReason {
 impl<Tgt: Target> ActionSolver<Tgt> {
     pub fn subspecs(&self) -> impl Iterator<Item = Spec<Tgt>> {
         match self {
-            ActionSolver::PrimitiveTileOut {
-                outer_spec: _,
-                body_specs,
-            } => {
+            ActionSolver::PrimitiveTileOut(solver) => {
                 // TODO: Avoid this clone
-                body_specs.clone().into_iter()
+                solver.body_specs.clone().into_iter()
             }
-            ActionSolver::Move {
-                prologue,
-                body,
-                epilogue,
-                base_main_cost: _,
-                allocation: _,
-            } => {
+            ActionSolver::Move(move_solver) => {
                 // TODO: Avoid these clones. Return an iterator of references.
                 let mut v: Vec<Spec<Tgt>> = Vec::with_capacity(3);
-                v.extend(prologue.clone());
-                v.push(body.clone());
-                v.extend(epilogue.clone());
+                v.extend(move_solver.prologue.clone());
+                v.push(move_solver.body.clone());
+                v.extend(move_solver.epilogue.clone());
                 v.into_iter()
             }
             ActionSolver::Fallback(partial_impl) => {
@@ -180,16 +177,14 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         I: Iterator<Item = Cost>,
     {
         match self {
-            ActionSolver::PrimitiveTileOut {
-                outer_spec,
-                body_specs,
-            } => {
-                if body_specs.is_empty() {
+            ActionSolver::PrimitiveTileOut(solver) => {
+                if solver.body_specs.is_empty() {
                     unreachable!("PrimitiveTileOut should have at least one body spec");
                 }
 
-                let parallel = !outer_spec.0.serial_only() && body_specs[0].0.serial_only();
-                match &outer_spec.0 {
+                let parallel =
+                    !solver.outer_spec.0.serial_only() && solver.body_specs[0].0.serial_only();
+                match &solver.outer_spec.0 {
                     LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ:
@@ -207,12 +202,12 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                                 ..
                             },
                             ..,
-                        ) = &body_specs[0].0
+                        ) = &solver.body_specs[0].0
                         else {
                             unreachable!();
                         };
 
-                        let mut child_main_costs = Vec::with_capacity(body_specs.len());
+                        let mut child_main_costs = Vec::with_capacity(solver.body_specs.len());
                         let first_cost = child_costs.next().unwrap();
                         let mut max_depth = 0;
                         child_main_costs.push(first_cost.main);
@@ -220,7 +215,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                             child_main_costs.push(child_cost.main);
                             max_depth = max_depth.max(child_cost.depth);
                         }
-                        debug_assert_eq!(child_main_costs.len(), body_specs.len());
+                        debug_assert_eq!(child_main_costs.len(), solver.body_specs.len());
 
                         // per-axis (steps, full_steps) pairs for cost dispatch
                         let dims: Vec<(u32, u32)> = spec_shape
@@ -238,14 +233,8 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     _ => unreachable!(),
                 }
             }
-            ActionSolver::Move {
-                prologue: _,
-                body: _,
-                epilogue: _,
-                base_main_cost,
-                allocation,
-            } => {
-                let mut main = *base_main_cost;
+            ActionSolver::Move(move_solver) => {
+                let mut main = move_solver.base_main_cost;
                 let mut child_peaks = vec![];
                 let mut depth = 0;
                 for child_cost in child_costs {
@@ -255,7 +244,8 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                 }
                 depth += 1;
                 // TODO: Is snap_up really needed or can we bake this into MemVec?
-                let peaks = allocation
+                let peaks = move_solver
+                    .allocation
                     .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
                     .snap_up_for_target::<Tgt>(false);
                 Cost { main, peaks, depth }
@@ -325,6 +315,30 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         }
 
         Ok(new_spec)
+    }
+}
+
+impl<Tgt: Target> From<MoveActionSolver<Tgt>> for ActionSolver<Tgt> {
+    fn from(move_solver: MoveActionSolver<Tgt>) -> Self {
+        ActionSolver::Move(Box::new(move_solver))
+    }
+}
+
+impl<Tgt: Target> From<Box<MoveActionSolver<Tgt>>> for ActionSolver<Tgt> {
+    fn from(move_solver: Box<MoveActionSolver<Tgt>>) -> Self {
+        ActionSolver::Move(move_solver)
+    }
+}
+
+impl<Tgt: Target> From<PrimitiveTileOutSolver<Tgt>> for ActionSolver<Tgt> {
+    fn from(tile_out_solver: PrimitiveTileOutSolver<Tgt>) -> Self {
+        ActionSolver::PrimitiveTileOut(Box::new(tile_out_solver))
+    }
+}
+
+impl<Tgt: Target> From<Box<PrimitiveTileOutSolver<Tgt>>> for ActionSolver<Tgt> {
+    fn from(tile_out_solver: Box<PrimitiveTileOutSolver<Tgt>>) -> Self {
+        ActionSolver::PrimitiveTileOut(tile_out_solver)
     }
 }
 

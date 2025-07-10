@@ -43,7 +43,11 @@ impl<A: View> Impl<A::Tgt> for KernelApp<A> {
             self.arguments.len()
         );
         KernelApp {
-            arguments: self.arguments.into_iter().map(|a| a.bind(get_argument)).collect(),
+            arguments: self
+                .arguments
+                .into_iter()
+                .map(|a| a.bind(get_argument))
+                .collect(),
             kernel_type: self.kernel_type,
             spec: self.spec,
         }

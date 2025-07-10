@@ -6,7 +6,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::scheduling::{
     check_tile_out_applies, collect_nested_specs, tile_to_apply_err, ActionSolver, ActionT,
-    ApplyError, NotApplicableReason,
+    ApplyError, NotApplicableReason, PrimitiveTileOutSolver,
 };
 use crate::spec::{
     CanonicalizeError, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
@@ -160,10 +160,11 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
                             let slow_path_impl = self.apply_unchecked_canon(spec)?;
                             let mut slow_path_subspecs = Vec::new();
                             collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-                            return Ok(ActionSolver::PrimitiveTileOut {
+                            return Ok(PrimitiveTileOutSolver {
                                 outer_spec: spec.clone(),
                                 body_specs: slow_path_subspecs,
-                            });
+                            }
+                            .into());
                         } else {
                             let main_body_spec = ActionSolver::tiled_subspec_fast(
                                 [(0, 0), (1, 1), (3, 2)].into_iter(),
@@ -172,10 +173,11 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
                                 parallel,
                             )?;
 
-                            return Ok(ActionSolver::PrimitiveTileOut {
+                            return Ok(PrimitiveTileOutSolver {
                                 outer_spec: spec.clone(),
                                 body_specs: vec![main_body_spec],
-                            });
+                            }
+                            .into());
                         }
                     }
                     PrimitiveSpecType::Move
@@ -187,10 +189,11 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
                             let slow_path_impl = self.apply_unchecked_canon(spec)?;
                             let mut slow_path_subspecs = Vec::new();
                             collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-                            return Ok(ActionSolver::PrimitiveTileOut {
+                            return Ok(PrimitiveTileOutSolver {
                                 outer_spec: spec.clone(),
                                 body_specs: slow_path_subspecs,
-                            });
+                            }
+                            .into());
                         } else {
                             let rank = basics.spec_shape.len();
                             let main_body_spec = ActionSolver::tiled_subspec_fast(
@@ -200,10 +203,11 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
                                 parallel,
                             )?;
 
-                            return Ok(ActionSolver::PrimitiveTileOut {
+                            return Ok(PrimitiveTileOutSolver {
                                 outer_spec: spec.clone(),
                                 body_specs: vec![main_body_spec],
-                            });
+                            }
+                            .into());
                         }
                     }
                     _ => {}
@@ -213,7 +217,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         };
 
         self.apply_unchecked_canon(spec)
-            .map(|applied| ActionSolver::Fallback(applied))
+            .map(|applied| ActionSolver::Fallback(Box::new(applied)))
     }
 }
 
