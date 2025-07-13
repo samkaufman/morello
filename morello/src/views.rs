@@ -1,5 +1,4 @@
 use crate::{
-    alignment::aligned_approx,
     common::{DimSize, Shape},
     expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
     layout::{BufferVar, Layout, LayoutError},
@@ -246,7 +245,6 @@ pub trait ViewExt: View {
         let spec = TensorSpec::new_canon(
             shape,
             self.spec().dtype(),
-            self.spec().aligned(),
             self.spec().level(),
             transposed_layout,
             self.spec().vector_size(),
@@ -643,8 +641,7 @@ impl<V: View> BoundaryTile<V> {
         let unique_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
         // For boundary tiles, we use the shape as step sizes since it represents the actual boundary region size
-        let aligned = aligned_approx(&shape, &shape, view.spec())?;
-        spec.shrink(&shape, aligned)?;
+        spec.shrink(&shape)?;
         Ok(Self {
             shape,
             offsets,
@@ -811,8 +808,7 @@ impl<V: View> Tile<V> {
         let expr_term_id = OpaqueSymbol::new();
         let unique_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
-        let aligned = aligned_approx(&shape, &step_sizes, view.spec())?;
-        spec.shrink(&shape, aligned)?;
+        spec.shrink(&shape)?;
         Ok(Self {
             shape,
             step_sizes,

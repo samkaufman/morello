@@ -972,8 +972,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let dtype = first_spec.dtype();
                         let vtype = get_vector(Tgt::vec_types(), dtype, vector_size);
-                        let itype = vtype.native_type_name;
-                        let aligned = arguments.iter().all(|a| a.spec().aligned());
                         let vector_count = first_spec.volume().get() / vector_size.get();
 
                         for vector_idx in 0..vector_count {
@@ -990,29 +988,17 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 })
                                 .collect::<Vec<_>>();
 
-                            if aligned {
-                                writeln!(
-                                    w,
-                                    "{}*({} *)({}) = (*({} *)({}));  /* VectorAssign */",
-                                    indent(depth),
-                                    itype,
-                                    exprs[1],
-                                    itype,
-                                    exprs[0]
-                                )?;
-                            } else {
-                                writeln!(
-                                    w,
-                                    "{0}{1}(({2} *)({3}), {4}(({5} *)({6})));  /* VectorAssign */",
-                                    indent(depth),
-                                    vtype.store_fn,
-                                    vtype.store_fn_arg0,
-                                    exprs[1],
-                                    vtype.load_fn,
-                                    vtype.load_fn_arg0,
-                                    exprs[0],
-                                )?;
-                            }
+                            writeln!(
+                                w,
+                                "{0}{1}(({2} *)({3}), {4}(({5} *)({6})));  /* VectorAssign */",
+                                indent(depth),
+                                vtype.store_fn,
+                                vtype.store_fn_arg0,
+                                exprs[1],
+                                vtype.load_fn,
+                                vtype.load_fn_arg0,
+                                exprs[0],
+                            )?;
                         }
                         Ok(())
                     }

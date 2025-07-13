@@ -1152,8 +1152,8 @@ mod tests {
     fn test_synthesis_puts_all_dependencies_of_optimal_solution() {
         shared_test_synthesis_puts_all_dependencies_of_optimal_solution(lspec!(Move(
             [2, 2],
-            (u8, L1, row_major, ua),
-            (u8, RF, row_major, ua),
+            (u8, L1, row_major),
+            (u8, RF, row_major),
             serial
         )));
     }
@@ -1180,7 +1180,7 @@ mod tests {
     #[test]
     fn test_synthesis_at_peak_memory_yields_same_decision_1() {
         let spec = Spec::<X86Target>(
-            lspec!(FillZero([2, 2, 2, 2], (u8, GL, row_major, c0, ua))),
+            lspec!(FillZero([2, 2, 2, 2], (u8, GL, row_major, c0))),
             MemoryLimits::Standard(MemVec::new([0, 16, 64, 32])),
         );
 

@@ -12,7 +12,6 @@ pub struct ToAccum {}
 impl<Tgt: Target> ActionT<Tgt> for ToAccum {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
-        let operands = logical_spec.parameters();
 
         let head = match logical_spec {
             LogicalSpec::Primitive(basics, ..) => basics,

@@ -226,7 +226,6 @@ where
                     .map(|layout| {
                         debug_assert!(layout.is_fully_contiguous()); // row_major should be contig.
                         TensorSpecAux::<Tgt> {
-                            aligned: true,
                             level: GL,
                             layout,
                             vector_size: None,

@@ -157,7 +157,6 @@ fn plan_alloc<'a, Tgt: Target>(
     let mut new_spec = TensorSpec::<Tgt>::new_noncanon(
         outer_moved_operand_spec.shape().into(),
         destination_dtype,
-        outer_moved_operand_spec.aligned(),
         destination_level,
         destination_layout_canonicalized,
         destination_vector_size,
@@ -166,7 +165,6 @@ fn plan_alloc<'a, Tgt: Target>(
     // If this is anything other than a simple cache miss, a new buffer will be allocated, so that
     // buffer will be aligned and fully contiguous.
     if !is_cache_miss {
-        new_spec.set_aligned(true);
         new_spec
             .canonicalize()
             .map_err(|canon_error| match canon_error {

@@ -112,7 +112,6 @@ fn scalar_tensor<Tgt: Target>(
         shape: Shape::from_slice(spec_shape),
         dtype,
         aux: TensorSpecAux {
-            aligned: true,
             level: max_level,
             layout: max_layout,
             vector_size: max_vector_size,

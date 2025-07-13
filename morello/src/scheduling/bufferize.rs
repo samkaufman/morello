@@ -52,7 +52,6 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             TensorSpec::new_canon_checked(
                 consumer.input_shape(0),
                 consumer.input_dtype(0),
-                true,
                 self.level,
                 self.layout.clone(),
                 self.vector_size,
@@ -149,7 +148,6 @@ mod tests {
             dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
         };
         let aux = TensorSpecAux {
-            aligned: true,
             level: CpuMemoryLevel::GL,
             layout: row_major(3),
             vector_size: None,

@@ -29,7 +29,6 @@ fn main() {
         },
         vec![
             TensorSpecAux {
-                aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout: row_major(RANK),
                 vector_size: None,

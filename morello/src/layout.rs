@@ -641,12 +641,8 @@ impl Layout {
         false
     }
 
-    // TODO: Make function private. (aligned_approx needs this.)
     // TODO: Return iterator instead?
-    pub(crate) fn expand_physical_shape(
-        &self,
-        logical_shape: &[DimSize],
-    ) -> Result<Shape, LayoutError> {
+    fn expand_physical_shape(&self, logical_shape: &[DimSize]) -> Result<Shape, LayoutError> {
         let Layout { dims, contig: _ } = self;
         let mut physical_shape = Shape::with_capacity(dims.len());
         let mut logical_shape_remaining: SmallVec<[_; 5]> =

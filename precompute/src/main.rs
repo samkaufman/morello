@@ -409,7 +409,6 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
     bounds.extend({
         let layout = row_major(4);
         let a = TensorSpecAux {
-            aligned: true,
             level: CpuMemoryLevel::GL,
             layout,
             vector_size: None,

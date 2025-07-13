@@ -3103,34 +3103,22 @@ pub mod macros {
             $crate::lspec!(@dt_convert $dt)
         };
 
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, c0, ua ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, false)
-        };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, c0 ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false, true)
-        };
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, ua ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true, true)
-        };
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, c0, ua ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, c0 ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false, true)
-        };
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, ua ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true, true)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true)
         };
 
         // TODO: Accept contiguousnesses other than fully contig. or not at all.
         ( @tensorspecaux_inner $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr,
-          $c:literal, $a:literal ) =>
+          $c:literal ) =>
         {{
             let mut layout = $crate::layout::LayoutBuilder::build($layout, $shp);
             if $c {
@@ -3139,7 +3127,6 @@ pub mod macros {
                 layout.set_contiguous_none();
             }
             $crate::tensorspec::TensorSpecAux {
-                aligned: $a,
                 level: $level,
                 layout,
                 vector_size: ($vs).map(|x: u32| {
@@ -3273,11 +3260,10 @@ mod tests {
             [32, 2, 3, 3],
             (u8, GL, row_major),
             (i8, GL, row_major, c0),
-            (u16, GL, row_major, ua),
+            (u16, GL, row_major),
             serial
         ));
         let lhs = TensorSpecAux {
-            aligned: true,
             level: GL,
             layout: row_major(3),
             vector_size: None,
@@ -3285,13 +3271,11 @@ mod tests {
         let mut rhs_layout = row_major(3);
         rhs_layout.set_contiguous_none();
         let rhs = TensorSpecAux {
-            aligned: true,
             level: GL,
             layout: rhs_layout,
             vector_size: None,
         };
         let out = TensorSpecAux {
-            aligned: false,
             level: GL,
             layout: row_major(3),
             vector_size: None,
@@ -4073,35 +4057,30 @@ mod tests {
 
         let aux0_1_layout = row_major(3);
         let aux0_1 = TensorSpecAux {
-            aligned: true,
             level: GL,
             layout: aux0_1_layout,
             vector_size: None,
         };
         let aux1_1_layout = row_major(3);
         let aux1_1 = TensorSpecAux {
-            aligned: true,
             level: L1,
             layout: aux1_1_layout,
             vector_size: None,
         };
         let aux2_0_layout = row_major(3);
         let aux2_0 = TensorSpecAux {
-            aligned: false,
             level: GL,
             layout: aux2_0_layout,
             vector_size: None,
         };
         let aux2_1_layout = row_major(3);
         let aux2_1 = TensorSpecAux {
-            aligned: false,
             level: L1,
             layout: aux2_1_layout,
             vector_size: None,
         };
         let aux0_out_layout = row_major(3);
         let aux0_out = TensorSpecAux {
-            aligned: true,
             level: RF,
             layout: aux0_out_layout,
             vector_size: None,

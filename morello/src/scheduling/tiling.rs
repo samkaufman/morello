@@ -1,4 +1,3 @@
-use crate::alignment::aligned_approx;
 use crate::common::Dtype;
 use crate::common::{DimSize, Shape};
 use crate::imp::loops::{Loop, LoopTile};
@@ -52,8 +51,6 @@ impl TileOut {
 
 impl<Tgt: Target> ActionT<Tgt> for TileOut {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
-        // TODO: Make sure we have a test that this updates alignment correctly.
-
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
@@ -837,7 +834,8 @@ pub(crate) fn update_component_shapes<Tgt: Target>(
     Ok(())
 }
 
-/// Updates the layout and alignment of `aux`.
+// TODO: Can probably inline this function now.
+/// Updates the layout of `aux`.
 fn update_aux_for_tiling<Tgt: Target>(
     aux: &mut crate::tensorspec::TensorSpecAux<Tgt>,
     original_shape: &[DimSize],
@@ -850,9 +848,7 @@ fn update_aux_for_tiling<Tgt: Target>(
         shape: original_shape.into(),
         aux: aux.clone(),
     };
-    let aligned =
-        aligned_approx(new_shape, new_shape, &original_tensor_spec).unwrap_or(aux.aligned);
-    if let Ok(()) = original_tensor_spec.shrink(new_shape, aligned) {
+    if let Ok(()) = original_tensor_spec.shrink(new_shape) {
         *aux = original_tensor_spec.aux;
     }
 }
@@ -1018,13 +1014,11 @@ mod tests {
         let rm4 = row_major(4);
         let rm7 = row_major(7);
         let l1rm4 = TensorSpecAux {
-            aligned: false,
             level: CpuMemoryLevel::L1,
             layout: rm4.clone(),
             vector_size: None,
         };
         let rfrm4 = TensorSpecAux {
-            aligned: false,
             level: CpuMemoryLevel::RF,
             layout: rm4.clone(),
             vector_size: None,
@@ -1034,19 +1028,16 @@ mod tests {
             rfrm4.clone(),
             l1rm4,
             TensorSpecAux {
-                aligned: false,
                 level: CpuMemoryLevel::L1,
                 layout: rm7.clone(),
                 vector_size: None,
             },
             TensorSpecAux {
-                aligned: false,
                 level: CpuMemoryLevel::RF,
                 layout: rm7.clone(),
                 vector_size: None,
             },
             TensorSpecAux {
-                aligned: false,
                 level: CpuMemoryLevel::L1,
                 layout: rm7,
                 vector_size: None,
@@ -1132,7 +1123,6 @@ mod tests {
                 },
                 vec![
                     TensorSpecAux {
-                        aligned: true,
                         level: CpuMemoryLevel::GL,
                         layout: row_major(3),
                         vector_size: None,
@@ -1207,7 +1197,6 @@ mod tests {
             let original_aux = tspec.aux.clone();
             update_aux_for_tiling(&mut tspec.aux, &shape, &shape, dtype);
             prop_assert_eq!(tspec.aux.layout, original_aux.layout);
-            prop_assert_eq!(tspec.aux.aligned, original_aux.aligned);
             prop_assert_eq!(tspec.aux.level, original_aux.level);
             prop_assert_eq!(tspec.aux.vector_size, original_aux.vector_size);
         }
@@ -1226,7 +1215,6 @@ mod tests {
             dtypes: vec![Dtype::Float32, Dtype::Float32],
         };
         let aux: TensorSpecAux<X86Target> = TensorSpecAux {
-            aligned: true,
             level: CpuMemoryLevel::GL,
             layout: row_major(3),
             vector_size: None,
@@ -1266,9 +1254,9 @@ mod tests {
         let conv_spec: Spec<X86Target> = spec!(
             Conv(
                 [4, 7, 5, 8, 6, 4, 8],
-                (f32, CpuMemoryLevel::RF, row_major, ua),
-                (u8, CpuMemoryLevel::L1, row_major, ua),
-                (u8, CpuMemoryLevel::RF, row_major, ua)
+                (f32, CpuMemoryLevel::RF, row_major),
+                (u8, CpuMemoryLevel::L1, row_major),
+                (u8, CpuMemoryLevel::RF, row_major)
             ),
             [16, 16, 32768, 0]
         );

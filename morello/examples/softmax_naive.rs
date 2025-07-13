@@ -32,7 +32,6 @@ fn main() {
         layouts
             .into_iter()
             .map(|layout| TensorSpecAux {
-                aligned: true,
                 level: CpuMemoryLevel::GL,
                 layout,
                 vector_size: None,

@@ -697,7 +697,6 @@ impl CpuKernel {
                                 level: CpuMemoryLevel::VRF,
                                 layout: src_layout,
                                 vector_size: src_vs,
-                                aligned: _,
                             },
                         },
                         dest @ TensorSpec {
@@ -707,7 +706,6 @@ impl CpuKernel {
                                 level: CpuMemoryLevel::VRF,
                                 layout: dest_layout,
                                 vector_size: dest_vs,
-                                aligned: _,
                             },
                         },
                     ] if src.is_contiguous() && dest.is_contiguous()
@@ -1582,7 +1580,6 @@ where
                 dtype: Dtype::Uint8 | Dtype::Sint8,
                 aux:
                     TensorSpecAux {
-                        aligned: _,
                         level: CpuMemoryLevel::VRF,
                         layout,
                         vector_size: Some(v),
@@ -1617,7 +1614,7 @@ pub fn shared_broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemory
         if o.level() != CpuMemoryLevel::VRF {
             return false;
         }
-        if !o.aligned() || !o.is_contiguous() {
+        if !o.is_contiguous() {
             return false;
         }
         if o.volume().get() % o.vector_size().unwrap().get() != 0 {
@@ -1967,7 +1964,6 @@ mod tests {
         let arg0 = TensorSpec::new_canon(
             shape![2, 32],
             Dtype::Uint32,
-            true,
             CpuMemoryLevel::VRF,
             row_major(2),
             Some(nz!(8u32)),
@@ -1975,7 +1971,6 @@ mod tests {
         let arg1 = TensorSpec::new_canon(
             shape![2, 32],
             Dtype::Uint32,
-            true,
             CpuMemoryLevel::L1,
             row_major(2),
             None,

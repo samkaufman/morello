@@ -69,7 +69,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             shape: spec_shape.clone(),
             dtype: dtypes[0],
             aux: TensorSpecAux {
-                aligned: true,
                 level: self.exps_level,
                 layout: exps_layout_contiguous,
                 vector_size: self.exps_vector_size,
@@ -208,7 +207,6 @@ fn softmax_scalar_tensor<Tgt: Target>(
         shape: Shape::from_slice(spec_shape),
         dtype,
         aux: TensorSpecAux {
-            aligned: true,
             level: max_level,
             layout: max_layout,
             vector_size: max_vector_size,

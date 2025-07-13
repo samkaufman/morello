@@ -75,9 +75,9 @@ fn main() {
     //   alloc ad: (16×64, u32, L1) <- aa
     //     alloc ae: (64×16, u32, L1, c1) <- ab
     //       alloc af: (16×16, u32, L1, c1) <- ac
-    //         tile (ag: (1×64, u32, L1) <-[0, 2]- ad, ah: (64×1, u32, L1, c1, ua) <-[3, 1]- ae, ai: (1×1, u32, L1, ua) <-[0, 1]- af)
-    //           (Zero((1×1, u32, L1, ua), serial), [64, 1024, 4096, 0])(ai)
-    //           (MatmulAccum((1×64, u32, L1), (64×1, u32, L1, c1, ua), (1×1, u32, L1, ua), serial), [64, 1024, 4096, 0])(ag, ah, ai)
+    //         tile (ag: (1×64, u32, L1) <-[0, 2]- ad, ah: (64×1, u32, L1, c1) <-[3, 1]- ae, ai: (1×1, u32, L1) <-[0, 1]- af)
+    //           (Zero((1×1, u32, L1), serial), [64, 1024, 4096, 0])(ai)
+    //           (MatmulAccum((1×64, u32, L1), (64×1, u32, L1, c1), (1×1, u32, L1), serial), [64, 1024, 4096, 0])(ag, ah, ai)
     // ```
     //
     // Notice it has two nested sub-Specs: Zero and the MatmulAccum.  We'll need to schedule each,
@@ -110,20 +110,20 @@ fn main() {
     //     alloc ad: (16×64, u32, L1) <- aa
     //       alloc ae: (64×16, u32, L1, c1) <- ab
     //         alloc af: (16×16, u32, L1, c1) <- ac
-    //           tile (ag: (1×64, u32, L1) <-[0, 2]- ad, ah: (64×1, u32, L1, c1, ua) <-[3, 1]- ae, ai: (1×1, u32, L1, ua) <-[0, 1]- af)
+    //           tile (ag: (1×64, u32, L1) <-[0, 2]- ad, ah: (64×1, u32, L1, c1) <-[3, 1]- ae, ai: (1×1, u32, L1) <-[0, 1]- af)
     //               alloc aj: (1×1, u32, RF)
     //                 MemsetZero(aj)
     //                 ValueAssign(aj, ai)
-    //               tile (ak: (1×4, u32, L1) <-[0, 1]- ag, al: (4×1, u32, L1, c1, ua) <-[1, 2]- ah)
+    //               tile (ak: (1×4, u32, L1) <-[0, 1]- ag, al: (4×1, u32, L1, c1) <-[1, 2]- ah)
     //                 alloc am: (1×4, u32, RF)
-    //                   tile (an: (1×1, u32, L1, ua) <-[0, 1]- ak, ao: (1×1, u32, RF, ua) <-[0, 1]- am)
+    //                   tile (an: (1×1, u32, L1) <-[0, 1]- ak, ao: (1×1, u32, RF) <-[0, 1]- am)
     //                     ValueAssign(an, ao)
     //                   alloc ap: (4×1, u32, RF)
-    //                     tile (aq: (1×1, u32, L1, ua) <-[0, 1]- al, ar: (1×1, u32, RF, ua) <-[0, 1]- ap)
+    //                     tile (aq: (1×1, u32, L1) <-[0, 1]- al, ar: (1×1, u32, RF) <-[0, 1]- ap)
     //                       ValueAssign(aq, ar)
     //                     alloc as: (1×1, u32, RF)
     //                       ValueAssign(ai, as)
-    //                       tile (at: (1×1, u32, RF, ua) <-[0, 1]- am, au: (1×1, u32, RF, ua) <-[1, 2]- ap)
+    //                       tile (at: (1×1, u32, RF) <-[0, 1]- am, au: (1×1, u32, RF) <-[1, 2]- ap)
     //                         MultAdd(at, au, as)
     //                       ValueAssign(as, ai)
     //
@@ -205,7 +205,7 @@ fn main() {
 /// Specifically, this moves the Zero's tensor from L1 into registers, which introduces two
 /// sub-Specs:
 ///  Zero((1×1, u32, RF), serial)
-///  Move((1×1, u32, RF), (1×1, u32, L1, ua), serial)
+///  Move((1×1, u32, RF), (1×1, u32, L1), serial)
 /// These are then implemented with kernels which lower to `memset` and `=` respectively, like so:
 /// ```
 //  uint32_t v;

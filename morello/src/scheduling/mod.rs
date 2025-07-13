@@ -1,4 +1,3 @@
-use crate::alignment::aligned_approx;
 use crate::common::DimSize;
 use crate::cost::{Cost, MainCost};
 use crate::imp::loops::compute_loop_main_cost;
@@ -304,7 +303,6 @@ impl<Tgt: Target> ActionSolver<Tgt> {
             else {
                 todo!();
             };
-            new_aux.aligned = aligned_approx(inner.shape(), inner.shape(), &outer).unwrap();
             new_aux.layout = new_layout;
         }
 
