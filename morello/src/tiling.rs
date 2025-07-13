@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
 use crate::common::{DimSize, Shape};
-use crate::views::{Tile, TileError, View};
+use crate::views::{BoundaryTile, Tile, TileError, View};
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Tiling {
@@ -109,17 +109,64 @@ impl Tiling {
         }
     }
 
-    /// Construct a [Tile] over a given [View].
-    pub fn apply<V: View>(&self, view: V) -> Result<Tile<V>, TileError> {
-        // TODO: `apply` should also return boundary tiles.
+    /// Construct a [Tile] over a given [View], ignoring boundary regions.
+    pub fn apply_main<V: View>(&self, view: V) -> Result<Tile<V>, TileError> {
         Tile::new(self.shape.clone(), self.step_sizes.clone(), view)
+    }
+
+    /// Construct a [Tile] and any necessary [BoundaryTile]s over a given [View].
+    pub fn apply_with_boundaries<V>(
+        &self,
+        view: V,
+    ) -> Result<(Tile<V>, Vec<BoundaryTile<V>>), TileError>
+    where
+        V: View + Clone,
+    {
+        let main_tile = Tile::new(self.shape.clone(), self.step_sizes.clone(), view.clone())?;
+
+        let rank = self.shape.len();
+        let origin_shape = view.shape();
+        let mut boundary_tiles = Vec::new();
+        for dim_mask in 1..(1 << rank) {
+            let mut has_boundary = false;
+            let mut boundary_shape = self.shape.clone();
+            let mut offsets = vec![0u32; rank];
+
+            // Check each dimension to see if it's included in this combination
+            for dim in 0..rank {
+                if (dim_mask & (1 << dim)) != 0 {
+                    let boundary_size = self.boundary_size(dim as u8, origin_shape[dim]);
+                    if boundary_size > 0 {
+                        has_boundary = true;
+                        boundary_shape[dim] = DimSize::new(boundary_size).unwrap();
+
+                        let full_steps = origin_shape[dim].get() / self.step_sizes[dim].get();
+                        offsets[dim] = full_steps * self.step_sizes[dim].get();
+                    } else {
+                        has_boundary = false;
+                        break;
+                    }
+                }
+            }
+
+            if has_boundary {
+                boundary_tiles.push(BoundaryTile::new(boundary_shape, offsets, view.clone())?);
+            }
+        }
+
+        Ok((main_tile, boundary_tiles))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Dtype;
+    use crate::layout::row_major;
     use crate::shape;
+    use crate::target::{Target, X86Target};
+    use crate::tensorspec::TensorSpec;
+    use crate::views::Param;
     use itertools::Itertools;
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
@@ -239,5 +286,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_apply_with_boundaries_simple() {
+        // Tile 3x4x4 over 5x7x6 (non-multiple in every dimension)
+        let spec = TensorSpec::<X86Target>::new_canon(
+            shape![5, 7, 6],
+            Dtype::Uint32,
+            X86Target::levels()[0],
+            row_major(3),
+            None,
+        );
+        let param = Param::new(0, spec);
+        let tiling = Tiling::new_simple(shape![3, 4, 4]);
+
+        let result = tiling.apply_with_boundaries(param).unwrap();
+        let (main_tile, boundary_tiles) = result;
+        assert_eq!(boundary_tiles.len(), 7);
+
+        assert_eq!(main_tile.shape(), &[nz!(3u32), nz!(4u32), nz!(4u32)]);
+
+        let dim0_boundary = &boundary_tiles[0];
+        assert_eq!(dim0_boundary.shape(), &[nz!(2u32), nz!(4u32), nz!(4u32)]);
+        assert_eq!(dim0_boundary.offsets(), &[3, 0, 0]);
+
+        let dim1_boundary = &boundary_tiles[1];
+        assert_eq!(dim1_boundary.shape(), &[nz!(3u32), nz!(3u32), nz!(4u32)]);
+        assert_eq!(dim1_boundary.offsets(), &[0, 4, 0]);
+
+        let dim01_boundary = &boundary_tiles[2];
+        assert_eq!(dim01_boundary.shape(), &[nz!(2u32), nz!(3u32), nz!(4u32)]);
+        assert_eq!(dim01_boundary.offsets(), &[3, 4, 0]);
+
+        let dim2_boundary = &boundary_tiles[3];
+        assert_eq!(dim2_boundary.shape(), &[nz!(3u32), nz!(4u32), nz!(2u32)]);
+        assert_eq!(dim2_boundary.offsets(), &[0, 0, 4]);
+
+        let dim02_boundary = &boundary_tiles[4];
+        assert_eq!(dim02_boundary.shape(), &[nz!(2u32), nz!(4u32), nz!(2u32)]);
+        assert_eq!(dim02_boundary.offsets(), &[3, 0, 4]);
+
+        let dim12_boundary = &boundary_tiles[5];
+        assert_eq!(dim12_boundary.shape(), &[nz!(3u32), nz!(3u32), nz!(2u32)]);
+        assert_eq!(dim12_boundary.offsets(), &[0, 4, 4]);
+
+        let corner_boundary = &boundary_tiles[6];
+        assert_eq!(corner_boundary.shape(), &[nz!(2u32), nz!(3u32), nz!(2u32)]);
+        assert_eq!(corner_boundary.offsets(), &[3, 4, 4]);
+    }
+
+    #[test]
+    fn test_apply_with_boundaries_no_boundaries() {
+        // Tile 2x3 over 4x6 (multiples in all dimensions)
+        let spec = TensorSpec::<X86Target>::new_canon(
+            shape![4, 6],
+            Dtype::Uint32,
+            X86Target::levels()[0],
+            row_major(2),
+            None,
+        );
+        let param = Param::new(0, spec);
+        let tiling = Tiling::new_simple(shape![2, 3]);
+        let result = tiling.apply_with_boundaries(param).unwrap();
+        let (main_tile, boundary_tiles) = result;
+        assert_eq!(main_tile.shape(), &[nz!(2u32), nz!(3u32)]);
+        assert_eq!(boundary_tiles.len(), 0);
+    }
+
+    #[test]
+    fn test_apply_with_boundaries_some_nonmultiples() {
+        // Tile 2x4x3 over 6x7x9 (multiple in dim 0, non-multiple in dims 1 and 2)
+        let spec = TensorSpec::<X86Target>::new_canon(
+            shape![6, 7, 9],
+            Dtype::Uint32,
+            X86Target::levels()[0],
+            row_major(3),
+            None,
+        );
+        let param = Param::new(0, spec);
+        let tiling = Tiling::new_simple(shape![2, 4, 3]);
+
+        let result = tiling.apply_with_boundaries(param).unwrap();
+        let (main_tile, boundary_tiles) = result;
+
+        assert_eq!(boundary_tiles.len(), 1);
+        assert_eq!(main_tile.shape(), &[nz!(2u32), nz!(4u32), nz!(3u32)]);
+
+        let dim1_boundary = &boundary_tiles[0];
+        assert_eq!(dim1_boundary.shape(), &[nz!(2u32), nz!(3u32), nz!(3u32)]);
+        assert_eq!(dim1_boundary.offsets(), &[0, 4, 0]);
     }
 }

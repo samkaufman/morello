@@ -43,9 +43,6 @@ pub struct Loop<Tgt: Target> {
     /// boundary region of that dimension. Not every iteration dimension has a boundary
     /// region, so not every region is represented in this Vec.
     pub bodies: Vec<ImplNode<Tgt>>,
-    /// Region IDs corresponding to boundary region bodies. This `Vec` zips with
-    /// `bodies[1..bodies.len()]`.
-    pub region_ids: Vec<usize>,
     pub parallel: bool,
     /// The [Spec] implemented by this [Loop].
     pub spec: Option<Spec<Tgt>>,
@@ -93,7 +90,6 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
         Loop {
             tiles: self.tiles.clone(),
             bodies,
-            region_ids: self.region_ids.clone(),
             parallel: self.parallel,
             spec: self.spec.clone(),
         }
@@ -112,46 +108,15 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
             });
         }
 
-        // Closure that returns bound tiles or falls back to get_argument
-        let mut get_inner_argument = |param_idx: u8| -> Option<ViewE<Tgt>> {
-            // Check if this parameter has a bound tile
-            // TODO: Speed this up with a little map data stucture
-            for new_tile in &new_tiles {
-                if new_tile.parameter_index == param_idx {
-                    return Some(ViewE::Tile(new_tile.tile.clone()));
-                }
-            }
-            get_argument(param_idx)
-        };
-
-        let mut bodies = Vec::with_capacity(self.bodies.len());
-        bodies.push(self.bodies[0].clone().bind(&mut get_inner_argument));
-
-        // Bind boundary region bodies with boundary tiles
-        for (body_idx, &region_id) in self.region_ids.iter().enumerate() {
-            let boundary_body = &self.bodies[body_idx + 1];
-
-            // Create closure for boundary arguments
-            let mut get_boundary_argument = |param_idx: u8| -> Option<ViewE<Tgt>> {
-                // Check if this parameter has a boundary tile for this region
-                for new_tile in &new_tiles {
-                    if new_tile.parameter_index == param_idx {
-                        let boundary_tile = self
-                            .create_boundary_tile_for_region(new_tile, region_id)
-                            .expect("Failed to create boundary tile");
-                        return Some(ViewE::BoundaryTile(boundary_tile));
-                    }
-                }
-                get_argument(param_idx)
-            };
-
-            bodies.push(boundary_body.clone().bind(&mut get_boundary_argument));
-        }
-
+        // TODO: Modify `self.bodies` in-place to avoid another heap allocation.
+        let new_bodies = self
+            .bodies
+            .into_iter()
+            .map(|b| b.bind(get_argument))
+            .collect();
         Loop {
             tiles: new_tiles,
-            bodies,
-            region_ids: self.region_ids,
+            bodies: new_bodies,
             parallel: self.parallel,
             spec: self.spec,
         }
@@ -199,7 +164,6 @@ impl<Tgt: Target> Debug for Loop<Tgt> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Loop")
             .field("tiles", &self.tiles)
-            .field("region_ids", &self.region_ids)
             .field("parallel", &self.parallel)
             .field("spec", &self.spec)
             .finish_non_exhaustive()

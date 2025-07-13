@@ -90,24 +90,55 @@ pub fn split_actions<Tgt: Target>(
     else {
         panic!("split_actions called on non-primitive Spec");
     };
-    let PrimitiveSpecType::Matmul { accum } = typ else {
-        panic!("split_actions called on non-Matmul");
-    };
-    if !accum {
-        panic!("split_actions called on non-accumulating Matmul");
-    }
-    let [b, m, orig_k, n] = spec_shape[..] else {
-        unreachable!();
-    };
 
     let operands = spec.parameters();
-    dim_range(orig_k, false)
-        .filter(move |&new_k| {
-            // TODO: Shouldn't this be rejected during application instead?
-            operands[0].is_valid_tile_shape(&[b, m, new_k], false)
-                && operands[1].is_valid_tile_shape(&[b, new_k, n], false)
-        })
-        .map(|k| Action::Split(Split { k }))
+
+    match typ {
+        PrimitiveSpecType::Matmul { accum: true } => {
+            let [b, m, orig_k, n] = spec_shape[..] else {
+                unreachable!();
+            };
+            Box::new(
+                dim_range(orig_k, false)
+                    .filter(move |&new_k| {
+                        // TODO: Shouldn't this be rejected during application instead?
+                        operands[0].is_valid_tile_shape(&[b, m, new_k], false)
+                            && operands[1].is_valid_tile_shape(&[b, new_k, n], false)
+                    })
+                    .map(|k| Action::Split(Split { k })),
+            ) as Box<dyn Iterator<Item = Action<Tgt>> + '_>
+        }
+        PrimitiveSpecType::Max { dim, accum: true }
+        | PrimitiveSpecType::SoftmaxDenominator {
+            scan_dim: dim,
+            accum: true,
+        } => {
+            let scan_dim_idx = usize::from(*dim);
+            if scan_dim_idx >= spec_shape.len() {
+                panic!(
+                    "scan_dim {} is out of bounds for spec_shape with length {}",
+                    scan_dim_idx,
+                    spec_shape.len()
+                );
+            }
+            let orig_dim_size = spec_shape[scan_dim_idx];
+            Box::new(
+                dim_range(orig_dim_size, false)
+                    .filter(move |&new_k| {
+                        // TODO: Shouldn't this be rejected during application instead?
+                        operands.first().is_some_and(|input_spec| {
+                            let mut tile_shape = spec_shape.clone();
+                            tile_shape[scan_dim_idx] = new_k;
+                            input_spec.is_valid_tile_shape(&tile_shape, false)
+                        })
+                    })
+                    .map(|k| Action::Split(Split { k })),
+            ) as Box<dyn Iterator<Item = Action<Tgt>> + '_>
+        }
+        _ => {
+            panic!("split_actions called on unsupported spec type: {:?}", typ);
+        }
+    }
 }
 
 pub fn bufferize_actions<Tgt: Target>(

@@ -122,7 +122,6 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
                 ],
             )
             .into()],
-            region_ids: vec![], // No boundary regions in spatial split
             parallel: false,
             spec: Some(spec.clone()),
         }))

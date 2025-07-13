@@ -635,24 +635,6 @@ pub struct BoundaryTile<V: View> {
     unique_id: OpaqueSymbol,
 }
 
-impl<V: View> BoundaryTile<V> {
-    pub fn new(shape: Shape, offsets: Vec<u32>, view: V) -> Result<Self, TileError> {
-        let expr_term_id = OpaqueSymbol::new();
-        let unique_id = OpaqueSymbol::new();
-        let mut spec = view.spec().clone();
-        // For boundary tiles, we use the shape as step sizes since it represents the actual boundary region size
-        spec.shrink(&shape)?;
-        Ok(Self {
-            shape,
-            offsets,
-            view,
-            expr_term_id,
-            spec,
-            unique_id,
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SqueezeDimsView<V: View> {
     pub inner: V,
@@ -1050,6 +1032,21 @@ impl<T: View> View for TransposeView<T> {
 }
 
 impl<V: View> BoundaryTile<V> {
+    pub fn new(shape: Shape, offsets: Vec<u32>, view: V) -> Result<Self, TileError> {
+        let expr_term_id = OpaqueSymbol::new();
+        let unique_id = OpaqueSymbol::new();
+        let mut spec = view.spec().clone();
+        spec.shrink(&shape)?;
+        Ok(BoundaryTile {
+            shape,
+            offsets,
+            view,
+            expr_term_id,
+            spec,
+            unique_id,
+        })
+    }
+
     pub fn shape(&self) -> &[DimSize] {
         &self.shape
     }

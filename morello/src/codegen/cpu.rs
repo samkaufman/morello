@@ -1913,7 +1913,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             todo!("Support parallel, unrolled loops");
         }
 
-        // Main tiles.
+        // Main tiles
         let axis_steps = get_axis_steps(l);
         for axis_positions in axis_steps
             .iter()
@@ -1929,7 +1929,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             self.emit(w, &l.bodies[0], depth)?;
         }
 
-        // Then, emit boundary regions by zipping bodies[1..] with region_ids
+        // Emit boundary regions
         for body in &l.bodies[1..] {
             self.emit(w, body, depth)?;
         }

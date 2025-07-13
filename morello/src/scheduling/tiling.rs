@@ -14,8 +14,8 @@ use crate::spec::{
 use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
-use crate::views::{Param, ViewE};
-use itertools::{Either, Itertools};
+use crate::views::{BoundaryTile, Param, Tile, View, ViewE};
+use itertools::{izip, Either, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
@@ -95,7 +95,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
             parameter_index: output_idx_u8,
             axes: (0..u8::try_from(rank).unwrap()).collect(),
             tile: smaller_output_tiling
-                .apply(Param::new(output_idx_u8, current_output.clone()))
+                .apply_main(Param::new(output_idx_u8, current_output.clone()))
                 .map(|v| v.boxed_viewe())
                 .map_err(tile_to_apply_err)?,
         };
@@ -114,7 +114,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         // 3. Reify the tilings into Tiles we'll store with this action. Tiles objects track
         // the index and shape of the Impl parameter being tiled.
         let mut new_tiles =
-            input_tiles_for_tile_out(&operands, input_tilings.0, rank, output_idx, parallel)?;
+            input_tiles_for_tile_out(&operands, input_tilings.0, output_idx, parallel)?;
         new_tiles.push(smaller_output);
         tile_out_loop_spec_with_shrunken_tiles(component_input_tilings, new_tiles, parallel, spec)
     }
@@ -266,7 +266,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             parameter_index: 0,
                             axes: vec![0, 1, 2],
                             tile: Tiling::new_simple(main_lhs_shape.clone())
-                                .apply(Param::new(0, lhs.clone()))
+                                .apply_main(Param::new(0, lhs.clone()))
                                 .map(|v| v.boxed_viewe())
                                 .map_err(tile_to_apply_err)?,
                         },
@@ -274,7 +274,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             parameter_index: 1,
                             axes: vec![0, 2, 3],
                             tile: Tiling::new_simple(main_rhs_shape.clone())
-                                .apply(Param::new(1, rhs.clone()))
+                                .apply_main(Param::new(1, rhs.clone()))
                                 .map(|v| v.boxed_viewe())
                                 .map_err(tile_to_apply_err)?,
                         },
@@ -295,14 +295,17 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                     main_body_logicalspec
                         .canonicalize()
                         .map_err(spec_canonicalize_to_apply_err)?;
-                    let main_body = SpecApp::new_with_default_params(Spec(
-                        main_body_logicalspec,
-                        spec.1.clone(),
-                    ));
+                    let main_body = SpecApp::new(
+                        Spec(main_body_logicalspec, spec.1.clone()),
+                        [
+                            ViewE::Tile(tiles[0].tile.clone()),
+                            ViewE::Tile(tiles[1].tile.clone()),
+                            ViewE::Param(Param::new(2, operands[2].clone())),
+                        ],
+                    );
 
                     // Make the boundary body if k isn't a multiple. There's, at most, one.
                     let mut boundary_bodies = Vec::new();
-                    let mut region_ids = Vec::new();
                     if let Some(remainder) = DimSize::new(lhs.shape()[2].get() % self.k) {
                         let boundary_lhs_tiling = Tiling::new_simple(smallvec![
                             lhs.shape()[0],
@@ -330,17 +333,31 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             .map_err(spec_canonicalize_to_apply_err)?;
 
                         let boundary_spec = Spec(boundary_body_logicalspec, spec.1.clone());
-                        boundary_bodies
-                            .push(SpecApp::new_with_default_params(boundary_spec).into());
-                        region_ids.push(1);
+                        let boundary_body = SpecApp::new(
+                            boundary_spec,
+                            [
+                                ViewE::Tile(
+                                    boundary_lhs_tiling
+                                        .apply_main(Param::new(0, operands[0].clone()))
+                                        .map(|v| v.boxed_viewe())
+                                        .map_err(tile_to_apply_err)?,
+                                ),
+                                ViewE::Tile(
+                                    boundary_rhs_tiling
+                                        .apply_main(Param::new(1, operands[1].clone()))
+                                        .map(|v| v.boxed_viewe())
+                                        .map_err(tile_to_apply_err)?,
+                                ),
+                                ViewE::Param(Param::new(2, operands[2].clone())),
+                            ],
+                        );
+                        boundary_bodies.push(boundary_body.into());
                     }
 
                     let bodies: Vec<_> = once(main_body.into()).chain(boundary_bodies).collect();
-                    check_for_cycles(spec, &bodies);
                     Ok(ImplNode::Loop(Loop {
                         tiles,
                         bodies,
-                        region_ids,
                         parallel: false,
                         spec: Some(spec.clone()),
                     }))
@@ -350,8 +367,6 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                     scan_dim: dim,
                     accum: true,
                 } => {
-                    todo!("revamp Split application to Max and SoftmaxDenominator");
-
                     let in_tensor_spec = &operands[0];
                     assert!(
                         self.k < in_tensor_spec.shape()[usize::from(*dim)],
@@ -363,18 +378,57 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                     let mut split_shape = Shape::from_slice(in_tensor_spec.shape());
                     split_shape[usize::from(*dim)] = self.k;
                     let split_tiling = Tiling::new_simple(split_shape.clone());
+
+                    let (main_tile, boundary_tiles) = split_tiling
+                        .apply_with_boundaries(Param::new(0, in_tensor_spec.clone()))
+                        .map_err(tile_to_apply_err)?;
+
                     let tiles = vec![LoopTile {
                         parameter_index: 0,
                         axes: (0..u8::try_from(in_tensor_spec.shape().len()).unwrap()).collect(),
-                        tile: split_tiling
-                            .apply(Param::new(0, in_tensor_spec.clone()))
-                            .map(|v| v.boxed_viewe())
-                            .map_err(tile_to_apply_err)?,
+                        tile: main_tile.boxed_viewe(),
                     }];
-                    let mut new_shapes = Vec::with_capacity(operands.len());
-                    new_shapes.push(split_shape);
-                    new_shapes.extend(operands.iter().skip(1).map(|o| o.shape().into()));
-                    tile_out_loop_spec_with_shrunken_tiles(vec![new_shapes], tiles, false, spec)
+
+                    let new_shapes: Vec<_> = once(split_shape)
+                        .chain(operands.iter().skip(1).map(|o| o.shape().into()))
+                        .collect();
+
+                    let mut bodies = Vec::<ImplNode<_>>::with_capacity(boundary_tiles.len() + 1);
+                    bodies.push(create_main_body(&tiles, &[new_shapes], false, spec)?.into());
+
+                    for boundary_tile in boundary_tiles {
+                        let boundary_new_shapes: Vec<_> =
+                            once(Shape::from_slice(boundary_tile.shape()))
+                                .chain(operands.iter().skip(1).map(|o| o.shape().into()))
+                                .collect();
+
+                        // Create the boundary spec directly (no LoopTiles needed for boundary regions)
+                        let mut boundary_body_logicalspec = spec.0.clone();
+                        update_component_shapes(
+                            &mut boundary_body_logicalspec,
+                            &[boundary_new_shapes],
+                        )?;
+                        let mut boundary_spec = Spec(boundary_body_logicalspec, spec.1.clone());
+                        boundary_spec
+                            .canonicalize()
+                            .map_err(spec_canonicalize_to_apply_err)?;
+                        let boundary_args = std::iter::once(ViewE::from(boundary_tile.clone()))
+                            .chain(operands.iter().skip(1).enumerate().map(|(i, operand)| {
+                                ViewE::Param(Param::new(
+                                    u8::try_from(i + 1).unwrap(),
+                                    operand.clone(),
+                                ))
+                            }))
+                            .collect::<Vec<_>>();
+                        bodies.push(SpecApp::new(boundary_spec, boundary_args).into());
+                    }
+
+                    Ok(ImplNode::Loop(Loop {
+                        tiles,
+                        bodies,
+                        parallel: false,
+                        spec: Some(spec.clone()),
+                    }))
                 }
                 _ => Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
                     "Split only applies to Matmul, Max, and SoftmaxDenominator",
@@ -480,7 +534,7 @@ fn tile_out_daufm<Tgt: Target>(
     // 1. Construct the simple tile corresponding to the new output shape.
     let smaller_output_tiling = Tiling::new_simple(new_output_shape.clone().either_into());
     let new_smaller_output_tile =
-        match smaller_output_tiling.apply(Param::new(3, current_output.clone())) {
+        match smaller_output_tiling.apply_main(Param::new(3, current_output.clone())) {
             Ok(t) => t,
             Err(err) => return Some(Err(tile_to_apply_err(err))),
         };
@@ -506,7 +560,7 @@ fn tile_out_daufm<Tgt: Target>(
         .into_iter()
         .map(|tiling| (tiling, (0..rank).map(Some).collect()))
         .collect();
-    match input_tiles_for_tile_out(&operands, tilings_and_bindings, usize::from(rank), 3, false) {
+    match input_tiles_for_tile_out(&operands, tilings_and_bindings, 3, false) {
         Ok(mut new_tiles) => {
             new_tiles.push(smaller_output);
             let component_parameter_shapes = vec![vec![
@@ -515,16 +569,15 @@ fn tile_out_daufm<Tgt: Target>(
                 onescan_shape,                          // parameter 2: denominator output
                 new_output_shape.either_into(),         // parameter 3: unscaled output
             ]];
-            let main_body = match create_main_body(&component_parameter_shapes, false, spec) {
-                Ok(body) => body,
-                Err(e) => return Some(Err(e)),
-            };
+            let main_body =
+                match create_main_body(&new_tiles, &component_parameter_shapes, false, spec) {
+                    Ok(body) => body,
+                    Err(e) => return Some(Err(e)),
+                };
             let bodies = vec![main_body.into()];
-            check_for_cycles(spec, &bodies);
             Some(Ok(ImplNode::Loop(Loop {
                 tiles: new_tiles,
                 bodies,
-                region_ids: vec![],
                 parallel: false,
                 spec: Some(spec.clone()),
             })))
@@ -540,32 +593,16 @@ fn tile_out_loop_spec_with_shrunken_tiles<Tgt: Target>(
     parallel: bool,
     spec: &Spec<Tgt>,
 ) -> Result<ImplNode<Tgt>, ApplyError> {
-    let main_body = create_main_body(&component_parameter_shapes, parallel, spec)?;
-    let (boundary_bodies, region_ids) =
+    let main_body = create_main_body(&tiles, &component_parameter_shapes, parallel, spec)?;
+    let boundary_bodies =
         create_tile_out_boundary_regions(&tiles, &component_parameter_shapes, spec)?;
     let bodies: Vec<_> = once(main_body.into()).chain(boundary_bodies).collect();
-    check_for_cycles(spec, &bodies);
     Ok(ImplNode::Loop(Loop {
         tiles,
         bodies,
-        region_ids,
         parallel,
         spec: Some(spec.clone()),
     }))
-}
-
-// TODO: Drop check_for_cycles
-fn check_for_cycles<Tgt: Target>(spec: &Spec<Tgt>, bodies: &Vec<ImplNode<Tgt>>) {
-    for body in bodies {
-        if let ImplNode::SpecApp(spec_app) = body {
-            if spec == &spec_app.0 {
-                panic!(
-                    "Encountered a cycle: {spec}; bodies = [{:?}]",
-                    bodies.iter().map(|b| b.spec().unwrap()).join(", ")
-                );
-            }
-        }
-    }
 }
 
 /// Creates a main body ImplNode by cloning the spec, updating component shapes, setting serial_only
@@ -573,6 +610,7 @@ fn check_for_cycles<Tgt: Target>(spec: &Spec<Tgt>, bodies: &Vec<ImplNode<Tgt>>) 
 ///
 /// Helper for [tile_out_loop_spec_with_shrunken_tiles].
 fn create_main_body<Tgt: Target>(
+    tiles: &[LoopTile<Tgt>],
     component_parameter_shapes: &[Vec<Shape>],
     parallel: bool,
     spec: &Spec<Tgt>,
@@ -585,21 +623,31 @@ fn create_main_body<Tgt: Target>(
     main_body_logicalspec
         .canonicalize()
         .map_err(spec_canonicalize_to_apply_err)?;
-    Ok(SpecApp::new_with_default_params(Spec(
-        main_body_logicalspec,
-        spec.1.clone(),
-    )))
+    let mut spec_app_arguments = main_body_logicalspec
+        .parameters()
+        .into_iter()
+        .enumerate()
+        .map(|(i, spec)| ViewE::Param(Param::new(u8::try_from(i).unwrap(), spec)))
+        .collect::<Vec<ViewE<Tgt>>>();
+    for loop_tile in tiles {
+        spec_app_arguments[usize::from(loop_tile.parameter_index)] =
+            ViewE::Tile(loop_tile.tile.clone());
+    }
+    Ok(SpecApp::new(
+        Spec(main_body_logicalspec, spec.1.clone()),
+        spec_app_arguments,
+    ))
 }
 
 /// Generate bodies for different boundary regions based on the loop tiles.
 ///
-/// Returns a tuple of (bodies, region_ids) where bodies[i] corresponds to region_ids[i].
-/// The main region (region_id = 0) is not included in the returned vectors.
+/// Returns a vector of boundary region bodies.  The main region is not included in the
+/// returned vector.
 fn create_tile_out_boundary_regions<Tgt: Target>(
     tiles: &[LoopTile<Tgt>],
     component_parameter_shapes: &[Vec<Shape>],
     spec: &Spec<Tgt>,
-) -> Result<(Vec<ImplNode<Tgt>>, Vec<usize>), ApplyError> {
+) -> Result<Vec<ImplNode<Tgt>>, ApplyError> {
     let output_index = spec
         .0
         .unique_output_index()
@@ -610,6 +658,8 @@ fn create_tile_out_boundary_regions<Tgt: Target>(
         .expect("a LoopTile should be attached to the output parameter");
     let original_shape = spec.0.parameter_shape(output_index);
 
+    // per_axis_bitvectors contains values with a single bit set. The bit's index is a
+    // Spec axis that has a remainder when tiled.
     let per_axis_bitvectors: Vec<_> = output_tile
         .tile
         .shape()
@@ -660,29 +710,104 @@ fn create_tile_out_boundary_regions<Tgt: Target>(
             &mut region_logical_spec,
             &input_tilings_result.component_parameter_shapes,
         )?;
-
-        // Canonicalize the region spec
         region_logical_spec
             .canonicalize()
             .map_err(spec_canonicalize_to_apply_err)?;
 
-        let region_spec = Spec(region_logical_spec, spec.1.clone());
-        bodies.push(SpecApp::new_with_default_params(region_spec).into());
+        let operands = spec.0.parameters();
+        let mut boundary_tiles = Vec::<(u8, BoundaryTile<_>)>::new();
+        for (operand_idx, (original_input, (tiling, io_dim_bindings))) in operands
+            .iter()
+            .zip(input_tilings_result.input_tilings.0)
+            .enumerate()
+        {
+            if operand_idx == output_index {
+                continue;
+            }
+            if !original_input.is_valid_tile_shape(tiling.shape(), false) {
+                return Err(ApplyError::NotApplicable(
+                    NotApplicableReason::TileShapeInvalid,
+                ));
+            }
+
+            // TODO: Can we avoid this check by construction?
+            if original_input.shape() == &tiling.shape()[..] {
+                continue;
+            }
+
+            let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
+            let input_tile_axes: Vec<Option<u8>> = io_dim_bindings
+                .iter()
+                .map(|&o| o.map(|output_dim| output_tile.axes[usize::from(output_dim)]))
+                .collect();
+            boundary_tiles.push((
+                operand_idx_u8,
+                convert_tile_to_boundarytile(
+                    tiling
+                        .apply_main(Param::new(operand_idx_u8, original_input.clone()))
+                        .map(|v| v.boxed_viewe())
+                        .map_err(tile_to_apply_err)?,
+                    region_id.try_into().unwrap(),
+                    original_input.shape(),
+                    &input_tile_axes,
+                ),
+            ));
+        }
+        boundary_tiles.push((
+            u8::try_from(output_index).unwrap(),
+            convert_tile_to_boundarytile(
+                region_output_tiling
+                    .apply_main(Param::new(
+                        u8::try_from(output_index).unwrap(),
+                        spec.0.parameters()[output_index].clone(),
+                    ))
+                    .map(|v| v.boxed_viewe())
+                    .map_err(tile_to_apply_err)?,
+                region_id.try_into().unwrap(),
+                spec.0.parameters()[output_index].shape(),
+                &output_tile
+                    .axes
+                    .iter()
+                    .copied()
+                    .map(Some)
+                    .collect::<Vec<_>>(),
+            ),
+        ));
+
+        let mut body_logicalspec = spec.0.clone();
+        update_component_shapes(
+            &mut body_logicalspec,
+            &input_tilings_result.component_parameter_shapes,
+        )?;
+        body_logicalspec.set_serial_only(body_logicalspec.serial_only());
+        body_logicalspec
+            .canonicalize()
+            .map_err(spec_canonicalize_to_apply_err)?;
+        let mut spec_app_arguments = body_logicalspec
+            .parameters()
+            .into_iter()
+            .enumerate()
+            .map(|(i, spec)| ViewE::Param(Param::new(u8::try_from(i).unwrap(), spec)))
+            .collect::<Vec<ViewE<Tgt>>>();
+        for (parameter_idx, boundary_tile) in boundary_tiles {
+            spec_app_arguments[usize::from(parameter_idx)] = ViewE::BoundaryTile(boundary_tile);
+        }
+        bodies.push(SpecApp::new(Spec(body_logicalspec, spec.1.clone()), spec_app_arguments).into())
     }
 
     debug_assert_eq!(bodies.len(), boundary_region_ids.len());
-    Ok((bodies, boundary_region_ids))
+    Ok(bodies)
 }
 
 /// Create [LoopTile]s corresponding to a set of input [Tiling]s and bindings.
 fn input_tiles_for_tile_out<Tgt: Target>(
     operands: &[TensorSpec<Tgt>],
     tilings_and_bindings: Vec<(Tiling, Vec<Option<u8>>)>,
-    rank: usize,
     output_idx: usize,
     parallel: bool,
 ) -> Result<Vec<LoopTile<Tgt>>, ApplyError> {
-    let mut next_fresh_loop_dim = u8::try_from(rank).unwrap();
+    let output_tensor_rank = operands[output_idx].shape().len();
+    let mut next_fresh_loop_dim = u8::try_from(output_tensor_rank).unwrap();
     let mut new_tiles = Vec::new();
     for (operand_idx, (original_input, (tiling, axes_binding))) in
         operands.iter().zip(tilings_and_bindings).enumerate()
@@ -715,7 +840,7 @@ fn input_tiles_for_tile_out<Tgt: Target>(
                 })
                 .collect(),
             tile: tiling
-                .apply(Param::new(operand_idx_u8, original_input.clone()))
+                .apply_main(Param::new(operand_idx_u8, original_input.clone()))
                 .map(|v| v.boxed_viewe())
                 .map_err(tile_to_apply_err)?,
         });
@@ -763,36 +888,29 @@ pub(crate) fn update_component_shapes<Tgt: Target>(
 ) -> Result<(), ApplyError> {
     match spec {
         LogicalSpec::Primitive(prim_basics, primitive_aux, _) => {
-            let [shapes] = component_parameter_shapes else {
+            let [new_shapes] = component_parameter_shapes else {
                 panic!(
                     "Expected exactly one component for primitive spec, got {}",
                     component_parameter_shapes.len()
                 );
             };
-
-            debug_assert_eq!(shapes.len(), prim_basics.dtypes.len());
+            debug_assert_eq!(new_shapes.len(), prim_basics.dtypes.len());
 
             let original_shapes = prim_basics.parameter_shapes();
             prim_basics.replace_io(
-                &shapes
+                &new_shapes
                     .iter()
                     .zip(&prim_basics.dtypes)
                     .map(|(shape, &dtype)| (&shape[..], dtype))
                     .collect::<Vec<_>>(),
             );
 
-            for (param_idx, ((original_shape, new_shape), aux)) in original_shapes
-                .into_iter()
-                .zip(prim_basics.parameter_shapes())
-                .zip(primitive_aux.iter_mut())
-                .enumerate()
+            for (original_shape, new_shape, aux) in
+                izip!(original_shapes, new_shapes, primitive_aux.iter_mut())
             {
-                update_aux_for_tiling(
-                    aux,
-                    &original_shape,
-                    &new_shape,
-                    prim_basics.dtypes[param_idx],
-                );
+                if let Ok(new_layout) = aux.layout.update_for_tiling(&original_shape, new_shape) {
+                    aux.layout = new_layout;
+                }
             }
         }
         LogicalSpec::Compose {
@@ -834,26 +952,21 @@ pub(crate) fn update_component_shapes<Tgt: Target>(
     Ok(())
 }
 
-// TODO: Can probably inline this function now.
-/// Updates the layout of `aux`.
+/// Updates the layout of a [TensorSpecAux], given a shape change and updated step
+/// sizes.
 fn update_aux_for_tiling<Tgt: Target>(
-    aux: &mut crate::tensorspec::TensorSpecAux<Tgt>,
+    aux: &mut TensorSpecAux<Tgt>,
     original_shape: &[DimSize],
     new_shape: &[DimSize],
-    dtype: Dtype,
 ) {
-    let mut original_tensor_spec = TensorSpec {
-        dtype,
-        // TODO: Avoid allocating this shape, or even the whole TensorSpec.
-        shape: original_shape.into(),
-        aux: aux.clone(),
-    };
-    if let Ok(()) = original_tensor_spec.shrink(new_shape) {
-        *aux = original_tensor_spec.aux;
+    if let Ok(new_layout) = aux.layout.update_for_tiling(original_shape, new_shape) {
+        aux.layout = new_layout;
     }
 }
 
-/// Runs [update_aux_for_tiling] on all Compose parameters' [TensorSpecAux]es.
+/// Updates the layout and alignment the Compose's [TensorSpecAux]s for new shapes and
+/// steps. New shapes will be taken from `components`, so `components` must already be
+/// resized.
 fn update_compose_aux_for_tiling<Tgt: Target>(
     components: &[PrimitiveBasics],
     original_component_shapes: &[Vec<Shape>],
@@ -867,12 +980,7 @@ fn update_compose_aux_for_tiling<Tgt: Target>(
         if parameter != c0_output_idx {
             let original_shape = &original_component_shapes[0][parameter];
             let new_shape = components[0].parameter_shape(parameter);
-            update_aux_for_tiling(
-                &mut operand_auxes[aux_idx],
-                original_shape,
-                &new_shape,
-                components[0].dtypes[parameter],
-            );
+            update_aux_for_tiling(&mut operand_auxes[aux_idx], original_shape, &new_shape);
             aux_idx += 1;
         }
     }
@@ -889,12 +997,7 @@ fn update_compose_aux_for_tiling<Tgt: Target>(
             if parameter != output_idx {
                 let original_shape = &original_component_shapes[component_idx][parameter];
                 let new_shape = component.parameter_shape(parameter);
-                update_aux_for_tiling(
-                    &mut operand_auxes[aux_idx],
-                    original_shape,
-                    &new_shape,
-                    component.dtypes[parameter],
-                );
+                update_aux_for_tiling(&mut operand_auxes[aux_idx], original_shape, &new_shape);
                 aux_idx += 1;
             }
         }
@@ -908,12 +1011,7 @@ fn update_compose_aux_for_tiling<Tgt: Target>(
         if parameter != cl_output_idx {
             let original_shape = &original_component_shapes[last_component_idx][parameter];
             let new_shape = last_component.parameter_shape(parameter);
-            update_aux_for_tiling(
-                &mut operand_auxes[aux_idx],
-                original_shape,
-                &new_shape,
-                last_component.dtypes[parameter],
-            );
+            update_aux_for_tiling(&mut operand_auxes[aux_idx], original_shape, &new_shape);
             aux_idx += 1;
         }
     }
@@ -921,12 +1019,27 @@ fn update_compose_aux_for_tiling<Tgt: Target>(
     // Finally, handle the compose output (which is the first component's output)
     let original_shape = &original_component_shapes[0][c0_output_idx];
     let new_shape = components[0].parameter_shape(c0_output_idx);
-    update_aux_for_tiling(
-        &mut operand_auxes[aux_idx],
-        original_shape,
-        &new_shape,
-        components[0].dtypes[c0_output_idx],
-    );
+    update_aux_for_tiling(&mut operand_auxes[aux_idx], original_shape, &new_shape);
+}
+
+// TODO: Get rid of this function. It's a design problem.
+fn convert_tile_to_boundarytile<V: View>(
+    tile: Tile<V>,
+    region_id: NonZeroUsize, // non-zero because boundary
+    original_shape: &[DimSize],
+    axes: &[Option<u8>],
+) -> BoundaryTile<V> {
+    debug_assert_eq!(tile.shape().len(), axes.len());
+    let mut offsets = vec![0u32; tile.shape().len()];
+    for (dim_idx, &axis_option) in axes.iter().enumerate() {
+        let Some(axis) = axis_option else {
+            continue;
+        };
+        if region_id.get() & (1_usize << axis) != 0 {
+            offsets[dim_idx] = original_shape[dim_idx].get() - tile.shape()[dim_idx].get();
+        }
+    }
+    BoundaryTile::new(Shape::from_slice(tile.shape()), offsets, tile.view).unwrap()
 }
 
 fn bitvector_combinations(bitvectors: &[usize]) -> impl Iterator<Item = usize> + '_ {
@@ -962,14 +1075,19 @@ fn spec_canonicalize_to_apply_err(canon_error: CanonicalizeError) -> ApplyError 
 mod tests {
     use super::*;
     use crate::common::Dtype;
-    use crate::imp::loops::Loop;
-    use crate::imp::Impl;
+    use crate::imp::{loops::Loop, Impl, ImplNode};
     use crate::layout::{row_major, Layout, PhysDim};
-    use crate::scheduling::{Action, ApplyError, NotApplicableReason};
+    use crate::scheduling::{Action, ActionT, ApplyError, NotApplicableReason};
+    use crate::shape;
+    use crate::spec;
+    use crate::spec::Spec;
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::target::{
+        CpuMemoryLevel::{self, GL},
+        X86Target,
+    };
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape, TensorSpecAux};
-    use crate::{shape, spec};
+    use crate::views::{View, ViewE};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
 
@@ -1143,7 +1261,6 @@ mod tests {
         let ImplNode::Loop(Loop {
             tiles,
             bodies,
-            region_ids,
             parallel,
             spec: loop_spec,
         }) = tile_action
@@ -1152,11 +1269,10 @@ mod tests {
         else {
             panic!("Expected ImplNode::Loop")
         };
-        assert_eq!(bodies.len(), 1, "Expected one body in the loop");
         assert_eq!(
-            region_ids.len(),
-            0,
-            "Expected no boundary regions for this test"
+            bodies.len(),
+            1,
+            "Expected one body in the loop (no boundary regions)"
         );
         assert!(!parallel);
         assert_eq!(loop_spec, Some(spec));
@@ -1165,24 +1281,43 @@ mod tests {
         let param_indices: Vec<u8> = tiles.iter().map(|t| t.parameter_index).collect();
         assert_eq!(param_indices, [0, 3]);
 
-        // Check shapes of the body SpecApp
-        let body_params = bodies[0].collect_unbound_parameters();
-        let expected_shapes = [
-            &[nz!(4u32), nz!(8u32), nz!(8u32)][..], // Parameter 0: input (tiled)
-            &[nz!(4u32), nz!(8u32), nz!(1u32)][..], // Parameter 1: max (reduced)
-            &[nz!(4u32), nz!(8u32), nz!(1u32)][..], // Parameter 2: denominator (reduced)
-            &[nz!(4u32), nz!(8u32), nz!(8u32)][..], // Parameter 3: output (tiled)
+        // Check shapes of the Loop's Params, which won't be tiled.
+        let loop_params = bodies[0].collect_unbound_parameters();
+        let expected_param_shapes = [
+            &[nz!(4u32), nz!(8u32), nz!(16u32)][..],
+            &[nz!(4u32), nz!(8u32), nz!(1u32)][..],
+            &[nz!(4u32), nz!(8u32), nz!(1u32)][..],
+            &[nz!(4u32), nz!(8u32), nz!(16u32)][..],
         ];
         assert_eq!(
-            body_params.iter().map(|p| p.shape()).collect::<Vec<_>>(),
-            expected_shapes
+            loop_params.iter().map(|p| p.shape()).collect::<Vec<_>>(),
+            expected_param_shapes
         );
 
-        // Check that the tile shapes match the body parameter shapes
-        assert!(tiles.iter().all(|tile| {
-            let param_idx = usize::from(tile.parameter_index);
-            tile.tile.shape() == body_params[param_idx].shape()
-        }));
+        let expected_body_argument_shapes = [
+            shape![4, 8, 8], // Parameter 0: input (tiled)
+            shape![4, 8, 1], // Parameter 1: max (reduced)
+            shape![4, 8, 1], // Parameter 2: denominator (reduced)
+            shape![4, 8, 8], // Parameter 3: output (tiled)
+        ];
+        let ImplNode::SpecApp(inner_specapp) = &bodies[0] else {
+            panic!("Expected ImplNode::SpecApp");
+        };
+        assert_eq!(
+            inner_specapp.0 .0.parameter_shapes(),
+            expected_body_argument_shapes,
+        );
+        assert_eq!(
+            inner_specapp
+                .1
+                .iter()
+                .map(|a| a.spec().shape())
+                .collect::<Vec<_>>(),
+            expected_body_argument_shapes
+                .iter()
+                .map(|s| &s[..])
+                .collect::<Vec<_>>(),
+        );
     }
 
     proptest! {
@@ -1193,9 +1328,8 @@ mod tests {
             mut tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(shape![8, 8, 8]))
         ) {
             let shape = tspec.shape().to_vec();
-            let dtype = tspec.dtype();
             let original_aux = tspec.aux.clone();
-            update_aux_for_tiling(&mut tspec.aux, &shape, &shape, dtype);
+            update_aux_for_tiling(&mut tspec.aux, &shape, &shape);
             prop_assert_eq!(tspec.aux.layout, original_aux.layout);
             prop_assert_eq!(tspec.aux.level, original_aux.level);
             prop_assert_eq!(tspec.aux.vector_size, original_aux.vector_size);
@@ -1305,5 +1439,98 @@ mod tests {
         let mut gap_result: Vec<usize> = bitvector_combinations(&gap_bitvectors).collect();
         gap_result.sort();
         assert_eq!(gap_result, vec![0b001, 0b100, 0b101]); // OR combinations: 0b001, 0b100, 0b001|0b100
+    }
+
+    /// Test that splitting a Matmul produces a nested SpecApp applied to two Tiles and
+    /// a Param.
+    #[test]
+    fn test_split_apply_yields_tile_bound_specapp() {
+        let spec: Spec<X86Target> = spec!(MatmulAccum(
+            [1, 64, 64, 64],
+            (f32, GL, row_major),
+            (f32, GL, row_major),
+            (f32, GL, row_major),
+            serial
+        ));
+
+        let split_action = Split { k: nz!(32u32) };
+        let result = split_action.apply_unchecked_canon(&spec);
+        assert!(result.is_ok(), "Split should apply successfully");
+
+        let impl_node = result.unwrap();
+        let ImplNode::Loop(loop_impl) = impl_node else {
+            panic!("Expected Loop implementation, got: {:?}", impl_node);
+        };
+
+        // First two arguments should be Tile views and third a Param
+        let ImplNode::SpecApp(spec_app) = &loop_impl.bodies[0] else {
+            panic!(
+                "Expected SpecApp in loop body, got: {:?}",
+                loop_impl.bodies[0]
+            );
+        };
+        assert!(
+            matches!(spec_app.1[0], ViewE::Tile(_)),
+            "First operand should be a Tile view, got: {:?}",
+            spec_app.1[0]
+        );
+        assert!(
+            matches!(spec_app.1[1], ViewE::Tile(_)),
+            "Second operand should be a Tile view, got: {:?}",
+            spec_app.1[1]
+        );
+        assert!(
+            matches!(spec_app.1[2], ViewE::Param(_)),
+            "Third operand should be a Param view, got: {:?}",
+            spec_app.1[2]
+        );
+    }
+
+    /// Test that TileOut produces a SpecApp which uses Tile views for tiled operands,
+    /// not Param views.
+    #[test]
+    fn test_tileout_apply_yields_tile_bound_specapp() {
+        let spec: Spec<X86Target> = spec!(MatmulAccum(
+            [1, 64, 64, 64],
+            (f32, GL, row_major),
+            (f32, GL, row_major),
+            (f32, GL, row_major),
+            serial
+        ));
+
+        let action = TileOut::SingleLoop {
+            dim: 1,
+            size: nz!(32u32),
+            parallel: false,
+        };
+        let result = action.apply_unchecked_canon(&spec);
+        assert!(result.is_ok(), "TileOut should apply successfully");
+        let impl_node = result.unwrap();
+
+        let ImplNode::Loop(loop_impl) = impl_node else {
+            panic!("Expected Loop implementation, got: {:?}", impl_node);
+        };
+        let ImplNode::SpecApp(spec_app) = &loop_impl.bodies[0] else {
+            panic!(
+                "Expected SpecApp in loop body, got: {:?}",
+                loop_impl.bodies[0]
+            );
+        };
+
+        assert!(
+            matches!(spec_app.1[0], ViewE::Tile(_)),
+            "First operand should be a Tile view, got: {:?}",
+            spec_app.1[0]
+        );
+        assert!(
+            matches!(spec_app.1[1], ViewE::Param(Param(1, ..))),
+            "Second operand should be a Param view, got: {:?}",
+            spec_app.1[1]
+        );
+        assert!(
+            matches!(spec_app.1[2], ViewE::Tile(_)),
+            "Third operand should be a Tile view, got: {:?}",
+            spec_app.1[2]
+        );
     }
 }

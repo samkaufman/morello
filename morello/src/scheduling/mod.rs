@@ -700,7 +700,7 @@ mod tests {
                     rewritten.visit_leaves(&mut |leaf| {
                         if let ImplNode::SpecApp(spec_app) = leaf {
                             // TODO: Do we really need this?
-                            // Also skip Move sub-Specs, which can be introduced by actions other
+                            // Skip Move sub-Specs, which can be introduced by actions other
                             // than Move.
                             if matches!(
                                 spec_app.0 .0,

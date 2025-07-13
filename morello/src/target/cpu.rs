@@ -419,7 +419,11 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Matmul { accum } if !*accum => {
                     Box::new(iter.chain(once(ToAccum::default().into())))
                 }
-                PrimitiveSpecType::Matmul { accum } if *accum => {
+                PrimitiveSpecType::Matmul { accum }
+                | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                    if *accum =>
+                {
                     Box::new(iter.chain(split_actions(spec)))
                 }
                 PrimitiveSpecType::Conv { accum } => {

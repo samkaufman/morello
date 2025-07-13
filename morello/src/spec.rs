@@ -824,8 +824,8 @@ impl PrimitiveBasics {
             ) => {
                 let shape = Shape::from_slice(&smaller_output.shape()[1..]);
                 let steps = Shape::from_slice(&smaller_output.step_sizes()[1..]);
-                let bindings = (1..shape.len())
-                    .map(|v| Some(v.try_into().unwrap()))
+                let bindings = once(None)
+                    .chain((1..shape.len()).map(|v| Some(v.try_into().unwrap())))
                     .collect();
                 TilingInference(vec![(Tiling::new_sliding(shape, steps), bindings)])
             }
