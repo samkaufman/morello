@@ -136,7 +136,7 @@ pub fn split_actions<Tgt: Target>(
             ) as Box<dyn Iterator<Item = Action<Tgt>> + '_>
         }
         _ => {
-            panic!("split_actions called on unsupported spec type: {:?}", typ);
+            panic!("split_actions called on unsupported spec type: {typ:?}");
         }
     }
 }

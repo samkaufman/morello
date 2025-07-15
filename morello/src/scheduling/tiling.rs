@@ -1378,7 +1378,7 @@ mod tests {
             .apply(&conv_spec)
             .expect("TileOut should apply successfully");
         let ImplNode::Loop(loop_impl) = resulting_impl else {
-            panic!("Expected ImplNode::Loop, got: {:?}", resulting_impl);
+            panic!("Expected ImplNode::Loop, got: {resulting_impl:?}");
         };
         assert_eq!(loop_impl.bodies.len(), 1, "Expected one body in the loop");
         // TODO: Assert on the sub-Spec
@@ -1432,7 +1432,7 @@ mod tests {
 
         let impl_node = result.unwrap();
         let ImplNode::Loop(loop_impl) = impl_node else {
-            panic!("Expected Loop implementation, got: {:?}", impl_node);
+            panic!("Expected Loop implementation, got: {impl_node:?}");
         };
 
         // First two arguments should be Tile views and third a Param
@@ -1481,7 +1481,7 @@ mod tests {
         let impl_node = result.unwrap();
 
         let ImplNode::Loop(loop_impl) = impl_node else {
-            panic!("Expected Loop implementation, got: {:?}", impl_node);
+            panic!("Expected Loop implementation, got: {impl_node:?}");
         };
         let ImplNode::SpecApp(spec_app) = &loop_impl.bodies[0] else {
             panic!(
