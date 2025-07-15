@@ -32,9 +32,7 @@ impl NameEnv {
         } else if let Some(param) = view.to_param() {
             param.to_string()
         } else {
-            // TODO: Restore the following panic
-            // panic!("No name for non-Param view");
-            "PLACEHOLDER".to_string()
+            panic!("No name for non-Param view");
         }
     }
 }
