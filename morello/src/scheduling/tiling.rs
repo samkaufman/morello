@@ -2,7 +2,7 @@ use crate::common::Dtype;
 use crate::common::{DimSize, Shape};
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
-use crate::imp::{Impl, ImplNode};
+use crate::imp::ImplNode;
 use crate::scheduling::{
     check_tile_out_applies, collect_nested_specs, tile_to_apply_err, ActionSolver, ActionT,
     ApplyError, NotApplicableReason, PrimitiveTileOutSolver,
@@ -15,7 +15,7 @@ use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::views::{BoundaryTile, Param, Tile, View, ViewE};
-use itertools::{izip, Either, Itertools};
+use itertools::{izip, Either};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;

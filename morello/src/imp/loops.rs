@@ -1,4 +1,3 @@
-use crate::common::DimSize;
 use crate::cost::MainCost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
@@ -6,7 +5,7 @@ use crate::nameenv::NameEnv;
 use crate::spec::Spec;
 use crate::target::Target;
 use crate::tensorspec::TensorSpec;
-use crate::views::{BoundaryTile, Tile, TileError, View, ViewE};
+use crate::views::{Tile, View, ViewE};
 use itertools::Itertools;
 use std::fmt::{self, Debug};
 
@@ -175,48 +174,6 @@ impl<Tgt: Target> Loop<Tgt> {
         unique_dims_per_axis(&self.tiles)
             .map(|(loop_tile, dim_idx)| loop_tile.tile.full_steps_dim(dim_idx))
             .product()
-    }
-
-    /// Create a boundary tile for a specific region and loop tile
-    fn create_boundary_tile_for_region(
-        &self,
-        loop_tile: &LoopTile<Tgt>,
-        region_id: usize,
-    ) -> Result<BoundaryTile<Box<ViewE<Tgt>>>, TileError> {
-        let tile_shape = loop_tile.tile.shape();
-        let original_shape = loop_tile.tile.view.shape();
-        let axes = &loop_tile.axes;
-
-        let mut boundary_shape = original_shape.to_vec();
-        let mut offsets_raw = vec![0u32; original_shape.len()];
-
-        // Check each tiled dimension for boundary regions
-        for (dim_idx, &axis) in axes.iter().enumerate() {
-            let axis_idx = usize::from(axis);
-
-            // Check if this axis has a boundary region in this region_id
-            if (region_id & (1 << axis_idx)) != 0 {
-                // This dimension has a boundary region
-                let tile_size = tile_shape[dim_idx];
-                let original_size = original_shape[dim_idx];
-
-                // Calculate the boundary size (remainder)
-                if let Some(boundary_size) = DimSize::new(original_size.get() % tile_size.get()) {
-                    boundary_shape[dim_idx] = boundary_size;
-
-                    // Calculate the offset (where the boundary starts)
-                    let full_tiles = original_size.get() / tile_size.get();
-                    let offset = full_tiles * tile_size.get();
-                    offsets_raw[dim_idx] = offset;
-                }
-            }
-        }
-
-        BoundaryTile::new(
-            boundary_shape.into(),
-            offsets_raw,
-            loop_tile.tile.view.clone(),
-        )
     }
 }
 
