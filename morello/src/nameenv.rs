@@ -31,6 +31,9 @@ impl NameEnv {
             present_name.to_owned()
         } else if let Some(param) = view.to_param() {
             param.to_string()
+        } else if view.is_boundary_tile() {
+            // TODO: Define a real syntax for BoundaryTiles in Impl.
+            "?b".to_string()
         } else {
             panic!("No name for non-Param view");
         }

@@ -275,7 +275,7 @@ fn main_per_db(
                         let mut stage_set = HashSet::new();
                         for spec in &worklist {
                             if !stage_set.insert(spec) {
-                                panic!("Duplicate spec in stage: {:?}", spec);
+                                panic!("Duplicate spec in stage: {spec:?}");
                             }
                         }
                     }

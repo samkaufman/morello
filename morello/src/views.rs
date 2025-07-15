@@ -46,6 +46,11 @@ pub trait View: Clone {
         None
     }
 
+    // TODO: Drop this. Temporary hack for pprint'ing BoundaryTiles, which don't have syntax.
+    fn is_boundary_tile(&self) -> bool {
+        false
+    }
+
     /// Visit parameters from this View using the provided visitor function.
     fn visit_params<F>(&self, visitor: &mut F)
     where
@@ -135,6 +140,10 @@ where
         (**self).to_param()
     }
 
+    fn is_boundary_tile(&self) -> bool {
+        (**self).is_boundary_tile()
+    }
+
     fn shape(&self) -> &[DimSize] {
         (**self).shape()
     }
@@ -182,6 +191,10 @@ where
 
     fn to_param(&self) -> Option<&Param<Self::Tgt>> {
         (**self).to_param()
+    }
+
+    fn is_boundary_tile(&self) -> bool {
+        (**self).is_boundary_tile()
     }
 
     fn shape(&self) -> &[DimSize] {
@@ -392,6 +405,10 @@ impl<Tgt: Target> View for ViewE<Tgt> {
             ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.to_param(),
             ViewE::TransposeView(transpose_view) => transpose_view.to_param(),
         }
+    }
+
+    fn is_boundary_tile(&self) -> bool {
+        matches!(self, ViewE::BoundaryTile(_))
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
@@ -1107,6 +1124,10 @@ impl<T: View> View for BoundaryTile<T> {
             expr_term_id: self.expr_term_id,
             spec: self.spec,
         })
+    }
+
+    fn is_boundary_tile(&self) -> bool {
+        true
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
