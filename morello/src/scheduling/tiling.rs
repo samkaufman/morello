@@ -436,8 +436,8 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
             },
             LogicalSpec::Compose {
                 components,
-                operand_auxes,
-                serial_only,
+                operand_auxes: _,
+                serial_only: _,
             } if matches!(
                 components[0],
                 PrimitiveBasics {
@@ -446,36 +446,9 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                 }
             ) =>
             {
-                let Some(output_idx) = logical_spec.unique_output_index() else {
-                    panic!("Compose should have a unique output");
-                };
-
-                let [old_b, old_m, old_k, old_n] = &components[0].spec_shape[..] else {
-                    todo!();
-                };
-
-                // Build a Loop out of a Compose with the head component removed.
-                // TODO: Can we use a helper method to avoid dupe'ing with Bufferize?
-                let compose_tail = Spec(
-                    if components.len() == 2 {
-                        LogicalSpec::Primitive(
-                            components[1].clone(),
-                            operand_auxes[1..].to_vec(),
-                            *serial_only,
-                        )
-                    } else {
-                        debug_assert!(components.len() > 2);
-                        LogicalSpec::Compose {
-                            components: components[1..].to_vec(),
-                            operand_auxes: operand_auxes[1..].to_vec(),
-                            serial_only: *serial_only,
-                        }
-                    },
-                    spec.1.clone(),
-                );
-                // TODO: Fix Split with Compose to work with boundary regions
+                // TODO: Implement Split for Compose(MatmulAccum, ..)
                 Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                    "Split with Compose not yet implemented for boundary regions",
+                    "Split with Compose unimplemented",
                 ))))
             }
             LogicalSpec::Compose { .. } => todo!(),
@@ -1370,8 +1343,8 @@ mod tests {
         match result {
             Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(msg)))) => {
                 assert!(
-                    msg.contains("Split with Compose not yet implemented"),
-                    "Expected 'not yet implemented' error, got: {msg}"
+                    msg.contains("Split with Compose unimplemented"),
+                    "Expected 'unimplemented' error, got: {msg}"
                 );
             }
             Ok(_) => {
