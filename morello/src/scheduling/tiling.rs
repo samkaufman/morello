@@ -336,18 +336,24 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                         let boundary_body = SpecApp::new(
                             boundary_spec,
                             [
-                                ViewE::Tile(
+                                ViewE::BoundaryTile(convert_tile_to_boundarytile(
                                     boundary_lhs_tiling
                                         .apply_main(Param::new(0, operands[0].clone()))
                                         .map(|v| v.boxed_viewe())
                                         .map_err(tile_to_apply_err)?,
-                                ),
-                                ViewE::Tile(
+                                    nz!(4usize), // 1 << 2
+                                    operands[0].shape(),
+                                    &[Some(0), Some(1), None],
+                                )),
+                                ViewE::BoundaryTile(convert_tile_to_boundarytile(
                                     boundary_rhs_tiling
                                         .apply_main(Param::new(1, operands[1].clone()))
                                         .map(|v| v.boxed_viewe())
                                         .map_err(tile_to_apply_err)?,
-                                ),
+                                    nz!(4usize), // 1 << 2
+                                    operands[1].shape(),
+                                    &[Some(0), None, Some(2)],
+                                )),
                                 ViewE::Param(Param::new(2, operands[2].clone())),
                             ],
                         );
@@ -1054,7 +1060,7 @@ mod tests {
     use crate::shape;
     use crate::spec;
     use crate::spec::Spec;
-    use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+    use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{
         CpuMemoryLevel::{self, GL},
         X86Target,
@@ -1306,6 +1312,96 @@ mod tests {
             prop_assert_eq!(tspec.aux.layout, original_aux.layout);
             prop_assert_eq!(tspec.aux.level, original_aux.level);
             prop_assert_eq!(tspec.aux.vector_size, original_aux.vector_size);
+        }
+
+        /// Test that any tiling operation (TileOut or Split) producing boundary regions results in SpecApps
+        /// with at least one BoundaryTile argument for each boundary body.
+        #[test]
+        fn test_tiling_operations_with_boundary_regions_have_boundary_tiles(
+            (spec, action) in arb_canonical_spec::<X86Target>(Some(nz!(8u32)), None)
+                .prop_filter_map("Must have unique output", |spec| {
+                    spec.0.unique_output_index().map(|idx| (spec, idx))
+                })
+                .prop_flat_map(|(spec, output_idx)| {
+                    let output_shape = spec.0.parameters()[output_idx].shape().to_vec();
+
+                    // Strategy 1: TileOut actions on output tensor dimensions
+                    let tileout_strategy = if output_shape.is_empty() {
+                        unreachable!();
+                    } else {
+                        let dim_range = 0u8..u8::try_from(output_shape.len().min(4)).unwrap();
+                        let size_range = 2u32..5;
+                        (dim_range, size_range)
+                            .prop_map(|(dim, size)| {
+                                Action::TileOut(TileOut::SingleLoop {
+                                    dim,
+                                    size: NonZeroU32::new(size).unwrap(),
+                                    parallel: false,
+                                })
+                            })
+                            .boxed()
+                    };
+
+                    // Strategy 2: Split actions on k dimension of Matmul or Compose(Matmul, ..) (only if applicable)
+                    let split_strategy = match &spec.0 {
+                        LogicalSpec::Primitive(PrimitiveBasics { typ: PrimitiveSpecType::Matmul { accum: true }, .. }, ..) => {
+                            let operands = spec.0.parameters();
+                            let k_dim_size = operands[0].shape()[2].get();
+                            if k_dim_size > 1 {
+                                let k_range = 1u32..(k_dim_size.min(6));
+                                Some(k_range
+                                    .prop_map(|k| Action::Split(Split { k: NonZeroU32::new(k).unwrap() }))
+                                    .boxed())
+                            } else {
+                                None
+                            }
+                        }
+                        LogicalSpec::Compose { components, .. } if matches!(components.first(), Some(PrimitiveBasics { typ: PrimitiveSpecType::Matmul { accum: true }, .. })) => {
+                            let operands = spec.0.parameters();
+                            if operands.len() >= 2 && operands[0].shape().len() >= 3 {
+                                let k_dim_size = operands[0].shape()[2].get();
+                                if k_dim_size > 1 {
+                                    let k_range = 1u32..(k_dim_size.min(6));
+                                    Some(k_range
+                                        .prop_map(|k| Action::Split(Split { k: NonZeroU32::new(k).unwrap() }))
+                                        .boxed())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    let combined_strategy = if let Some(split_strat) = split_strategy {
+                        prop_oneof![tileout_strategy, split_strat].boxed()
+                    } else {
+                        tileout_strategy
+                    };
+                    combined_strategy.prop_map(move |action| (spec.clone(), action))
+                })
+        ) {
+            let result = action.apply(&spec);
+            let Ok(impl_node) = result else {
+                return Ok(());
+            };
+            let ImplNode::Loop(loop_impl) = impl_node else {
+                unreachable!();
+            };
+
+            // Check that every non-main body is a SpecApp with at least one BoundaryTile argument
+            for (body_idx, body) in loop_impl.bodies.iter().enumerate().skip(1) {
+                let ImplNode::SpecApp(spec_app) = body else {
+                    unreachable!("Boundary body {body_idx} should be a SpecApp, got: {body:?}");
+                };
+                let has_boundary_tile = spec_app.1.iter().any(|arg| matches!(arg, ViewE::BoundaryTile(_)));
+                prop_assert!(
+                    has_boundary_tile,
+                    "Boundary body {body_idx} should have at least one BoundaryTile argument"
+                );
+            }
         }
     }
 
