@@ -842,7 +842,7 @@ fn create_region_output_tiling<Tgt: Target>(
     let original_param = &spec.0.parameters()[output_tile.parameter_index as usize];
     let original_param_shape = original_param.shape();
 
-    let mut region_tile_shape: Vec<DimSize> = original_param_shape.to_vec();
+    let mut region_tile_shape: Vec<DimSize> = vec![nz!(1u32); original_param_shape.len()];
     for (dim_idx, &tile_size) in output_tile.tile.shape().iter().enumerate() {
         let original_size = original_param_shape[dim_idx];
         let actual_axis = output_tile.axes[dim_idx];
@@ -850,6 +850,9 @@ fn create_region_output_tiling<Tgt: Target>(
         if region_id.get() & (1_usize << actual_axis) != 0 {
             let remainder = NonZeroU32::new(original_size.get() % tile_size.get()).unwrap();
             region_tile_shape[dim_idx] = remainder;
+        } else {
+            let main_extent = original_size.get() - (original_size.get() % tile_size.get());
+            region_tile_shape[dim_idx] = main_extent.try_into().unwrap();
         }
     }
     debug_assert_ne!(region_tile_shape, original_param_shape);
@@ -1401,6 +1404,38 @@ mod tests {
                     has_boundary_tile,
                     "Boundary body {body_idx} should have at least one BoundaryTile argument"
                 );
+            }
+        }
+
+        #[test]
+        fn test_split_with_multiple_k_produces_no_boundaries(
+            (spec, action) in arb_canonical_spec::<X86Target>(Some(nz!(16u32)), None)
+                .prop_filter_map("Must be Matmul with accum", |spec| {
+                    match &spec.0 {
+                        LogicalSpec::Primitive(PrimitiveBasics {
+                            typ: PrimitiveSpecType::Matmul { accum: true },
+                            ..
+                        }, ..) => Some(spec),
+                        _ => None
+                    }
+                })
+                .prop_filter("Matmul must have k > 1", |s| s.0.parameter_shape(0)[2].get() > 1)
+                .prop_flat_map(|spec| {
+                    let operands = spec.0.parameters();
+                    let k_dim_size = operands[0].shape()[2].get();
+                    let factors: Vec<u32> = (1..=(k_dim_size/2)).filter(|&k| k_dim_size % k == 0).collect();
+                    let split_actions = prop::sample::select(factors)
+                        .prop_map(|k| Action::Split(Split { k: k.try_into().unwrap() }))
+                        .boxed();
+                    (Just(spec), split_actions)
+                })
+        ) {
+            match action.apply(&spec) {
+                Ok(ImplNode::Loop(loop_impl)) => {
+                    assert_eq!(loop_impl.bodies.len(), 1, "Split with multiple k should produce no boundary regions");
+                }
+                Ok(_) => unreachable!(),
+                Err(_) => {} // skip apply failures
             }
         }
     }

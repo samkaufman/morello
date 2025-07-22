@@ -132,20 +132,23 @@ impl Tiling {
             let mut boundary_shape = self.shape.clone();
             let mut offsets = vec![0u32; rank];
 
-            // Check each dimension to see if it's included in this combination
             for dim in 0..rank {
-                if (dim_mask & (1 << dim)) != 0 {
-                    let boundary_size = self.boundary_size(dim as u8, origin_shape[dim]);
-                    if boundary_size > 0 {
-                        has_boundary = true;
-                        boundary_shape[dim] = DimSize::new(boundary_size).unwrap();
+                let remainder = origin_shape[dim].get() % self.step_sizes[dim].get();
+                let main_region_size = origin_shape[dim].get() - remainder;
 
-                        let full_steps = origin_shape[dim].get() / self.step_sizes[dim].get();
-                        offsets[dim] = full_steps * self.step_sizes[dim].get();
-                    } else {
+                if (dim_mask & (1 << dim)) != 0 {
+                    // This dimension has a boundary
+                    let boundary_size = self.boundary_size(dim as u8, origin_shape[dim]);
+                    if boundary_size == 0 {
                         has_boundary = false;
                         break;
                     }
+                    has_boundary = true;
+                    boundary_shape[dim] = DimSize::new(boundary_size).unwrap();
+                    offsets[dim] = main_region_size;
+                } else {
+                    boundary_shape[dim] = DimSize::new(main_region_size).unwrap();
+                    offsets[dim] = 0;
                 }
             }
 
@@ -226,6 +229,22 @@ mod tests {
         })
     }
 
+    /// A Strategy for generating simple Tilings along with larger shapes.
+    fn simple_tiling_and_origin_shape_strategy() -> impl Strategy<Value = (Tiling, Shape)> {
+        shape_strategy(nz!(4u32), 2).prop_flat_map(|tile_shape| {
+            let origin_shape = tile_shape
+                .iter()
+                .map(|&tile_dim_size| {
+                    assert!(tile_dim_size <= MAX_ORIGIN_SIZE);
+                    tile_dim_size.get()..=MAX_ORIGIN_SIZE.get()
+                })
+                .collect::<Vec<_>>()
+                .prop_map(|v| v.into_iter().map(|x| DimSize::new(x).unwrap()).collect());
+            let tiling = Tiling::new_simple(tile_shape);
+            (Just(tiling), origin_shape)
+        })
+    }
+
     #[test]
     fn test_tiling_sliding() {
         const OUTER_SHAPE: [DimSize; 5] = [nz!(1u32), nz!(4u32), nz!(2u32), nz!(4u32), nz!(4u32)];
@@ -284,6 +303,60 @@ mod tests {
                         break;
                     }
                 }
+            }
+        }
+
+        /// Tests that when simple tiling is applied with boundaries, the sum of main tile
+        /// and boundary tile volumes equals the original tensor volume.
+        #[test]
+        fn test_simple_tiling_volume_preserved(
+            (tiling, origin_shape) in simple_tiling_and_origin_shape_strategy()
+        ) {
+            let spec = TensorSpec::<X86Target>::new_canon(
+                origin_shape.clone(),
+                Dtype::Uint32,
+                X86Target::levels()[0],
+                row_major(origin_shape.len().try_into().unwrap()),
+                None,
+            );
+
+            match tiling.apply_with_boundaries(&Param::new(0, spec)) {
+                Ok((main_tile, boundary_tiles)) => {
+                    let main_volume: u64 = main_tile.shape().iter()
+                        .map(|&dim| u64::from(dim.get()))
+                        .product();
+                    let main_steps: u64 = origin_shape.iter()
+                        .enumerate()
+                        .map(|(dim, &origin_dim)| {
+                            u64::from(origin_dim.get() / tiling.step_sizes()[dim].get())
+                        })
+                        .product();
+                    let main_total_volume = main_volume * main_steps;
+
+                    let boundary_total_volume: u64 = boundary_tiles.iter()
+                        .map(|boundary_tile| {
+                            boundary_tile.shape().iter()
+                                .map(|&dim| u64::from(dim.get()))
+                                .product::<u64>()
+                        })
+                        .sum();
+
+                    let original_volume: u64 = origin_shape.iter()
+                        .map(|&dim| u64::from(dim.get()))
+                        .product();
+                    prop_assert_eq!(
+                        main_total_volume + boundary_total_volume,
+                        original_volume,
+                        "Mismatching volumes after tiling {} with {}, yielding main {} and boundaries {}",
+                        tiling.shape().iter().map(|d| d.get()).join("x"),
+                        origin_shape.iter().map(|d| d.get()).join("x"),
+                        main_tile.spec(),
+                        boundary_tiles.iter()
+                            .map(|b| b.spec().to_string())
+                            .join(", ")
+                    );
+                }
+                Err(_) => {} // skip apply failures
             }
         }
     }
@@ -356,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_apply_with_boundaries_some_nonmultiples() {
-        // Tile 2x4x3 over 6x7x9 (multiple in dim 0, non-multiple in dims 1 and 2)
+        // Tile 2x4x3 over 6x7x9 (multiple in dims 0 and 2, non-multiple in dim 1)
         let spec = TensorSpec::<X86Target>::new_canon(
             shape![6, 7, 9],
             Dtype::Uint32,
@@ -374,7 +447,7 @@ mod tests {
         assert_eq!(main_tile.shape(), &[nz!(2u32), nz!(4u32), nz!(3u32)]);
 
         let dim1_boundary = &boundary_tiles[0];
-        assert_eq!(dim1_boundary.shape(), &[nz!(2u32), nz!(3u32), nz!(3u32)]);
+        assert_eq!(dim1_boundary.shape(), &[nz!(6u32), nz!(3u32), nz!(9u32)]);
         assert_eq!(dim1_boundary.offsets(), &[0, 4, 0]);
     }
 }
