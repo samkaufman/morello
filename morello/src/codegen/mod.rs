@@ -20,7 +20,7 @@ use std::cmp::max;
 use std::env;
 use std::fmt;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output};
 use std::rc::Rc;
 use std::time::Duration;
@@ -273,6 +273,10 @@ impl BuiltArtifact {
             binary_path,
             parameter_dtypes,
         }
+    }
+
+    pub fn binary_path(&self) -> &Path {
+        &self.binary_path
     }
 
     pub fn parameter_dtypes(&self) -> &[Dtype] {
