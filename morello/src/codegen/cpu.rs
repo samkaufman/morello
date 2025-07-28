@@ -1843,11 +1843,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         if l.parallel {
             match self.thread_style {
                 CpuCodeGenThreadStyle::OpenMP => {
+                    self.headers.emit_cores_clamp = true;
                     writeln!(
                         w,
-                        "{}#pragma omp parallel for collapse({}) schedule(static)",
+                        "{}#pragma omp parallel for collapse({}) num_threads(cores_clamp({})) schedule(static)",
                         indent(depth),
-                        axes_to_emit.len()
+                        axes_to_emit.len(),
+                        l.full_steps(),
                     )?;
                 }
                 CpuCodeGenThreadStyle::Highway => {
