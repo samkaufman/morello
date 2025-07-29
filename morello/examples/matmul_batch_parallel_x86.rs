@@ -49,10 +49,11 @@ fn main() {
         .tile_out_parallel(&[1, 2048, 2048])
         .tile_out(&[1, M_R * (2048 / M_R), 2048])
         .subschedule(&[0], |main| {
-            main.tile_out(&[1, M_C, 2048])
-                .subschedule(&[0], |main_main| {
+            main.move_relayout(1, GL, layout_b.clone(), None)
+                .tile_out(&[1, M_C, 2048])
+                .subschedule(&[0], naive_scalar_move_impl)
+                .subschedule(&[1, 0], |main_main| {
                     main_main
-                        .move_relayout(1, GL, layout_b.clone(), None)
                         .move_relayout(0, GL, layout_a.clone(), None)
                         // .tile_out(&[1, m_c, 2048])
                         .split(K_C)
@@ -70,14 +71,13 @@ fn main() {
                         .select(CpuKernel::BroadcastVecMultAdd)
                         // Moves
                         .subschedule(&[0], naive_scalar_move_impl)
-                        .subschedule(&[1, 0], naive_scalar_move_impl)
+                        .subschedule(&[1, 0], naive_vector_move_impl)
                         .subschedule(&[1, 1, 0], naive_vector_move_impl)
-                        .subschedule(&[1, 1, 1, 0], naive_vector_move_impl)
-                        .subschedule(&[1, 1, 2], naive_vector_move_impl)
+                        .subschedule(&[1, 2], naive_vector_move_impl)
                 })
-                .subschedule(&[1], |main_secondary| {
+                .subschedule(&[1, 1], |main_secondary| {
                     main_secondary
-                        .move_relayout(1, GL, layout_b.clone(), None)
+                        // .move_relayout(1, GL, layout_b.clone(), None)
                         .move_relayout(0, GL, layout_a.clone(), None)
                         .split(K_C)
                         .tile_out(&[1, M_R, N_C])
@@ -92,10 +92,9 @@ fn main() {
                         .select(CpuKernel::BroadcastVecMultAdd)
                         // Moves
                         .subschedule(&[0], naive_scalar_move_impl)
-                        .subschedule(&[1, 0], naive_scalar_move_impl)
+                        .subschedule(&[1, 0], naive_vector_move_impl)
                         .subschedule(&[1, 1, 0], naive_vector_move_impl)
-                        .subschedule(&[1, 1, 1, 0], naive_vector_move_impl)
-                        .subschedule(&[1, 1, 2], naive_vector_move_impl)
+                        .subschedule(&[1, 2], naive_vector_move_impl)
                 })
         })
         .subschedule(&[1], |secondary| {
