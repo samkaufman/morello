@@ -1846,7 +1846,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     self.headers.emit_cores_clamp = true;
                     writeln!(
                         w,
-                        "{}#pragma omp parallel for collapse({}) num_threads(cores_clamp({})) schedule(static)",
+                        "{}#pragma omp parallel for collapse({}) num_threads(cores_clamp({})) proc_bind(spread) schedule(static)",
                         indent(depth),
                         axes_to_emit.len(),
                         l.full_steps(),
