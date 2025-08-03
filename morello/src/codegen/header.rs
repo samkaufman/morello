@@ -10,6 +10,7 @@ pub struct HeaderEmitter {
     pub emit_stdbool_and_assert_includes: bool,
     pub emit_math_include: bool, // math.h
     pub emit_expf_avx2: bool,
+    pub emit_cores_clamp: bool,
     pub emit_sum8: bool,
     pub emit_cvtbf16_fp32: bool,
     pub emit_max: bool,
@@ -32,6 +33,9 @@ impl HeaderEmitter {
             TargetId::Arm => {
                 out.write_str(include_str!("../codegen/partials/arm.c"))?;
             }
+        }
+        if self.emit_cores_clamp {
+            out.write_str(include_str!("../codegen/partials/x86/cores_clamp.c"))?;
         }
         if self.emit_sum8 {
             out.write_str(include_str!("../codegen/partials/x86/sum8.c"))?;

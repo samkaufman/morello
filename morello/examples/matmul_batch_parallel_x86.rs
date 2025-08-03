@@ -14,6 +14,13 @@ use morello::utils::ToWriteFmt;
 use nonzero::nonzero as nz;
 use std::io;
 
+const M_C: u32 = 1020;
+const K_C: u32 = 1024;
+const N_C: u32 = 128;
+const M_R: u32 = 6;
+const N_R: u32 = 16;
+const MOVE_TILE_SIZE: u32 = 32;
+
 fn main() {
     // Compute a batch=4 matrix multiplication. (Four independent matmuls!)
     let mut spec: Spec<X86Target> = spec!(MatmulAccum(
@@ -28,37 +35,87 @@ fn main() {
         (0, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
         (2, PhysDim::Dynamic),
-        (1, PhysDim::Packed(nz!(4u32))),
+        (1, PhysDim::Packed(M_R.try_into().unwrap())),
     ]);
-
-    let mat1_pack_size = nz!(16u32);
     let layout_b = Layout::new(vec![
         (0, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
         (1, PhysDim::Dynamic),
-        (2, PhysDim::Packed(mat1_pack_size)),
+        (2, PhysDim::Dynamic),
+        (1, PhysDim::Packed(K_C.try_into().unwrap())),
+        (2, PhysDim::Packed(N_R.try_into().unwrap())),
     ]);
 
     let implementation = spec
         .tile_out_parallel(&[1, 2048, 2048])
-        .split(512) // Test larger split size
-        .move_relayout(1, GL, layout_b.clone(), None)
-        .move_relayout(0, GL, layout_a.clone(), None)
-        .tile_out(&[1, 256, 128]) // Keep memory_opt's successful tile configuration
-        .tile_out(&[1, 4, 16])
-        .move_param(0, L1)
-        .move_param(2, L1)
-        .move_vrf(2, VRF, nz!(8u32))
-        .split(1)
-        .tile_out(&[1, 1, 16])
-        .move_param(1, L1)
-        .move_vrf(1, VRF, nz!(8u32))
-        .select(CpuKernel::BroadcastVecMultAdd)
-        .subschedule(&[0], naive_scalar_move_impl)
-        .subschedule(&[1, 0], naive_scalar_move_impl)
-        .subschedule(&[1, 1, 0], naive_vector_move_impl)
-        .subschedule(&[1, 1, 1, 0], naive_vector_move_impl)
-        .subschedule(&[1, 1, 2, 0], naive_vector_move_impl);
+        .tile_out(&[1, M_R * (2048 / M_R), 2048])
+        .subschedule(&[0], |main| {
+            main.move_relayout(1, GL, layout_b.clone(), None)
+                .tile_out(&[1, M_C, 2048])
+                .subschedule(&[0], naive_scalar_move_impl)
+                .subschedule(&[1, 0], |main_main| {
+                    main_main
+                        .move_relayout(0, GL, layout_a.clone(), None)
+                        // .tile_out(&[1, m_c, 2048])
+                        .split(K_C)
+                        // A' in 8 MiB L3 per CCX
+                        .tile_out(&[1, M_C, N_C])
+                        // B' fills L2 cache here
+                        // Microkernel
+                        .tile_out(&[1, M_R, N_R])
+                        .move_param(0, L1)
+                        .move_vrf(2, VRF, nz!(8u32))
+                        .split(1)
+                        .tile_out(&[1, 1, 16])
+                        .move_param(1, L1) // moves low to "skip" modeling
+                        .move_vrf(1, VRF, nz!(8u32))
+                        .select(CpuKernel::BroadcastVecMultAdd)
+                        // Moves
+                        .subschedule(&[0], naive_scalar_move_impl)
+                        .subschedule(&[1, 0], naive_vector_move_impl)
+                        .subschedule(&[1, 1, 0], naive_vector_move_impl)
+                        .subschedule(&[1, 2], naive_vector_move_impl)
+                })
+                .subschedule(&[1, 1], |main_secondary| {
+                    main_secondary
+                        // .move_relayout(1, GL, layout_b.clone(), None)
+                        .move_relayout(0, GL, layout_a.clone(), None)
+                        .split(K_C)
+                        .tile_out(&[1, M_R, N_C])
+                        // Microkernel
+                        .tile_out(&[1, M_R, N_R])
+                        .move_param(0, L1)
+                        .move_vrf(2, VRF, nz!(8u32))
+                        .split(1)
+                        .tile_out(&[1, 1, 16])
+                        .move_param(1, L1) // moves low to "skip" modeling
+                        .move_vrf(1, VRF, nz!(8u32))
+                        .select(CpuKernel::BroadcastVecMultAdd)
+                        // Moves
+                        .subschedule(&[0], naive_scalar_move_impl)
+                        .subschedule(&[1, 0], naive_vector_move_impl)
+                        .subschedule(&[1, 1, 0], naive_vector_move_impl)
+                        .subschedule(&[1, 2], naive_vector_move_impl)
+                })
+        })
+        .subschedule(&[1], |secondary| {
+            secondary
+                .move_relayout(1, GL, layout_b.clone(), None)
+                .tile_out(&[1, 1, 2048])
+                .split(K_C)
+                // Microkernel
+                .tile_out(&[1, 1, 16])
+                .move_vrf(2, VRF, nz!(8u32))
+                .split(1)
+                .move_param(1, L1) // moves low to "skip" modeling
+                .move_param(0, L1)
+                .move_vrf(1, VRF, nz!(8u32))
+                .select(CpuKernel::BroadcastVecMultAdd)
+                // Moves
+                .subschedule(&[1, 0], naive_vector_move_impl)
+                .subschedule(&[0, 0, 0], naive_scalar_move_impl)
+                .subschedule(&[1, 1, 0], naive_vector_move_impl)
+                .subschedule(&[1, 2], naive_vector_move_impl)
+        });
 
     implementation
         .emit(
@@ -112,7 +169,15 @@ fn naive_scalar_move_impl(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
 }
 
 fn naive_vector_move_impl(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
-    let imp = move_spec.tile_out(&[1, 1, 8]);
+    let ot_h = MOVE_TILE_SIZE.min(move_spec.0.parameter_shape(0)[1].get());
+    let ot_w = MOVE_TILE_SIZE.min(move_spec.0.parameter_shape(0)[2].get());
+    let imp = if ot_h == move_spec.0.parameter_shape(0)[1].get()
+        && ot_w == move_spec.0.parameter_shape(0)[2].get()
+    {
+        move_spec.tile_out(&[1, 1, 8])
+    } else {
+        move_spec.tile_out(&[1, ot_h, ot_w]).tile_out(&[1, 1, 8])
+    };
     if move_spec
         .0
         .parameters()

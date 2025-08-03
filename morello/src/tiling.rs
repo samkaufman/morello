@@ -320,43 +320,40 @@ mod tests {
                 None,
             );
 
-            match tiling.apply_with_boundaries(&Param::new(0, spec)) {
-                Ok((main_tile, boundary_tiles)) => {
-                    let main_volume: u64 = main_tile.shape().iter()
-                        .map(|&dim| u64::from(dim.get()))
-                        .product();
-                    let main_steps: u64 = origin_shape.iter()
-                        .enumerate()
-                        .map(|(dim, &origin_dim)| {
-                            u64::from(origin_dim.get() / tiling.step_sizes()[dim].get())
-                        })
-                        .product();
-                    let main_total_volume = main_volume * main_steps;
+            if let Ok((main_tile, boundary_tiles)) = tiling.apply_with_boundaries(&Param::new(0, spec)) {
+                let main_volume: u64 = main_tile.shape().iter()
+                    .map(|&dim| u64::from(dim.get()))
+                    .product();
+                let main_steps: u64 = origin_shape.iter()
+                    .enumerate()
+                    .map(|(dim, &origin_dim)| {
+                        u64::from(origin_dim.get() / tiling.step_sizes()[dim].get())
+                    })
+                    .product();
+                let main_total_volume = main_volume * main_steps;
 
-                    let boundary_total_volume: u64 = boundary_tiles.iter()
-                        .map(|boundary_tile| {
-                            boundary_tile.shape().iter()
-                                .map(|&dim| u64::from(dim.get()))
-                                .product::<u64>()
-                        })
-                        .sum();
+                let boundary_total_volume: u64 = boundary_tiles.iter()
+                    .map(|boundary_tile| {
+                        boundary_tile.shape().iter()
+                            .map(|&dim| u64::from(dim.get()))
+                            .product::<u64>()
+                    })
+                    .sum();
 
-                    let original_volume: u64 = origin_shape.iter()
-                        .map(|&dim| u64::from(dim.get()))
-                        .product();
-                    prop_assert_eq!(
-                        main_total_volume + boundary_total_volume,
-                        original_volume,
-                        "Mismatching volumes after tiling {} with {}, yielding main {} and boundaries {}",
-                        tiling.shape().iter().map(|d| d.get()).join("x"),
-                        origin_shape.iter().map(|d| d.get()).join("x"),
-                        main_tile.spec(),
-                        boundary_tiles.iter()
-                            .map(|b| b.spec().to_string())
-                            .join(", ")
-                    );
-                }
-                Err(_) => {} // skip apply failures
+                let original_volume: u64 = origin_shape.iter()
+                    .map(|&dim| u64::from(dim.get()))
+                    .product();
+                prop_assert_eq!(
+                    main_total_volume + boundary_total_volume,
+                    original_volume,
+                    "Mismatching volumes after tiling {} with {}, yielding main {} and boundaries {}",
+                    tiling.shape().iter().map(|d| d.get()).join("x"),
+                    origin_shape.iter().map(|d| d.get()).join("x"),
+                    main_tile.spec(),
+                    boundary_tiles.iter()
+                        .map(|b| b.spec().to_string())
+                        .join(", ")
+                );
             }
         }
     }
