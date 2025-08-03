@@ -506,17 +506,23 @@ impl Layout {
                         new_contig -= 1;
                     }
                 }
-                (PhysDim::Dynamic, PhysDim::Packed(_))
-                | (PhysDim::Dynamic, PhysDim::OddEven(_))
-                | (PhysDim::Packed(_), PhysDim::Dynamic)
+                (PhysDim::Dynamic, PhysDim::Packed(_)) => {
+                    if idx >= first_contig_idx {
+                        new_contig -= 1;
+                    }
+                }
+                (PhysDim::Dynamic, PhysDim::OddEven(_))
                 | (PhysDim::Packed(_), PhysDim::OddEven(_))
                 | (PhysDim::OddEven(_), PhysDim::Dynamic)
                 | (PhysDim::OddEven(_), PhysDim::Packed(_)) => {
                     new_dims.push((*dim, *phys_dim));
                 }
                 (PhysDim::OddEven(_), PhysDim::OddEven(_)) => todo!(),
+                (PhysDim::Packed(_), PhysDim::Dynamic) => {
+                    unreachable!("Dynamic followed Packed same logical dimension");
+                }
                 (PhysDim::Dynamic, PhysDim::Dynamic) => {
-                    panic!("Repeating non-packed dimensions is undefined: {self:?}")
+                    unreachable!("Repeating non-packed dimensions");
                 }
             }
         }
@@ -1175,6 +1181,39 @@ mod tests {
         assert!(new_layout.is_fully_contiguous());
     }
 
+    #[test]
+    fn test_drop_unneeded_packings_1() {
+        let mut layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (0, PhysDim::Packed(4)),
+        ];
+        let expected = layout![(1, PhysDim::Dynamic), (0, PhysDim::Dynamic)];
+        layout.drop_unneeded_packings(&[nz!(4u32), nz!(1024u32)]);
+        assert_eq!(layout, expected);
+    }
+
+    #[test]
+    fn test_drop_unneeded_packings_2() {
+        let mut layout = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (2, PhysDim::Dynamic), // will be dropped when below is converted
+            (1, PhysDim::Packed(nz!(256u32))), // after drop, will be contig. with above Dynamic
+            (2, PhysDim::Packed(nz!(512u32))), // will be converted to Dynamic
+            (1, PhysDim::Packed(nz!(4u32))),
+        ];
+        let expected = layout![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (2, PhysDim::Dynamic),
+            (1, PhysDim::Packed(nz!(4u32))),
+        ];
+        layout.drop_unneeded_packings(&[nz!(1u32), nz!(2048u32), nz!(512u32)]);
+        layout.merge_consecutive_dimensions(); // TODO: Remove
+        assert_eq!(layout, expected);
+    }
+
     proptest! {
         #[test]
         fn test_expand_physical_shape_preserves_volume(
@@ -1531,6 +1570,28 @@ mod tests {
         assert_eq!(
             layout.strides(&[nz!(4u32), nz!(6u32)]),
             Err(StridesError::NonseqPhysicalDims(1))
+        );
+    }
+
+    #[test]
+    fn test_merge_consecutive_dimensions_dynamic_packed_contig_update() {
+        let mut layout = Layout {
+            dims: vec![
+                (1, PhysDim::Dynamic),
+                (0, PhysDim::Dynamic),
+                (0, PhysDim::Packed(nz!(4u32))),
+            ],
+            contig: 2,
+        };
+        // This should merge the physical dimensions for logical dimension 0. They comprise the
+        // contiguous region, so `contig` should become 1.
+        layout.merge_consecutive_dimensions();
+        assert_eq!(
+            layout,
+            Layout {
+                dims: vec![(1, PhysDim::Dynamic), (0, PhysDim::Dynamic),],
+                contig: 1,
+            }
         );
     }
 
