@@ -14,14 +14,11 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{fs, iter, path};
 
 #[cfg(feature = "db-stats")]
-use {
-    std::sync::atomic::{self, AtomicU64},
-    std::time::Duration,
-};
+use std::sync::atomic::{self, AtomicU64};
 
 use morello::common::{DimSize, Dtype};
 use morello::db::FilesDatabase;
@@ -60,6 +57,8 @@ struct Args {
     progress_bar: bool,
     #[arg(long, help = "Maximum number of stages to run.")]
     stages: Option<usize>,
+    #[arg(long, help = "Exit after this many seconds.")]
+    timeout: Option<u64>,
     #[arg(long)]
     db: Option<path::PathBuf>,
     #[arg(long, default_value = "32", help = "Cache size in database pages.")]
@@ -134,6 +133,9 @@ where
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let deadline = args
+        .timeout
+        .map(|s| Instant::now() + Duration::from_secs(s));
 
     let multi_opt = if args.progress_bar {
         let logger = env_logger::Builder::from_env(env_logger::Env::default()).build();
@@ -150,7 +152,7 @@ fn main() -> Result<()> {
 
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size, threads);
-    main_per_db(&args, db, args.db.as_deref(), multi_opt);
+    main_per_db(&args, db, args.db.as_deref(), multi_opt, deadline);
 
     Ok(())
 }
@@ -160,6 +162,7 @@ fn main_per_db(
     #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
     db_path: Option<&path::Path>,
     multi_opt: Option<MultiProgress>,
+    deadline: Option<Instant>,
 ) {
     let levels = X86Target::levels();
     let MemoryLimits::Standard(top) = X86Target::max_mem();
@@ -285,7 +288,14 @@ fn main_per_db(
 
                     let mut subworklist_offset = 0;
                     let mut stage_results = Vec::with_capacity(worklist.len());
+                    let mut deadline_reached = false;
                     while subworklist_offset < worklist.len() {
+                        if let Some(d) = deadline {
+                            if Instant::now() >= d {
+                                deadline_reached = true;
+                                break;
+                            }
+                        }
                         let subworklist = &worklist[subworklist_offset
                             ..worklist
                                 .len()
@@ -299,6 +309,10 @@ fn main_per_db(
                             pb.tick();
                         }
                         subworklist_offset += subworklist.len();
+                    }
+                    if deadline_reached {
+                        log::debug!("Deadline reached; thread stopping");
+                        return;
                     }
 
                     #[cfg(feature = "db-stats")]
