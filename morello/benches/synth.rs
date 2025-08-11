@@ -9,12 +9,12 @@ use morello::spec::Spec;
 use morello::target::{Target, X86Target};
 
 #[export_name = "morello_bench_synth::matmul_spec"]
-fn matmul_spec<Tgt: Target>(size: u32) -> Spec<Tgt> {
+fn matmul_spec(size: u32) -> Spec<X86Target> {
     spec!(Matmul(
         [1, size, size, size],
-        (u32, Tgt::default_level(), row_major),
-        (u32, Tgt::default_level(), row_major),
-        (u32, Tgt::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
         serial
     ))
 }

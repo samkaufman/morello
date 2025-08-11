@@ -9,40 +9,40 @@ use morello::target::{Target, X86Target};
 // TODO: Add a benchmark for Compose
 
 #[export_name = "morello_bench_logicalspec_parameters::matmul_spec"]
-fn matmul_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
+fn matmul_spec(size: u32) -> LogicalSpec<X86Target> {
     lspec!(Matmul(
         [1, size, size, size],
-        (u32, Tgt::default_level(), row_major),
-        (u32, Tgt::default_level(), row_major),
-        (u32, Tgt::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
         serial
     ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::conv_spec"]
-fn conv_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
+fn conv_spec(size: u32) -> LogicalSpec<X86Target> {
     lspec!(Conv(
         [size, size, size, 1, 1, size, size],
-        (u32, Tgt::default_level(), row_major),
-        (u32, Tgt::default_level(), row_major),
-        (u32, Tgt::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
         serial
     ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::move_spec"]
-fn move_spec<Tgt: Target>(size: u32) -> LogicalSpec<Tgt> {
+fn move_spec(size: u32) -> LogicalSpec<X86Target> {
     lspec!(Move(
         [size, size],
-        (u32, Tgt::default_level(), row_major),
-        (u32, Tgt::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
+        (u32, X86Target::default_level(), row_major),
         serial
     ))
 }
 
 #[library_benchmark]
 fn iter_logicalspec_parameters_matmul() {
-    let sp = matmul_spec::<X86Target>(32);
+    let sp = matmul_spec(32);
     for _ in 0..100 {
         for p in sp.parameters() {
             black_box(p);
@@ -52,7 +52,7 @@ fn iter_logicalspec_parameters_matmul() {
 
 #[library_benchmark]
 fn iter_logicalspec_parameters_conv() {
-    let sp = conv_spec::<X86Target>(32);
+    let sp = conv_spec(32);
     for _ in 0..100 {
         for p in sp.parameters() {
             black_box(p);
@@ -62,7 +62,7 @@ fn iter_logicalspec_parameters_conv() {
 
 #[library_benchmark]
 fn iter_logicalspec_parameters_move() {
-    let sp = move_spec::<X86Target>(32);
+    let sp = move_spec(32);
     for _ in 0..100 {
         for p in sp.parameters() {
             black_box(p);
