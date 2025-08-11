@@ -290,7 +290,7 @@ impl FilesDatabase {
     /// Return the [PageId] to which the given canonical [Spec] belongs.
     ///
     /// Passing a non-canonical [Spec] is a logic error.
-    pub fn page_id<Tgt>(&self, spec: &Spec<Tgt>) -> PageId
+    pub fn page_id<Tgt>(&self, spec: &Spec<Tgt>) -> PageId<'_>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,

@@ -8,6 +8,7 @@ use std::iter;
 use std::mem::{replace, take};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
+use std::slice;
 
 use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference};
@@ -101,7 +102,7 @@ where
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     // TODO: Just return the ActionCostVec directly
-    let (r, h, m) = top_down_many(db, &[goal.clone()], top_k, jobs);
+    let (r, h, m) = top_down_many(db, slice::from_ref(goal), top_k, jobs);
     (r.into_iter().next().unwrap().0, h, m)
 }
 
