@@ -7,7 +7,7 @@ use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, LEVEL_COUNT};
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::views::{Param, Tensor, View, ViewE};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
@@ -62,18 +62,24 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             self.denominator_level,
             self.denominator_layout.clone(),
             self.denominator_vector_size,
-        );
+        )?;
         let mut exps_layout_contiguous = self.exps_layout.clone();
         exps_layout_contiguous.set_contiguous_full();
-        let exps_tensor = Tensor::new(TensorSpec::<Tgt> {
-            shape: spec_shape.clone(),
-            dtype: dtypes[0],
-            aux: TensorSpecAux {
-                level: self.exps_level,
-                layout: exps_layout_contiguous,
-                vector_size: self.exps_vector_size,
-            },
-        });
+        let exps_tensor = Tensor::new(
+            TensorSpec::<Tgt>::new_canon_checked(
+                spec_shape.clone(),
+                dtypes[0],
+                self.exps_level,
+                exps_layout_contiguous,
+                self.exps_vector_size,
+            )
+            .map_err(|e| match e {
+                tensorspec::CanonicalizeError::VectorSizeInvalid => {
+                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
+                }
+                _ => ApplyError::NotApplicable(NotApplicableReason::Other(None)),
+            })?,
+        );
 
         let lowered_limits =
             softmax_child_limits(&spec.1, [denominator_tensor.spec(), exps_tensor.spec()])?;
@@ -144,7 +150,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
             self.max_level,
             self.max_layout.clone(),
             self.max_vector_size,
-        );
+        )?;
         let denominator_tensor = softmax_scalar_tensor(
             *scan_dim,
             spec_shape,
@@ -152,7 +158,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
             self.denominator_level,
             self.denominator_layout.clone(),
             self.denominator_vector_size,
-        );
+        )?;
 
         let lowered_limits =
             softmax_child_limits(&spec.1, [max_tensor.spec(), denominator_tensor.spec()])?;
@@ -201,7 +207,7 @@ fn softmax_scalar_tensor<Tgt: Target>(
     max_level: Tgt::Level,
     max_layout: Layout,
     max_vector_size: Option<DimSize>,
-) -> Tensor<Tgt> {
+) -> Result<Tensor<Tgt>, ApplyError> {
     debug_assert!(max_layout.is_fully_contiguous());
     let mut max_spec = TensorSpec {
         shape: Shape::from_slice(spec_shape),
@@ -213,7 +219,18 @@ fn softmax_scalar_tensor<Tgt: Target>(
         },
     };
     max_spec.shape[usize::from(scan_dim)] = nz!(1u32);
-    Tensor::new(max_spec)
+    max_spec.canonicalize().map_err(|e| match e {
+        tensorspec::CanonicalizeError::VectorSizeInvalid => {
+            ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
+        }
+        tensorspec::CanonicalizeError::VectorSizeVolumeIncompatible => {
+            ApplyError::NotApplicable(NotApplicableReason::VectorSizeVolumeIncompatible)
+        }
+        tensorspec::CanonicalizeError::LayoutError(_) => {
+            ApplyError::NotApplicable(NotApplicableReason::Other(None))
+        }
+    })?;
+    Ok(Tensor::new(max_spec))
 }
 
 // TODO: Rename and use this elsewhere, such as in the Move planning.

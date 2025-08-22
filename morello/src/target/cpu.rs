@@ -10,6 +10,9 @@ use crate::scheduling::broadcast_first::BroadcastFirst;
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::to_accum::ToAccum;
+use crate::scheduling::to_max_and_denom::ToMaxAndDenominator;
+use crate::scheduling::to_max_and_unscaled::ToMaxAndUnscaled;
+use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 use crate::scheduling::Action;
 use crate::shape;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
@@ -460,6 +463,87 @@ impl<T: CpuTarget> Target for T {
                         }
                     }
                     Box::new(iter.chain(broadcast_firsts))
+                }
+                PrimitiveSpecType::Softmax { .. } => {
+                    let mut softmax_actions = Vec::new();
+                    if let LogicalSpec::Primitive(basics, _, _) = spec {
+                        let spec_shape = &basics.spec_shape;
+                        let dtype = basics.dtypes[0];
+                        let levels = Self::levels();
+                        let layouts = Self::move_destination_layouts(spec_shape, dtype);
+
+                        // Fully fused loops using shared alt_level for both max and exps
+                        for denom_level in levels {
+                            for denom_layout in &layouts {
+                                gen_vector_sizes_opt(dtype, denom_level.vector_bytes()).for_each(
+                                    |denominator_vector_size| {
+                                        for alt_level in levels {
+                                            for alt_layout in &layouts {
+                                                gen_vector_sizes_opt(
+                                                    dtype,
+                                                    alt_level.vector_bytes(),
+                                                )
+                                                .for_each(|alt_vector_size| {
+                                                    softmax_actions.push(Action::ToSoftmaxParts(
+                                                        ToSoftmaxParts {
+                                                            denominator_level: denom_level,
+                                                            denominator_layout: denom_layout
+                                                                .clone(),
+                                                            denominator_vector_size,
+                                                            exps_level: alt_level,
+                                                            exps_layout: alt_layout.clone(),
+                                                            exps_vector_size: alt_vector_size,
+                                                        },
+                                                    ));
+                                                    softmax_actions.push(
+                                                        Action::ToSoftmaxPartsRecompute(
+                                                            ToSoftmaxPartsRecompute {
+                                                                max_level: alt_level,
+                                                                max_layout: alt_layout.clone(),
+                                                                max_vector_size: alt_vector_size,
+                                                                denominator_level: denom_level,
+                                                                denominator_layout: denom_layout
+                                                                    .clone(),
+                                                                denominator_vector_size,
+                                                            },
+                                                        ),
+                                                    );
+                                                });
+                                            }
+                                        }
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    Box::new(iter.chain(softmax_actions))
+                }
+                PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => Box::new(iter.chain(once(
+                    Action::ToMaxAndDenominator(ToMaxAndDenominator::default()),
+                ))),
+                PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => {
+                    let mut unscaled_actions = Vec::new();
+                    if let LogicalSpec::Primitive(basics, _, _) = spec {
+                        let spec_shape = &basics.spec_shape;
+                        let dtype = basics.dtypes[0];
+
+                        for level in Self::levels() {
+                            for layout in Self::move_destination_layouts(spec_shape, dtype) {
+                                gen_vector_sizes_opt(dtype, level.vector_bytes()).for_each(
+                                    |vector_size| {
+                                        unscaled_actions.push(Action::ToMaxAndUnscaled(
+                                            ToMaxAndUnscaled {
+                                                max_level: level,
+                                                max_layout: layout.clone(),
+                                                max_vector_size: vector_size,
+                                            },
+                                        ));
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    Box::new(iter.chain(unscaled_actions))
                 }
                 _ => Box::new(iter),
             },
@@ -1787,9 +1871,9 @@ mod tests {
         common::{DimSize, Dtype},
         layout::{row_major, Layout},
         lspec,
-        scheduling::{moves::Move, ActionT, ApplyError, NotApplicableReason},
-        spec,
-        spec::{arb_canonical_spec, Spec},
+        scheduling::{moves::Move, Action, ActionT, ApplyError, NotApplicableReason},
+        shape, spec,
+        spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
         target::{Target, X86Target},
         views::Param,
     };

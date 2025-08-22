@@ -38,7 +38,9 @@ impl<A: View> SpecApp<A> {
         Self(spec, arguments)
     }
 
-    /// Create an application of a primitive [LogicalSpec].
+    /// Create an application of a primitive [Spec].
+    ///
+    /// Panics if parameters don't form a canonical Spec.
     pub fn new_primitive_app(
         primitive_type: PrimitiveSpecType,
         args: impl IntoIterator<Item = A>,
