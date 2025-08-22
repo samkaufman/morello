@@ -1132,6 +1132,10 @@ fn superblock_file_path(root: &Path, superblock_key: &SuperBlockKey) -> path::Pa
             dtype,
             value: FillValue::NegInf,
         } => root.join("FillNegInf").join(dtype.to_string()),
+        SpecKey::Fill {
+            dtype,
+            value: FillValue::Min,
+        } => root.join("FillMin").join(dtype.to_string()),
         SpecKey::Compose { components } => root
             .join("Compose")
             .join(

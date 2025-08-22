@@ -195,6 +195,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     match value {
                         FillValue::Zero => args[0].zero(),
                         FillValue::NegInf => args[0].fill_neg_inf(),
+                        FillValue::Min => args[0].fill_min(),
                     }
                     args
                 }
@@ -477,6 +478,19 @@ impl<D: ndarray::Dimension> DynArray<D> {
             (DynArray::Float32(a), DynArray::Float32(b)) => a.assign(b),
             (DynArray::Bfloat16(a), DynArray::Bfloat16(b)) => a.assign(b),
             _ => panic!("Mismatched types"),
+        }
+    }
+
+    pub fn fill_min(&mut self) {
+        match self {
+            DynArray::Uint8(a) => a.fill(u8::MIN),
+            DynArray::Sint8(a) => a.fill(i8::MIN),
+            DynArray::Uint16(a) => a.fill(u16::MIN),
+            DynArray::Sint16(a) => a.fill(i16::MIN),
+            DynArray::Uint32(a) => a.fill(u32::MIN),
+            DynArray::Sint32(a) => a.fill(i32::MIN),
+            DynArray::Float32(a) => a.fill(f32::MIN),
+            DynArray::Bfloat16(a) => a.fill(half::bf16::MIN),
         }
     }
 

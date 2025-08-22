@@ -924,7 +924,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             arguments[0].spec().bytes_used()
                         )
                     }
-                    CpuKernel::VectorZero | CpuKernel::VectorNegInf => {
+                    CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
@@ -937,6 +937,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 self.headers.emit_math_include = true;
                                 ("-INFINITY", "VectorNegInf")
                             }
+                            CpuKernel::VectorMin => {
+                                (self.c_min_const_for_dtype(dtype), "VectorMin")
+                            }
                             _ => unreachable!(),
                         };
                         writeln!(
@@ -947,16 +950,26 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             vtype.name
                         )
                     }
-                    CpuKernel::ValueNegInf => {
+                    CpuKernel::ValueNegInf | CpuKernel::ValueMin => {
                         let exprs = self
                             .param_args_to_c_indices(arguments, |_, a, b| self.c_index(a, b, None));
-                        self.headers.emit_math_include = true;
-                        writeln!(
-                            w,
-                            "{}{} = -INFINITY;  /* ValueNegInf */",
-                            indent(depth),
-                            exprs[0],
-                        )
+                        match cpu_kernel {
+                            CpuKernel::ValueNegInf => {
+                                self.headers.emit_math_include = true;
+                                writeln!(
+                                    w,
+                                    "{}{} = -INFINITY;  /* ValueNegInf */",
+                                    indent(depth),
+                                    exprs[0],
+                                )
+                            }
+                            CpuKernel::ValueMin => {
+                                let dtype = arguments[0].spec().dtype();
+                                let v = self.c_min_const_for_dtype(dtype);
+                                writeln!(w, "{}{} = {v};  /* ValueMin */", indent(depth), exprs[0],)
+                            }
+                            _ => unreachable!(),
+                        }
                     }
                     CpuKernel::VectorAssign => {
                         let first_spec = arguments[0].spec();
@@ -2194,6 +2207,29 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 self.c_index_vec(buffer, &buffer_indexing_expr, None)
             })
             .collect()
+    }
+
+    /// Returns a C expression for the minimum finite value of a given Dtype.
+    ///
+    /// This will modify `self.headers` if a returned constant is defined in
+    /// that header (e.g., float.h).
+    fn c_min_const_for_dtype(&mut self, dt: Dtype) -> &'static str {
+        match dt {
+            Dtype::Uint8 => "UINT8_MIN",
+            Dtype::Sint8 => "INT8_MIN",
+            Dtype::Uint16 => "UINT16_MIN",
+            Dtype::Sint16 => "INT16_MIN",
+            Dtype::Uint32 => "UINT32_MIN",
+            Dtype::Sint32 => "INT32_MIN",
+            Dtype::Float32 => {
+                self.headers.emit_float_include = true;
+                "-FLT_MAX"
+            }
+            Dtype::Bfloat16 => {
+                self.headers.emit_float_include = true;
+                "(__bf16)(-FLT_MAX)"
+            }
+        }
     }
 
     fn thread_style_extra_args(&self) -> &[&'static str] {

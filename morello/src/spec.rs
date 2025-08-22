@@ -135,6 +135,8 @@ pub enum PrimitiveSpecType {
 pub enum FillValue {
     Zero,
     NegInf,
+    /// The smallest finite value.
+    Min,
 }
 
 /// Tilings and dimension bindings for a particular output tiling.
@@ -600,10 +602,12 @@ impl PrimitiveBasics {
                 }
             }
             PrimitiveSpecType::Max { accum: true, .. } => match dtypes[index] {
-                Dtype::Sint8 | Dtype::Sint16 | Dtype::Sint32 => {
-                    todo!("support min-value filling for signed integers")
-                }
-                Dtype::Uint8 | Dtype::Uint16 | Dtype::Uint32 => Some(FillValue::Zero),
+                Dtype::Uint8
+                | Dtype::Uint16
+                | Dtype::Uint32
+                | Dtype::Sint8
+                | Dtype::Sint16
+                | Dtype::Sint32 => Some(FillValue::Min),
                 Dtype::Float32 | Dtype::Bfloat16 => Some(FillValue::NegInf),
             },
             PrimitiveSpecType::OnePrefix
@@ -1348,6 +1352,9 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Fill {
                 value: FillValue::NegInf,
             } => write!(f, "FillNegInf"),
+            PrimitiveSpecType::Fill {
+                value: FillValue::Min,
+            } => write!(f, "FillMin"),
             PrimitiveSpecType::DivideVec => write!(f, "DivideVec"),
             PrimitiveSpecType::DivideVecScalar { scan_dim } => {
                 write!(f, "DivideVecScalar{scan_dim}")

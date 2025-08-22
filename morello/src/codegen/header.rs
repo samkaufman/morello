@@ -8,7 +8,8 @@ pub struct HeaderEmitter {
     pub emit_benchmarking: bool,
     pub vector_type_defs: HashSet<&'static VecType>,
     pub emit_stdbool_and_assert_includes: bool,
-    pub emit_math_include: bool, // math.h
+    pub emit_math_include: bool,  // math.h
+    pub emit_float_include: bool, // float.h
     pub emit_expf_avx2: bool,
     pub emit_cores_clamp: bool,
     pub emit_sum8: bool,
@@ -25,6 +26,9 @@ impl HeaderEmitter {
         }
         if self.emit_math_include {
             out.write_str("#include <math.h>\n")?;
+        }
+        if self.emit_float_include {
+            out.write_str("#include <float.h>\n")?;
         }
         match target {
             TargetId::X86 => {

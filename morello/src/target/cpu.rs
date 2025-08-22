@@ -121,6 +121,8 @@ pub enum CpuKernel {
     VectorZero,
     ValueNegInf,
     VectorNegInf,
+    ValueMin,
+    VectorMin,
     CastBf16F32,
     VectorCastBf16F32,
 }
@@ -398,6 +400,12 @@ impl<T: CpuTarget> Target for T {
                         [CpuKernel::VectorNegInf, CpuKernel::ValueNegInf];
                     &NEGINF_KERNELS
                 }
+                PrimitiveSpecType::Fill {
+                    value: FillValue::Min,
+                } => {
+                    const MIN_KERNELS: [CpuKernel; 2] = [CpuKernel::VectorMin, CpuKernel::ValueMin];
+                    &MIN_KERNELS
+                }
             },
             LogicalSpec::Compose { .. } => &[],
         };
@@ -419,7 +427,12 @@ impl<T: CpuTarget> Target for T {
                 _primitive_aux,
                 _serial_only,
             ) => match typ {
-                PrimitiveSpecType::Matmul { accum } if !*accum => {
+                PrimitiveSpecType::Matmul { accum }
+                | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
+                    if !*accum =>
+                {
                     Box::new(iter.chain(once(ToAccum::default().into())))
                 }
                 PrimitiveSpecType::Matmul { accum }
@@ -599,7 +612,9 @@ impl CpuKernel {
             CpuKernel::MemsetZero
             | CpuKernel::VectorZero
             | CpuKernel::ValueNegInf
-            | CpuKernel::VectorNegInf => 1,
+            | CpuKernel::VectorNegInf
+            | CpuKernel::ValueMin
+            | CpuKernel::VectorMin => 1,
         }
     }
 
@@ -1257,10 +1272,11 @@ impl CpuKernel {
                 ) && operands[0].level() == CpuMemoryLevel::RF
                     && operands[0].is_contiguous()
             }
-            CpuKernel::VectorZero | CpuKernel::VectorNegInf => {
+            CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
                 let expected_fill_value = match self {
                     CpuKernel::VectorZero => FillValue::Zero,
                     CpuKernel::VectorNegInf => FillValue::NegInf,
+                    CpuKernel::VectorMin => FillValue::Min,
                     _ => unreachable!(),
                 };
                 match typ {
@@ -1290,6 +1306,17 @@ impl CpuKernel {
                     && operands[0].level() == CpuMemoryLevel::RF
                     && operands[0].is_contiguous()
                     && operands[0].dtype() == Dtype::Float32
+            }
+            CpuKernel::ValueMin => {
+                debug_assert_eq!(operands.len(), 1);
+                matches!(
+                    typ,
+                    PrimitiveSpecType::Fill {
+                        value: FillValue::Min
+                    }
+                ) && operands[0].volume().get() == 1
+                    && operands[0].level() == CpuMemoryLevel::RF
+                    && operands[0].is_contiguous()
             }
         }
     }
@@ -1433,7 +1460,8 @@ impl CpuKernel {
             CpuKernel::VectorInterleaveBf16F32
             | CpuKernel::VectorDeinterleaveF32Bf16
             | CpuKernel::ValueMax
-            | CpuKernel::ValueNegInf => {
+            | CpuKernel::ValueNegInf
+            | CpuKernel::ValueMin => {
                 // TODO: Measure throughput!
                 INST_COST
             }
@@ -1483,7 +1511,7 @@ impl CpuKernel {
                 ASSIGN_INST_COST * vec_count
             }
             CpuKernel::ValueAssign | CpuKernel::MemsetZero => ASSIGN_INST_COST,
-            CpuKernel::VectorZero | CpuKernel::VectorNegInf => {
+            CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
                 debug_assert_eq!(
                     parameters[0].spec().volume().get(),
                     parameters[0].spec().vector_size().unwrap().get(),
