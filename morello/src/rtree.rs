@@ -236,10 +236,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 // value, remove it.
                 let candidate_envelope = candidate.envelope();
                 if insert_envelope.contains_envelope(&candidate_envelope) && value_matches {
-                    // TODO: Avoid the following clone.
                     to_remove.queue_removal(candidate_envelope);
-                    // Assert the MainCost, but not the later tuple elements, are unchanged.
-                    // TODO: Remove the following assert and lift short-circuit.
                     continue;
                 }
 
