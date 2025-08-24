@@ -27,6 +27,7 @@ use wtinylfu::WTinyLfuCache;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
 use std::sync::{mpsc, Arc};
@@ -814,7 +815,7 @@ impl AsRef<Vec<(ActionNum, Cost)>> for ActionCostVec {
 }
 
 impl ActionNormalizedCostVec {
-    pub fn normalize(action_costs: ActionCostVec, volume: DimSize) -> Self {
+    pub fn normalize(action_costs: ActionCostVec, volume: NonZeroU64) -> Self {
         ActionNormalizedCostVec(
             action_costs
                 .0

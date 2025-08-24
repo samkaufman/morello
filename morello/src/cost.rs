@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
+use std::num::NonZeroU64;
 
-use crate::common::DimSize;
 use crate::imp::Impl;
 use crate::memorylimits::MemVec;
 use crate::target::Target;
@@ -106,7 +106,7 @@ impl Ord for Cost {
 }
 
 impl NormalizedCost {
-    pub fn new(cost: Cost, volume: DimSize) -> Self {
+    pub fn new(cost: Cost, volume: NonZeroU64) -> Self {
         NormalizedCost {
             intensity: CostIntensity::new(cost.main, volume),
             peaks: cost.peaks,
@@ -116,14 +116,25 @@ impl NormalizedCost {
 }
 
 impl CostIntensity {
-    pub fn new(cost: MainCost, volume: DimSize) -> Self {
-        Self(Ratio::new(cost, volume.get()))
+    pub fn new(cost: MainCost, volume: NonZeroU64) -> Self {
+        // Build a Ratio<u64> to reduce, then convert to lower-precision Ratio.
+        let r64 = Ratio::<u64>::new(cost.into(), volume.get());
+        let num_r = *r64.numer();
+        let den_r = *r64.denom();
+        Self(Ratio::new_raw(
+            num_r.try_into().expect("numerator should fit in u32"),
+            den_r.try_into().expect("denominator should fit in u32"),
+        ))
     }
 
-    pub fn into_main_cost_for_volume(mut self, volume: DimSize) -> MainCost {
-        self.0 *= volume.get();
-        assert!(self.0.is_integer());
-        self.0.to_integer()
+    pub fn into_main_cost_for_volume(self, volume: NonZeroU64) -> MainCost {
+        let mut wider = Ratio::<u64>::new_raw((*self.0.numer()).into(), (*self.0.denom()).into());
+        wider *= volume.get();
+        assert!(wider.is_integer());
+        wider
+            .to_integer()
+            .try_into()
+            .expect("cost should fit in u32")
     }
 }
 
@@ -136,9 +147,11 @@ impl proptest::arbitrary::Arbitrary for CostIntensity {
         use proptest::prelude::*;
 
         let original_main_cost = any::<MainCost>();
-        let volume = 1u32..;
+        let volume = 1u64..;
         (original_main_cost, volume)
-            .prop_map(|(main_cost, volume)| CostIntensity(Ratio::new(main_cost, volume)))
+            .prop_map(|(main_cost, volume)| {
+                CostIntensity::new(main_cost, NonZeroU64::new(volume).unwrap())
+            })
             .boxed()
     }
 }

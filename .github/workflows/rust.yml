@@ -112,7 +112,7 @@ jobs:
           sudo apt-fast update -qq
           DEBIAN_FRONTEND='noninteractive' sudo apt install --no-install-recommends -yq valgrind
       - uses: actions/checkout@v4
-      - run: cargo install --version 0.12.1 iai-callgrind-runner
+      - run: cargo install --version 0.12.3 iai-callgrind-runner
       - name: Run benchmarks
         run: cargo bench --verbose
         working-directory: morello

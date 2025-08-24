@@ -201,7 +201,7 @@ where
     }
 
     fn build(&self, benchmark: bool) -> Result<BuiltArtifact, BuildError> {
-        let dirname = tempdir()?.into_path();
+        let dirname = tempdir()?.keep();
         let source_path = dirname.join("main.c");
         let binary_path = dirname.join("a.out");
 

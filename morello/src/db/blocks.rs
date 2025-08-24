@@ -1,6 +1,5 @@
 use super::{ActionCostVec, ActionNormalizedCostVec, ActionNum, GetPreference};
 use crate::{
-    common::DimSize,
     cost::{Cost, CostIntensity},
     grid::{canon::CanonicalBimap, general::BiMap, linear::BimapInt},
     memorylimits::MemVec,
@@ -10,6 +9,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::num::NonZeroU64;
 use std::ops::Range;
 
 /// Stores a [Database] block. This may be a single value if all block entries have been filled with
@@ -76,7 +76,7 @@ impl RTreeBlock {
         self.0.size()
     }
 
-    pub fn get(&self, inner_pt: &[u8], spec_volume: DimSize) -> Option<ActionCostVec> {
+    pub fn get(&self, inner_pt: &[u8], spec_volume: NonZeroU64) -> Option<ActionCostVec> {
         // TODO: Avoid conversion. Instead forward a slice right into locate_at_point.
         let arr = inner_pt.iter().map(|v| (*v).into()).collect::<Vec<_>>();
 

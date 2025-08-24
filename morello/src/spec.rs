@@ -20,6 +20,7 @@ use std::fmt::Display;
 use std::iter::once;
 use std::iter::Iterator;
 use std::marker::PhantomData;
+use std::num::NonZeroU64;
 use std::panic;
 use std::{assert_eq, debug_assert_eq};
 
@@ -2055,15 +2056,23 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
     }
 
     /// Returns the product of Spec dimensions.
-    pub fn volume(&self) -> DimSize {
+    pub fn volume(&self) -> NonZeroU64 {
         match self {
             LogicalSpec::Primitive(basics, _, _) => {
-                DimSize::new(basics.spec_shape.iter().map(|d| d.get()).product()).unwrap()
+                // Compute product in u64 to avoid overflow for large shapes.
+                NonZeroU64::new(
+                    basics
+                        .spec_shape
+                        .iter()
+                        .map(|d| u64::from(d.get()))
+                        .product(),
+                )
+                .unwrap()
             }
             LogicalSpec::Compose { .. } => {
                 // Returning a 1 here basically disables intensity-scaling.
                 // TODO: Return an actual volume.
-                nz!(1u32)
+                nz!(1u64)
             }
         }
     }
