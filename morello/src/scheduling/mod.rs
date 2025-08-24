@@ -5,7 +5,7 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::Target;
+use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 
 use crate::views::{Param, Tensor, TileError, View, ViewE};
@@ -297,13 +297,15 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     NotApplicableReason::TileShapeInvalid,
                 ));
             }
-            let Ok(new_layout) = outer
-                .layout()
-                .update_for_tiling(outer.shape(), inner.shape())
-            else {
-                todo!();
-            };
-            new_aux.layout = new_layout;
+            if outer.level().has_layout() {
+                let Ok(new_layout) = outer
+                    .layout()
+                    .update_for_tiling(outer.shape(), inner.shape())
+                else {
+                    todo!();
+                };
+                new_aux.layout = new_layout;
+            }
         }
 
         if new_spec.canonicalize().is_err() {

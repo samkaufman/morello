@@ -216,9 +216,10 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// The result's layout and contiguousness abstraction will have been
     /// canonicalized for the given shape.
     pub fn shrink(&mut self, shape: &[DimSize]) -> Result<(), LayoutError> {
-        let new_layout = self.aux.layout.update_for_tiling(self.shape(), shape)?;
+        if self.aux.level.has_layout() {
+            self.aux.layout = self.aux.layout.update_for_tiling(self.shape(), shape)?;
+        }
         self.shape = Shape::from(shape);
-        self.aux.layout = new_layout;
         Ok(())
     }
 
@@ -376,11 +377,21 @@ fn arb_noncanon_tensorspec<Tgt: Target>(
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
     pub(crate) fn canonicalize(&mut self, shape: &[DimSize]) -> Result<(), CanonicalizeError> {
-        self.layout = self.layout.update_for_tiling(shape, shape)?;
+        if !self.level.has_layout() {
+            self.layout = row_major(u8::try_from(shape.len()).unwrap());
+        } else {
+            self.layout = self.layout.update_for_tiling(shape, shape)?;
+        }
         Ok(())
     }
 
     pub fn is_canonical(&self, shape: &[DimSize]) -> bool {
+        // If the target level does not have layouts (e.g., RF), the only
+        // canonical form is a row-major layout with full contiguousness.
+        if !self.level.has_layout() {
+            return self.layout.is_row_major() && self.layout.is_fully_contiguous();
+        }
+
         if !self.layout.is_row_major() && shape.iter().all(|d| d.get() == 1) {
             false
         } else {
@@ -508,12 +519,14 @@ where
         if vector_options.is_empty() {
             vector_options.push(None);
         }
-        Box::new(
-            iproduct!(
-                Tgt::all_layouts_for_shape(&self.tensor_shape, self.tensor_dtype),
-                vector_options
-            )
-            .flat_map(move |(layout, vector_size)| {
+        let layouts = if level.has_layout() {
+            Tgt::all_layouts_for_shape(&self.tensor_shape, self.tensor_dtype)
+        } else {
+            vec![row_major(u8::try_from(self.tensor_shape.len()).unwrap())]
+        };
+
+        Box::new(iproduct!(layouts.into_iter(), vector_options).flat_map(
+            move |(layout, vector_size)| {
                 layout.all_contiguous_abs().map(move |contig| {
                     let mut layout_with_contig = layout.clone();
                     layout_with_contig.set_contig(contig);
@@ -523,8 +536,8 @@ where
                         level,
                     }
                 })
-            }),
-        )
+            },
+        ))
     }
 }
 

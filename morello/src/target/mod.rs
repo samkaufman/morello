@@ -69,6 +69,9 @@ pub trait MemoryLevel:
         !self.vector_bytes().is_empty()
     }
     fn counts_registers(&self) -> bool;
+    /// Returns true if this memory level has (meaningful) layouts associated with it.
+    /// Some levels (e.g., RF) have no meaningful relationship beween values.
+    fn has_layout(&self) -> bool;
 }
 
 pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {

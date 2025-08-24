@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 048bbbd014acfcdc9918f879453ded60a3ba5606e6cc9c6100fc5a792ab0efc9 # shrinks to tspec = TensorSpec { shape: [4, 4, 2, 4], dtype: Uint8, aux: TensorSpecAux { contig: 3, aligned: false, level: GL, layout: New([(0, None), (2, None), (3, None), (1, None), (3, Some(2))]), vector_size: None } }
 cc 97f7c8bd44f7bf6c0da9b20f0ab9025147782c5839e74660a5e1d141a51cc3db # shrinks to tspec = TensorSpec { shape: [3, 4], dtype: Uint8, aux: TensorSpecAux { contig: 0, aligned: false, level: VRF, layout: Layout([(0, Dynamic), (1, Dynamic)]), vector_size: Some(4) } }
+cc 512c2ce142bcf2b83b6c4740a3ea677034046edd6c900348d8bd92562916a693 # shrinks to shape = [1, 3], aux = TensorSpecAux { level: RF, layout: Layout { dims: [(0, Dynamic), (1, Dynamic)], contig: 0 }, vector_size: None }

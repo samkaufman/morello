@@ -1607,6 +1607,10 @@ impl MemoryLevel for CpuMemoryLevel {
             CpuMemoryLevel::L1 | CpuMemoryLevel::GL => false,
         }
     }
+
+    fn has_layout(&self) -> bool {
+        !matches!(self, CpuMemoryLevel::RF)
+    }
 }
 
 impl PartialOrd for CpuMemoryLevel {

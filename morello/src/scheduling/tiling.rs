@@ -3,6 +3,7 @@ use crate::common::{DimSize, Shape};
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
+use crate::layout::row_major;
 use crate::scheduling::{
     check_tile_out_applies, collect_nested_specs, tile_to_apply_err, ActionSolver, ActionT,
     ApplyError, NotApplicableReason, PrimitiveTileOutSolver,
@@ -11,7 +12,7 @@ use crate::spec::{
     CanonicalizeError, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
     PrimitiveSpecType, Spec,
 };
-use crate::target::Target;
+use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::views::{BoundaryTile, Param, Tile, View, ViewE};
@@ -890,6 +891,9 @@ pub(crate) fn update_component_shapes<Tgt: Target>(
             for (original_shape, new_shape, aux) in
                 izip!(original_shapes, new_shapes, primitive_aux.iter_mut())
             {
+                if !aux.level.has_layout() {
+                    continue;
+                }
                 if let Ok(new_layout) = aux.layout.update_for_tiling(&original_shape, new_shape) {
                     aux.layout = new_layout;
                 }
@@ -941,7 +945,9 @@ fn update_aux_for_tiling<Tgt: Target>(
     original_shape: &[DimSize],
     new_shape: &[DimSize],
 ) {
-    if let Ok(new_layout) = aux.layout.update_for_tiling(original_shape, new_shape) {
+    if !aux.level.has_layout() {
+        aux.layout = row_major(u8::try_from(new_shape.len()).expect("rank fits in u8"));
+    } else if let Ok(new_layout) = aux.layout.update_for_tiling(original_shape, new_shape) {
         aux.layout = new_layout;
     }
 }
