@@ -1,14 +1,17 @@
 //! Implementations of R*-Tree data structures storing rectangular geometry.
 
 use crate::grid::linear::BimapSInt;
+use crate::rtree::aabb::AABB;
 use enum_dispatch::enum_dispatch;
 use rstar::Envelope as _;
-use rstar::{Point, PointDistance, RTree, RTreeObject, AABB};
+use rstar::{Point, PointDistance, RTree, RTreeObject};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
+
+mod aabb;
 
 pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
 
@@ -133,7 +136,7 @@ struct RTreeRect<const D: usize, T> {
 
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-struct RTreePt<const D: usize> {
+pub struct RTreePt<const D: usize> {
     #[serde_as(as = "[_; D]")] // TODO: Use manual serde impls instead of serde_as.
     arr: [BimapSInt; D],
 }
@@ -257,8 +260,9 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
                     let mut merged_envelope = to_insert.envelope();
                     merged_envelope.merge(&candidate_envelope);
-                    to_insert.top = merged_envelope.upper();
-                    to_insert.bottom = merged_envelope.lower();
+                    let (merged_lower, merged_upper) = merged_envelope.into_pair();
+                    to_insert.bottom = merged_lower;
+                    to_insert.top = merged_upper;
 
                     to_remove.queue_removal(candidate_envelope);
                 }
@@ -329,7 +333,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 }
 
 impl<const D: usize, T> RTreeObject for RTreeRect<D, T> {
-    type Envelope = AABB<RTreePt<D>>;
+    type Envelope = AABB<D>;
 
     fn envelope(&self) -> Self::Envelope {
         AABB::from_corners(self.bottom.clone(), self.top.clone())
@@ -338,7 +342,7 @@ impl<const D: usize, T> RTreeObject for RTreeRect<D, T> {
 
 impl<const D: usize, T> PointDistance for RTreeRect<D, T> {
     fn distance_2(&self, point: &RTreePt<D>) -> BimapSInt {
-        // TODO: Don't allocate an AABB
+        // TODO: Don't allocate an AABB/clone.
         let aabb = AABB::from_corners(self.bottom.clone(), self.top.clone());
         aabb.distance_2(point)
     }
@@ -921,7 +925,7 @@ mod tests {
             tree.merge_insert(bottom, top, ());
         }
         let merged_envelope = rects.iter().fold(
-            AABB::<RTreePt<D>>::from_corners(rects[0].0.into(), rects[0].1.into()),
+            AABB::<D>::from_corners(rects[0].0.into(), rects[0].1.into()),
             |mut acc, (b, t)| {
                 acc.merge(&AABB::from_corners((*b).into(), (*t).into()));
                 acc
