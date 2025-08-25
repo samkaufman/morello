@@ -123,6 +123,6 @@ impl RTreeBlock {
                     *action_num,
                 )
             });
-        self.0.merge_insert(&bottom, &top, value);
+        self.0.merge_insert(&bottom, &top, value, true);
     }
 }

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 965bdc819cb5ababd40529f625e80d4969aae3843729d760adaa58c7e1cb90e0 # shrinks to rects = [RTreeRect { top: RTreePt { arr: [0, 0, 0] }, bottom: RTreePt { arr: [0, 0, 0] }, value: 0 }, RTreeRect { top: RTreePt { arr: [0, 0, 0] }, bottom: RTreePt { arr: [0, 0, 0] }, value: 0 }]
+cc 7018976ea9a3784ec49149f9620dd6373cc5b5339d32fc602f30a87f0915a9a2 # shrinks to rects = [RTreeRect { top: RTreePt { arr: [1, 1, 1] }, bottom: RTreePt { arr: [0, 0, 0] }, value: 0 }, RTreeRect { top: RTreePt { arr: [0, 0, 0] }, bottom: RTreePt { arr: [0, 0, 0] }, value: 1 }]
