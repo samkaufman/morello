@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4d271c64f6cbf83e3574cbcdb4654b1d3d81592f6d1d3734a53dabaddb1c0741 # shrinks to spec = Primitive(PrimitiveBasics { typ: Fill { value: Zero }, spec_shape: [4], dtypes: [Sint32] }, [TensorSpecAux { level: RF, layout: Layout { dims: [(0, Dynamic)], contig: 1 }, vector_size: None }], true)
+cc 04086dc6b7fe5f604e9bf955de593940f24e41701168fc2889d60f1d0c23a14d # shrinks to spec = Primitive(PrimitiveBasics { typ: OnePrefix, spec_shape: [6, 2], dtypes: [Sint8, Uint8] }, [TensorSpecAux { level: L1, layout: Layout { dims: [(0, Dynamic), (1, Dynamic)], contig: 0 }, vector_size: None }, TensorSpecAux { level: L1, layout: Layout { dims: [(0, Dynamic), (1, Dynamic), (2, Dynamic)], contig: 0 }, vector_size: None }], false)

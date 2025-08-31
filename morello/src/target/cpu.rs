@@ -230,9 +230,7 @@ impl<T: CpuTarget> Target for T {
                 .cartesian_product(&all_oddeven_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
                     debug_assert_ne!(packing_size.get(), 1);
-                    if packing_dim == usize::from(dims.last().unwrap().0)
-                        || shape[packing_dim].get() % packing_size.get() != 0
-                    {
+                    if shape[packing_dim].get() % packing_size.get() != 0 {
                         return None;
                     }
                     Some(Layout::new(
@@ -1776,7 +1774,7 @@ fn packed_layouts_for_standard_layout<'a>(
     dtype: Dtype,
     all_target_vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Layout> + 'a {
-    generic_packed_layouts_for_standard_layout::<'a>(
+    generic_packed_layouts_for_standard_layout::<_, _, _, false>(
         original_layout,
         shape,
         dtype,
@@ -1816,7 +1814,7 @@ fn oddeven_layouts_for_standard_layout<'a>(
     dtype: Dtype,
     all_target_vector_bytes: &'a [u32],
 ) -> impl Iterator<Item = Layout> + 'a {
-    generic_packed_layouts_for_standard_layout::<'a>(
+    generic_packed_layouts_for_standard_layout::<_, _, _, true>(
         original_layout,
         shape,
         dtype,
@@ -1851,7 +1849,10 @@ fn oddeven_sizes_for_dim(
 
 /// Implements logic common to [packed_layouts_for_standard_layout] and
 /// [oddeven_layouts_for_standard_layout].
-fn generic_packed_layouts_for_standard_layout<'a, F, Fr, G>(
+///
+/// When INCLUDE_FINAL_NONONE is true, the final non-one logical dimension is also considered;
+/// otherwise it is excluded.
+fn generic_packed_layouts_for_standard_layout<'a, F, Fr, G, const INCLUDE_FINAL_NONONE: bool>(
     original_layout: &'a Layout,
     shape: &'a [DimSize],
     dtype: Dtype,
@@ -1874,8 +1875,12 @@ where
         }
         d
     };
+    let mut end = final_nonone_dim;
+    if INCLUDE_FINAL_NONONE {
+        end += 1;
+    }
 
-    dims[..final_nonone_dim].iter().flat_map(move |&(dim, _)| {
+    dims[..end].iter().flat_map(move |&(dim, _)| {
         let dims = dims.clone();
         let mut it = None;
         if shape[usize::from(dim)].get() != 1 {
@@ -2040,6 +2045,40 @@ mod tests {
         ));
         assert!(logical_spec.is_canonical());
         assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_all_layouts_for_bf16_includes_interleaved_dim2_oddeven16() {
+        let shape = vec![nz!(1u32), nz!(1u32), nz!(2048u32)];
+        let want = Layout::new(vec![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (2, PhysDim::Dynamic),
+            (2, PhysDim::OddEven(nz!(16u32))),
+        ]);
+        let layouts = X86Target::all_layouts_for_shape(&shape, Dtype::Bfloat16);
+        assert!(
+            layouts.contains(&want),
+            "Expected layouts to include {want:?} for shape {shape:?}, but it did not.",
+        );
+    }
+
+    #[test]
+    fn test_oddeven_layouts_for_standard_layout_includes_dim2_oddeven16_f32() {
+        let layouts = oddeven_layouts_for_standard_layout(
+            &row_major(3),
+            &shape![1, 1, 16],
+            Dtype::Float32,
+            &[16u32, 32u32],
+        )
+        .collect::<Vec<_>>();
+        let expect = Layout::new(vec![
+            (0, PhysDim::Dynamic),
+            (1, PhysDim::Dynamic),
+            (2, PhysDim::Dynamic),
+            (2, PhysDim::OddEven(nz!(16u32))),
+        ]);
+        assert!(layouts.contains(&expect));
     }
 
     #[test]

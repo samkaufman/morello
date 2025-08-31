@@ -8,7 +8,7 @@ use morello::spec;
 use morello::spec::Spec;
 use morello::target::{
     CpuKernel,
-    CpuMemoryLevel::{self, GL},
+    CpuMemoryLevel::{GL, L1, RF, VRF},
     X86Target,
 };
 use morello::utils::ToWriteFmt;
@@ -32,7 +32,7 @@ fn main() {
     let spec: Spec<X86Target> = spec!(Matmul(
         [nz!(1u32), M, K, N],
         (bf16, GL, row_major),
-        (bf16, GL, bcm_layout.clone()),
+        (bf16, GL, bcm_layout),
         (f32, GL, row_major)
     ));
 
@@ -45,31 +45,25 @@ fn main() {
     ]);
 
     let implementation = spec
-        .cast(
-            0,
-            Dtype::Float32,
-            CpuMemoryLevel::L1,
-            interleaved.clone(),
-            None,
-        )
+        .cast(0, Dtype::Float32, L1, interleaved.clone(), None)
         .subschedule(&[0], |z| {
             z.tile_out(&[1, 1, 16])
-                .move_param(0, CpuMemoryLevel::L1)
-                .move_relayout(0, CpuMemoryLevel::VRF, row_major, Some(nz!(16u32)))
+                .move_param(0, L1)
+                .move_relayout(0, VRF, row_major, Some(nz!(16u32)))
                 .subschedule(&[0], |z| z.select(CpuKernel::VectorAssign))
                 .subschedule(&[1], |z| {
-                    z.move_relayout(1, CpuMemoryLevel::VRF, interleaved.clone(), Some(nz!(8u32)))
+                    z.move_relayout(1, VRF, interleaved.clone(), Some(nz!(8u32)))
                         .subschedule(&[0], |z| z.select(CpuKernel::VectorInterleaveBf16F32))
                         .subschedule(&[1], |z| z.select(CpuKernel::VectorAssign))
                 })
         })
         .tile_out_parallel(&[1, 1, 128])
         .tile_out(&[1, 1, 1])
-        .move_param(2, CpuMemoryLevel::L1)
-        .move_param(2, CpuMemoryLevel::RF)
+        .move_param(2, L1)
+        .move_param(2, RF)
         .to_accum()
         .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::MemsetZero))
-        .move_param(1, CpuMemoryLevel::L1)
+        .move_param(1, L1)
         .select(CpuKernel::DotProductLoopF32InterleavedBf16F32)
         .subschedule(&[1, 1], |body| body.select(CpuKernel::ValueAssign));
 
