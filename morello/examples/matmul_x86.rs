@@ -1,6 +1,7 @@
 use morello::codegen::CodeGen;
 use morello::cost::Cost;
-use morello::layout::{row_major, Layout, PhysDim};
+use morello::layout;
+use morello::layout::row_major;
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec;
@@ -27,12 +28,7 @@ fn main() {
     spec.canonicalize().unwrap();
 
     let mat1_pack_size = nz!(16u32);
-    let layout_b = Layout::new(vec![
-        (0, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic),
-        (2, PhysDim::Packed(mat1_pack_size)),
-    ]);
+    let layout_b = layout![0, 2, 1, 2 p(mat1_pack_size)];
 
     let implementation = spec
         .split(128)

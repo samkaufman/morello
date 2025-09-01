@@ -1064,7 +1064,7 @@ mod tests {
     use super::*;
     use crate::common::Dtype;
     use crate::imp::{loops::Loop, Impl, ImplNode};
-    use crate::layout::{row_major, Layout, PhysDim};
+    use crate::layout::row_major;
     use crate::scheduling::{Action, ActionT, ApplyError, NotApplicableReason};
     use crate::shape;
     use crate::spec;
@@ -1172,11 +1172,7 @@ mod tests {
     }
 
     fn shared_test_non_multiple_tiling_succeeds(action: Action<X86Target>) {
-        let bcm_layout = Layout::new(vec![
-            (0, PhysDim::Dynamic),
-            (2, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-        ]);
+        let bcm_layout = crate::layout![0, 2, 1];
         let spec: Spec<X86Target> = spec!(MatmulAccum(
             [4, 8, 8, 8],
             (f32, CpuMemoryLevel::GL, bcm_layout),

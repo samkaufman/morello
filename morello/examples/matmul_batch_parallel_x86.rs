@@ -1,6 +1,7 @@
 use morello::codegen::CodeGen;
 use morello::imp::ImplNode;
-use morello::layout::{row_major, Layout, PhysDim};
+use morello::layout;
+use morello::layout::row_major;
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec;
@@ -31,19 +32,8 @@ fn main() {
     ));
     spec.canonicalize().unwrap();
 
-    let layout_a = Layout::new(vec![
-        (0, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (1, PhysDim::Packed(M_R.try_into().unwrap())),
-    ]);
-    let layout_b = Layout::new(vec![
-        (0, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (1, PhysDim::Packed(K_C.try_into().unwrap())),
-        (2, PhysDim::Packed(N_R.try_into().unwrap())),
-    ]);
+    let layout_a = layout![0, 1, 2, 1 p(M_R)];
+    let layout_b = layout![0, 1, 2, 1 p(K_C), 2 p(N_R)];
 
     let implementation = spec
         .tile_out_parallel(&[1, 2048, 2048])

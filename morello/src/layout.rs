@@ -905,36 +905,30 @@ pub(crate) fn batched_col_major(rank: u8) -> Layout {
 }
 
 pub fn nhwc() -> Layout {
-    layout![
-        (0, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (3, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic)
-    ]
+    layout![0, 2, 3, 1]
 }
 
 pub mod macros {
     #[macro_export]
     macro_rules! layout {
-        ( $($dim:tt),*$(,)* ) => {
-            $crate::layout::Layout::new(
-                vec![ $( layout!(@inner $dim) ),* ]
-            )
+        ( @inner [ $( $out:expr, )* ] , ) => {
+            $crate::layout::Layout::new(vec![ $( $out, )* ])
         };
-        ( @inner ($dim:expr, PhysDim::OddEven($ds:expr)) ) => {{
-            use $crate::layout::PhysDim;
-            use $crate::spec::macros::internal::IntoDimSize;
-            ($dim, PhysDim::OddEven(($ds).into_dim_size()))
-        }};
-        ( @inner ($dim:expr, PhysDim::Packed($ds:expr)) ) => {{
-            use $crate::layout::PhysDim;
-            use $crate::spec::macros::internal::IntoDimSize;
-            ($dim, PhysDim::Packed(($ds).into_dim_size()))
-        }};
-        ( @inner ($dim:expr, PhysDim::Dynamic) ) => {{
-            use $crate::layout::PhysDim;
-            ($dim, PhysDim::Dynamic)
-        }};
+        ( @inner [ $( $out:expr, )* ] , , $( $rest:tt )* ) => {
+            $crate::layout!{ @inner [ $( $out, )* ] , $( $rest )* }
+        };
+        ( @inner [ $( $out:expr, )* ] , $dim:tt p ( $ds:expr ) , $( $rest:tt )* ) => {
+            $crate::layout!{ @inner [ $( $out, )* (($dim), $crate::layout::PhysDim::Packed($crate::spec::macros::internal::IntoDimSize::into_dim_size($ds))), ] , $( $rest )* }
+        };
+        ( @inner [ $( $out:expr, )* ] , $dim:tt oe ( $ds:expr ) , $( $rest:tt )* ) => {
+            $crate::layout!{ @inner [ $( $out, )* (($dim), $crate::layout::PhysDim::OddEven($crate::spec::macros::internal::IntoDimSize::into_dim_size($ds))), ] , $( $rest )* }
+        };
+        ( @inner [ $( $out:expr, )* ] , $dim:expr , $( $rest:tt )* ) => {
+            $crate::layout!{ @inner [ $( $out, )* ($dim, $crate::layout::PhysDim::Dynamic), ] , $( $rest )* }
+        };
+        ( $( $t:tt )* ) => {
+            $crate::layout!{ @inner [ ] , $( $t )* , }
+        };
     }
 }
 
@@ -957,12 +951,29 @@ mod tests {
     use std::{collections::HashSet, iter, num::NonZeroU8};
 
     #[test]
-    fn test_expand_physical_shape_1() {
-        let layout = layout![
+    fn test_parenthesized_shorthand_packed() {
+        let actual = layout![0, 1 p(8)];
+        let expected = Layout::new(vec![
             (0, PhysDim::Dynamic),
+            (1, PhysDim::Packed(DimSize::new(8).unwrap())),
+        ]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_parenthesized_shorthand_oddeven() {
+        // layout![0 oe(16), 1] should equal Layout::new([(0, OddEven(16)), (1, Dynamic)])
+        let actual = layout![0 oe(16), 1];
+        let expected = Layout::new(vec![
+            (0, PhysDim::OddEven(DimSize::new(16).unwrap())),
             (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4))
-        ];
+        ]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_expand_physical_shape_1() {
+        let layout = layout![0, 1, 0 p(4)];
         assert_eq!(
             layout.expand_physical_shape(&shape![64, 64]).unwrap()[..],
             *shape![16, 64, 4],
@@ -971,7 +982,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_2() {
-        let layout = layout![(0, PhysDim::Dynamic), (1, PhysDim::Packed(2))];
+        let layout = layout![0, 1 p(2)];
         assert_eq!(
             layout.expand_physical_shape(&shape![2, 2]).unwrap()[..],
             *shape![2, 2],
@@ -980,7 +991,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_3() {
-        let layout = layout![(0, PhysDim::Packed(4)), (1, PhysDim::Dynamic)];
+        let layout = layout![0 p(4), 1];
         assert!(matches!(
             layout.expand_physical_shape(&shape![1, 64]),
             Err(LayoutError::InvalidShape(_))
@@ -989,7 +1000,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_4() {
-        let layout = layout![(0, PhysDim::Packed(2))];
+        let layout = layout![0 p(2)];
         let expanded = layout.expand_physical_shape(&shape![6]);
         assert!(
             matches!(expanded, Err(LayoutError::InvalidShape(_))),
@@ -999,11 +1010,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_5() {
-        let layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4))
-        ];
+        let layout = layout![0, 1, 0 p(4)];
         assert!(matches!(
             layout.expand_physical_shape(&shape![2, 64]),
             Err(LayoutError::InvalidShape(_)),
@@ -1012,7 +1019,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_6() {
-        let layout = layout![(0, PhysDim::Packed(2))];
+        let layout = layout![0 p(2)];
         assert!(matches!(
             layout.expand_physical_shape(&shape![1]),
             Err(LayoutError::InvalidShape(_)),
@@ -1021,7 +1028,7 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_7() {
-        let layout = layout![(0, PhysDim::Packed(4)), (1, PhysDim::Dynamic)];
+        let layout = layout![0 p(4), 1];
         let expanded = layout.expand_physical_shape(&shape![8, 64]);
         assert!(
             matches!(expanded, Err(LayoutError::InvalidShape(_))),
@@ -1031,7 +1038,7 @@ mod tests {
 
     #[test]
     fn test_physical_size_1() {
-        let layout = layout![(0, PhysDim::Packed(2))];
+        let layout = layout![0 p(2)];
         assert!(matches!(
             layout.physical_size(0, &shape![6]),
             Err(LayoutError::InvalidShape(_)),
@@ -1049,56 +1056,39 @@ mod tests {
 
     #[test]
     fn test_dim_drop_1() {
-        let layout = layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)];
+        let layout = layout![0, 1];
         let new_layout = layout.dim_drop(&iter::once(0u8).collect());
-        assert_eq!(new_layout, layout![(0, PhysDim::Dynamic)]);
+        assert_eq!(new_layout, layout![0]);
         assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
     fn test_dim_drop_2() {
-        let layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4))
-        ];
+        let layout = layout![0, 1, 0 p(4)];
         let new_layout = layout.dim_drop(&iter::once(1u8).collect());
         assert_eq!(
             new_layout,
             // Would be [(0, PhysDim::Dynamic), (0, PhysDim::Packed(4))], but for merging adjacent
             // dimensions.
-            layout![(0, PhysDim::Dynamic)]
+            layout![0]
         );
         assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
     fn test_dim_drop_3() {
-        let layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4)),
-            (2, PhysDim::Dynamic)
-        ];
+        let layout = layout![0, 1, 0 p(4), 2];
         let new_layout = layout.dim_drop(&iter::once(1u8).collect());
-        assert_eq!(
-            new_layout,
-            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
-        );
+        assert_eq!(new_layout, layout![0, 1]);
         assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
     fn test_dim_drop_4() {
-        let mut layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4)),
-            (2, PhysDim::Dynamic)
-        ];
+        let mut layout = layout![0, 1, 0 p(4), 2];
         layout.contig = 3;
         let new_layout = layout.dim_drop(&iter::once(1u8).collect());
-        let mut expected = layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)];
+        let mut expected = layout![0, 1];
         expected.contig = 1;
         assert_eq!(new_layout, expected);
         // Merging the Dynamic and Packed physical dimensions for logical dimension 0, which are
@@ -1112,32 +1102,19 @@ mod tests {
 
     #[test]
     fn test_dim_drop_5() {
-        let mut layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4)),
-            (2, PhysDim::Dynamic)
-        ];
+        let mut layout = layout![0, 1, 0 p(4), 2];
         layout.contig = 3;
         let new_layout = layout.dim_drop(&iter::once(0u8).collect());
-        assert_eq!(
-            new_layout,
-            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
-        );
+        assert_eq!(new_layout, layout![0, 1]);
         assert_eq!(new_layout.contig(), 2);
     }
 
     #[test]
     fn test_dim_drop_6() {
-        let mut layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4)),
-            (2, PhysDim::Dynamic)
-        ];
+        let mut layout = layout![0, 1, 0 p(4), 2];
         layout.contig = 2;
         let new_layout = layout.dim_drop(&iter::once(1u8).collect());
-        let mut expected = layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)];
+        let mut expected = layout![0, 1];
         expected.contig = 1;
         assert_eq!(new_layout, expected);
         // As in test_dim_drop_4, we lose some contiguousness information here as a result
@@ -1147,48 +1124,24 @@ mod tests {
 
     #[test]
     fn test_dim_drop_7() {
-        let layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4)),
-            (2, PhysDim::Dynamic)
-        ];
+        let layout = layout![0, 1, 0 p(4), 2];
         let new_layout = layout.dim_drop(&iter::once(0u8).collect());
-        assert_eq!(
-            new_layout,
-            layout![(0, PhysDim::Dynamic), (1, PhysDim::Dynamic)]
-        );
+        assert_eq!(new_layout, layout![0, 1]);
         assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
     fn test_dim_drop_8() {
-        let layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4)),
-            (2, PhysDim::Dynamic)
-        ];
+        let layout = layout![0, 1, 0 p(4), 2];
         let new_layout = layout.dim_drop(&iter::once(2u8).collect());
-        assert_eq!(
-            new_layout,
-            layout![
-                (0, PhysDim::Dynamic),
-                (1, PhysDim::Dynamic),
-                (0, PhysDim::Packed(4))
-            ]
-        );
+        assert_eq!(new_layout, layout![0, 1, 0 p(4)]);
         assert!(new_layout.is_fully_contiguous());
     }
 
     #[test]
     fn test_drop_unneeded_packings_1() {
-        let mut layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Packed(4)),
-        ];
-        let expected = layout![(1, PhysDim::Dynamic), (0, PhysDim::Dynamic)];
+        let mut layout = layout![0, 1, 0 p(4)];
+        let expected = layout![1, 0];
         layout.drop_unneeded_packings(&[nz!(4u32), nz!(1024u32)]);
         assert_eq!(layout, expected);
     }
@@ -1196,19 +1149,14 @@ mod tests {
     #[test]
     fn test_drop_unneeded_packings_2() {
         let mut layout = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (2, PhysDim::Dynamic), // will be dropped when below is converted
-            (1, PhysDim::Packed(nz!(256u32))), // after drop, will be contig. with above Dynamic
-            (2, PhysDim::Packed(nz!(512u32))), // will be converted to Dynamic
-            (1, PhysDim::Packed(nz!(4u32))),
+            0,
+            1,
+            2, // will be dropped when below is converted
+            1 p(256), // after drop, will be contig. with above Dynamic
+            2 p(512), // will be converted to Dynamic
+            1 p(4),
         ];
-        let expected = layout![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (2, PhysDim::Dynamic),
-            (1, PhysDim::Packed(nz!(4u32))),
-        ];
+        let expected = layout![0, 1, 2, 1 p(nz!(4u32))];
         layout.drop_unneeded_packings(&[nz!(1u32), nz!(2048u32), nz!(512u32)]);
         layout.merge_consecutive_dimensions(); // TODO: Remove
         assert_eq!(layout, expected);
@@ -1500,7 +1448,7 @@ mod tests {
 
     #[test]
     fn test_interleaved_indexing_expression_1() {
-        let layout = Layout::new(vec![(0, PhysDim::OddEven(DimSize::new(8).unwrap()))]);
+        let layout = layout![0 oe(8)];
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(expr_id, &shape![8]);
 
@@ -1511,10 +1459,7 @@ mod tests {
 
     #[test]
     fn test_interleaved_indexing_expression_2() {
-        let layout = Layout::new(vec![
-            (0, PhysDim::Dynamic),
-            (0, PhysDim::OddEven(DimSize::new(8).unwrap())),
-        ]);
+        let layout = layout![0, 0 oe(8)];
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(expr_id, &shape![16]);
 
@@ -1525,10 +1470,7 @@ mod tests {
 
     #[test]
     fn test_interleaved_indexing_expression_3() {
-        let layout = Layout::new(vec![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::OddEven(DimSize::new(8).unwrap())),
-        ]);
+        let layout = layout![0, 1 oe(8)];
         let expr_id = OpaqueSymbol::new();
         let iexpr = layout.buffer_indexing_expr(expr_id, &shape![2, 8]);
 
@@ -1549,11 +1491,7 @@ mod tests {
 
     #[test]
     fn test_strides_ok_3d() {
-        let layout = Layout::new(vec![
-            (2, PhysDim::Dynamic),
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-        ]);
+        let layout = layout![2, 0, 1];
         assert_eq!(
             layout.strides(&[nz!(2u32), nz!(4u32), nz!(6u32)]),
             Ok(smallvec![nz!(4u32), nz!(1u32), nz!(8u32)])
@@ -1562,11 +1500,7 @@ mod tests {
 
     #[test]
     fn test_strides_err_revisiting() {
-        let layout = Layout::new(vec![
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Packed(nz!(2u32))),
-        ]);
+        let layout = layout![1, 0, 1 p(2)];
         assert_eq!(
             layout.strides(&[nz!(4u32), nz!(6u32)]),
             Err(StridesError::NonseqPhysicalDims(1))

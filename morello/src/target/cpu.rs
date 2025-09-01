@@ -4,6 +4,7 @@ use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
+use crate::layout;
 use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::scheduling::broadcast_first::BroadcastFirst;
@@ -758,18 +759,8 @@ impl CpuKernel {
                 if !matches!(typ, PrimitiveSpecType::Matmul { accum: true }) {
                     return false;
                 }
-                let layout0 = Layout::new(vec![
-                    (0, PhysDim::Dynamic),
-                    (1, PhysDim::Dynamic),
-                    (2, PhysDim::Dynamic),
-                    (2, PhysDim::OddEven(nz!(16u32))),
-                ]);
-                let layout1 = Layout::new(vec![
-                    (0, PhysDim::Dynamic),
-                    (2, PhysDim::Dynamic),
-                    (1, PhysDim::Dynamic),
-                    (1, PhysDim::OddEven(nz!(16u32))),
-                ]);
+                let layout0 = layout![0, 1, 2, 2 oe(16)];
+                let layout1 = layout![0, 2, 1, 1 oe(16)];
                 dotproductloop_applies(&operands, Dtype::Float32, &[layout0, layout1])
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
@@ -2050,12 +2041,7 @@ mod tests {
     #[test]
     fn test_all_layouts_for_bf16_includes_interleaved_dim2_oddeven16() {
         let shape = vec![nz!(1u32), nz!(1u32), nz!(2048u32)];
-        let want = Layout::new(vec![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (2, PhysDim::Dynamic),
-            (2, PhysDim::OddEven(nz!(16u32))),
-        ]);
+        let want = layout![0, 1, 2, 2 oe(16)];
         let layouts = X86Target::all_layouts_for_shape(&shape, Dtype::Bfloat16);
         assert!(
             layouts.contains(&want),
@@ -2072,12 +2058,7 @@ mod tests {
             &[16u32, 32u32],
         )
         .collect::<Vec<_>>();
-        let expect = Layout::new(vec![
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Dynamic),
-            (2, PhysDim::Dynamic),
-            (2, PhysDim::OddEven(nz!(16u32))),
-        ]);
+        let expect = layout![0, 1, 2, 2 oe(16)];
         assert!(layouts.contains(&expect));
     }
 

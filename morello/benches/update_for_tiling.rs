@@ -7,12 +7,7 @@ use morello::{layout, shape};
 fn update_for_tiling() {
     let shape = shape![64, 64, 64];
     let tile_shape = shape![64, 8, 8];
-    let layout = layout![
-        (0, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (1, PhysDim::Packed(8))
-    ];
+    let layout = layout![0, 1, 2, 1 p(8)];
     assert!(layout.is_fully_contiguous());
     black_box(layout.update_for_tiling(&shape, &tile_shape)).unwrap();
 }

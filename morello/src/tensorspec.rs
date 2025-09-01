@@ -727,7 +727,7 @@ mod tests {
     use super::TensorSpecAux;
     use super::*;
     use crate::common::Dtype;
-    use crate::layout::{row_major, Layout, PhysDim};
+    use crate::layout::{row_major, Layout};
     use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target};
     use crate::tensorspec::{arb_noncanon_tensorspec, TensorSpec, TensorSpecArbMaxShape};
     use crate::{layout, shape};
@@ -807,11 +807,7 @@ mod tests {
 
     #[test]
     fn test_tensorspec_canonicalize_drops_unused_dynamic_dimensions() {
-        let layout = Layout::new(vec![
-            (1, PhysDim::Dynamic),
-            (0, PhysDim::Dynamic),
-            (1, PhysDim::Packed(nz!(8u32))),
-        ]);
+        let layout = layout![1, 0, 1 p(8)];
         let tensorspec = TensorSpec::<X86Target>::new_canon(
             shape![32, 8],
             Dtype::Uint8,
@@ -830,12 +826,7 @@ mod tests {
             shape: shape![5, 2, 8, 4],
             dtype: crate::common::Dtype::Uint8,
             aux: {
-                let mut layout = layout![
-                    (0, PhysDim::Dynamic),
-                    (2, PhysDim::Dynamic),
-                    (3, PhysDim::Dynamic),
-                    (1, PhysDim::Dynamic),
-                ];
+                let mut layout = layout![0, 2, 3, 1];
                 layout.set_contig(3);
                 crate::tensorspec::TensorSpecAux {
                     level: CpuMemoryLevel::GL,
@@ -851,7 +842,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_cannot_build_tensorspec_with_invalid_vector_size_canon() {
-        let mut l = layout![(0, PhysDim::Packed(4))];
+        let mut l = layout![0 p(4)];
         l.set_contiguous_none();
         TensorSpec::<X86Target>::new_canon(
             shape![1, 1, 1],
@@ -865,7 +856,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon() {
-        let mut l = layout![(0, PhysDim::Packed(4))];
+        let mut l = layout![0 p(4)];
         l.set_contiguous_none();
         TensorSpec::<X86Target>::new_noncanon(
             shape![1, 1, 1],
@@ -879,7 +870,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon_with_aux() {
-        let mut layout = layout![(0, PhysDim::Packed(4))];
+        let mut layout = layout![0 p(4)];
         layout.set_contiguous_none();
         TensorSpec::<X86Target>::new_noncanon_with_aux(
             shape![1, 1, 1],

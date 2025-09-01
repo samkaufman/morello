@@ -2,7 +2,8 @@ use morello::codegen::CodeGen;
 use morello::common::Dtype;
 use morello::cost::Cost;
 use morello::imp::ImplNode;
-use morello::layout::{row_major, Layout, PhysDim};
+use morello::layout;
+use morello::layout::{row_major, Layout};
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::shape;
@@ -217,11 +218,5 @@ fn schedule_zero(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
 }
 
 fn layout_b() -> Layout {
-    let mat1_pack_size = nz!(16u32);
-    Layout::new(vec![
-        (0, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic),
-        (2, PhysDim::Packed(mat1_pack_size)),
-    ])
+    layout![0, 2, 1, 2 p(16)]
 }

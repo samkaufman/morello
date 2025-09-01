@@ -309,11 +309,11 @@ fn move_is_cache_miss<Tgt: Target>(
 mod tests {
     use super::*;
     use crate::imp::Impl;
-    use crate::layout::{batched_col_major, row_major, PhysDim};
+    use crate::layout;
+    use crate::layout::{batched_col_major, row_major};
     use crate::scheduling::Action;
     use crate::spec;
     use crate::target::{CpuMemoryLevel, X86Target};
-    use nonzero::nonzero as nz;
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
@@ -353,12 +353,7 @@ mod tests {
             0,
             Dtype::Float32,
             CpuMemoryLevel::L1,
-            &Layout::new(vec![
-                (0, PhysDim::Dynamic),
-                (1, PhysDim::Dynamic), // param. is 8x128, col-maj., so this is useless.
-                (2, PhysDim::Dynamic),
-                (1, PhysDim::Packed(nz!(8u32))),
-            ]),
+            &layout![0, 1, 2, 1 p(8)],
             None,
         )
         .unwrap();
@@ -393,12 +388,7 @@ mod tests {
             source_idx: 0,
             destination_dtype: Dtype::Float32,
             destination_level: CpuMemoryLevel::L1,
-            destination_layout: Layout::new(vec![
-                (0, PhysDim::Dynamic),
-                (1, PhysDim::Dynamic),
-                (2, PhysDim::Dynamic),
-                (1, PhysDim::Packed(nz!(8u32))),
-            ]),
+            destination_layout: layout![0, 1, 2, 1 p(8)],
             destination_vector_size: None,
         });
         match child_get(&spec, action).as_slice() {

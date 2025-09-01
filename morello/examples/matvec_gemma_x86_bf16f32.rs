@@ -1,7 +1,8 @@
 use morello::codegen::CodeGen;
 use morello::common::{DimSize, Dtype};
 use morello::cost::Cost;
-use morello::layout::{row_major, Layout, PhysDim};
+use morello::layout;
+use morello::layout::row_major;
 use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec;
@@ -24,11 +25,7 @@ fn main() {
 
     // Let's construct a multi-threaded matrix-matrix multiplication which takes two bf16
     // matrices and produces a f32 matrix.
-    let bcm_layout = Layout::new(vec![
-        (0, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic),
-    ]);
+    let bcm_layout = layout![0, 2, 1];
     let spec: Spec<X86Target> = spec!(Matmul(
         [nz!(1u32), M, K, N],
         (bf16, GL, row_major),
@@ -37,12 +34,7 @@ fn main() {
     ));
 
     // Manually schedule the matrix multiplication.
-    let interleaved = Layout::new(vec![
-        (0, PhysDim::Dynamic),
-        (1, PhysDim::Dynamic),
-        (2, PhysDim::Dynamic),
-        (2, PhysDim::OddEven(nz!(16u32))),
-    ]);
+    let interleaved = layout![0, 1, 2, 2 oe(16)];
 
     let implementation = spec
         .cast(0, Dtype::Float32, L1, interleaved.clone(), None)
