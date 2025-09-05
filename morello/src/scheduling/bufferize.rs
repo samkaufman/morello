@@ -4,7 +4,8 @@ use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{
-    make_inner_compose, make_outer_compose, ActionT, ApplyError, NotApplicableReason,
+    make_inner_compose, make_outer_compose, ActionT, ApplyError, BottomUpSolver, Cost,
+    NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
@@ -21,7 +22,12 @@ pub struct Bufferize<Tgt: Target> {
     pub vector_size: Option<DimSize>,
 }
 
+#[derive(Default)]
+pub struct BufferizeSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
+    type BSolver = BufferizeSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
 
@@ -112,6 +118,26 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             }],
             spec: Some(spec.clone()),
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for BufferizeSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
     }
 }
 

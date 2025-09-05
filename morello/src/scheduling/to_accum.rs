@@ -1,15 +1,23 @@
+use crate::cost::Cost;
 use crate::imp::blocks::Block;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::scheduling::{make_accum_inits_for_spec, ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{
+    make_accum_inits_for_spec, ActionT, ApplyError, BottomUpSolver, NotApplicableReason,
+};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use serde::{Deserialize, Serialize};
 
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
-pub struct ToAccum {}
+pub struct ToAccum;
+
+#[derive(Default)]
+pub struct ToAccumSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for ToAccum {
+    type BSolver = ToAccumSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
 
@@ -56,5 +64,25 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
             spec: Some(spec.clone()),
             default_child,
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for ToAccumSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Self::Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
     }
 }

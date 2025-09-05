@@ -1,8 +1,11 @@
 use crate::common::Shape;
+use crate::cost::Cost;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::scheduling::{tile_to_apply_err, ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{
+    tile_to_apply_err, ActionT, ApplyError, BottomUpSolver, NotApplicableReason,
+};
 use crate::smallvec::smallvec;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
@@ -12,9 +15,14 @@ use serde::{Deserialize, Serialize};
 use std::iter;
 
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
-pub struct SpatialSplit {}
+pub struct SpatialSplit;
+
+#[derive(Default)]
+pub struct SpatialSplitSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
+    type BSolver = SpatialSplitSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
@@ -125,5 +133,25 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
             parallel: false,
             spec: Some(spec.clone()),
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for SpatialSplitSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
     }
 }

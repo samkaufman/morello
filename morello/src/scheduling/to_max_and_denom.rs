@@ -1,16 +1,23 @@
+use crate::cost::Cost;
 use crate::imp::blocks::Block;
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::{Param, ViewE};
 use serde::{Deserialize, Serialize};
 
+/// Rewrites a SoftmaxDenominatorAndMax into a Max followed by SoftmaxDenominator.
 #[derive(Default, Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
-pub struct ToMaxAndDenominator {}
+pub struct ToMaxAndDenominator;
+
+#[derive(Default)]
+pub struct ToMaxAndDenominatorSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
 impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
+    type BSolver = ToMaxAndDenominatorSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
@@ -65,5 +72,25 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
             spec: Some(spec.clone()),
             default_child: None,
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for ToMaxAndDenominatorSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Self::Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
     }
 }

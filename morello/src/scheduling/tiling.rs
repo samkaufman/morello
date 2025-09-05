@@ -1,12 +1,13 @@
 use crate::common::Dtype;
 use crate::common::{DimSize, Shape};
+use crate::cost::Cost;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::row_major;
 use crate::scheduling::{
-    check_tile_out_applies, collect_nested_specs, tile_to_apply_err, ActionSolver, ActionT,
-    ApplyError, NotApplicableReason, PrimitiveTileOutSolver,
+    check_tile_out_applies, collect_nested_specs, tile_to_apply_err, ActionT, ActionTopDownSolver,
+    ApplyError, BottomUpSolver, NotApplicableReason, PrimitiveTileOutSolver,
 };
 use crate::spec::{
     CanonicalizeError, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
@@ -16,12 +17,15 @@ use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::views::{BoundaryTile, Param, Tile, View, ViewE};
-use itertools::{izip, Either};
+use itertools::{izip, Either, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 use std::iter::once;
 use std::num::{NonZeroU32, NonZeroUsize};
+
+/// Whether `tile_out` actions should tile in all dimensions per Spec.
+pub(crate) const MULTI_DIM_TILING: bool = false;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub enum TileOut {
@@ -41,7 +45,34 @@ pub struct Split {
     pub k: DimSize,
 }
 
+#[derive(Default)]
+pub struct TileOutSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
+#[derive(Default)]
+pub struct SplitSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl TileOut {
+    fn tiled_output_shape(
+        &self,
+        untiled_output_shape: &[DimSize],
+    ) -> Either<Vec<DimSize>, &[DimSize]> {
+        match self {
+            TileOut::SingleLoop {
+                dim,
+                size,
+                parallel: _,
+            } => {
+                let mut output_shape_owned = untiled_output_shape.to_vec();
+                output_shape_owned[*dim as usize] = *size;
+                Either::Left(output_shape_owned)
+            }
+            TileOut::MultiLoop {
+                output_shape,
+                parallel: _,
+            } => Either::Right(output_shape),
+        }
+    }
+
     fn parallel(&self) -> bool {
         match self {
             TileOut::SingleLoop { parallel, .. } => *parallel,
@@ -51,6 +82,8 @@ impl TileOut {
 }
 
 impl<Tgt: Target> ActionT<Tgt> for TileOut {
+    type BSolver = TileOutSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
@@ -120,7 +153,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         tile_out_loop_spec_with_shrunken_tiles(component_input_tilings, new_tiles, parallel, spec)
     }
 
-    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionTopDownSolver<Tgt>, ApplyError> {
         match &spec.0 {
             LogicalSpec::Primitive(basics, ..) => {
                 // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
@@ -164,7 +197,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
                             }
                             .into());
                         } else {
-                            let main_body_spec = ActionSolver::tiled_subspec_fast(
+                            let main_body_spec = ActionTopDownSolver::tiled_subspec_fast(
                                 [(0, 0), (1, 1), (3, 2)].into_iter(),
                                 spec,
                                 &tile_shape,
@@ -194,7 +227,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
                             .into());
                         } else {
                             let rank = basics.spec_shape.len();
-                            let main_body_spec = ActionSolver::tiled_subspec_fast(
+                            let main_body_spec = ActionTopDownSolver::tiled_subspec_fast(
                                 (0..rank).map(|i| (i, i)),
                                 spec,
                                 &tile_shape,
@@ -215,34 +248,13 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         };
 
         self.apply_unchecked_canon(spec)
-            .map(|applied| ActionSolver::Fallback(Box::new(applied)))
-    }
-}
-
-impl TileOut {
-    fn tiled_output_shape(
-        &self,
-        untiled_output_shape: &[DimSize],
-    ) -> Either<Vec<DimSize>, &[DimSize]> {
-        match self {
-            TileOut::SingleLoop {
-                dim,
-                size,
-                parallel: _,
-            } => {
-                let mut output_shape_owned = untiled_output_shape.to_vec();
-                output_shape_owned[*dim as usize] = *size;
-                Either::Left(output_shape_owned)
-            }
-            TileOut::MultiLoop {
-                output_shape,
-                parallel: _,
-            } => Either::Right(output_shape),
-        }
+            .map(|applied| ActionTopDownSolver::Fallback(Box::new(applied)))
     }
 }
 
 impl<Tgt: Target> ActionT<Tgt> for Split {
+    type BSolver = SplitSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
@@ -583,6 +595,98 @@ fn tile_out_loop_spec_with_shrunken_tiles<Tgt: Target>(
         parallel,
         spec: Some(spec.clone()),
     }))
+}
+
+impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        self.dependencies_for_range(spec, spec)
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        // TODO: If top is parallel and bottom is serial-only, split into two two ranges.
+        //       Right now, if they differ, we'll over-visit the serial-only children.
+
+        let both_serial_only = low.0.serial_only() && high.0.serial_only();
+        let multi_dim = MULTI_DIM_TILING || !both_serial_only;
+
+        let parameter_shapes = low.0.parameter_shapes();
+        let low_output_shape = &parameter_shapes[low.0.unique_output_index().unwrap()];
+        let output_rank = low_output_shape.len();
+        let output_rank_u8 = u8::try_from(output_rank).unwrap();
+
+        if multi_dim {
+            let unit_output_shape = smallvec![nz!(1u32); output_rank];
+            let one_tile_action = TileOut::MultiLoop {
+                output_shape: unit_output_shape,
+                parallel: false,
+            };
+            let one_tiled_spec = one_tile_action.top_down_solver(low).unwrap();
+            let Ok(unit_subspec) = one_tiled_spec.subspecs().exactly_one() else {
+                panic!("Expected exactly one subspec");
+            };
+            vec![(unit_subspec, high.clone())]
+        } else {
+            let mut result = Vec::with_capacity(output_rank);
+            for dim in 0..output_rank_u8 {
+                let one_tile_action = TileOut::SingleLoop {
+                    dim,
+                    size: nz!(1u32),
+                    parallel: !low.0.serial_only() && !high.0.serial_only(),
+                };
+                let one_tiled_spec = one_tile_action.top_down_solver(low).unwrap();
+                let Ok(unit_subspec) = one_tiled_spec.subspecs().exactly_one() else {
+                    panic!("Expected exactly one subspec");
+                };
+                result.push((unit_subspec, high.clone()));
+            }
+            result
+        }
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        self.dependencies_for_range(spec, spec)
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        // MatmulAccum only.
+        let LogicalSpec::Primitive(ref basics, ref auxes, serial) = low.0 else {
+            return vec![];
+        };
+        if !matches!(basics.typ, PrimitiveSpecType::Matmul { accum: true }) {
+            return vec![];
+        }
+
+        // Range from `low` to a clone with k = 1.
+        let mut smallest_basics = basics.clone();
+        smallest_basics.spec_shape[1] = nz!(1u32);
+        let smallest_dependency = Spec(
+            LogicalSpec::Primitive(smallest_basics, auxes.clone(), serial),
+            low.1.clone(),
+        );
+        vec![(smallest_dependency, high.clone())]
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
+    }
 }
 
 /// Creates a main body ImplNode by cloning the spec, updating component shapes, setting serial_only

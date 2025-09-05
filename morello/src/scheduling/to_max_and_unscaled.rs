@@ -1,10 +1,11 @@
 use crate::common::{DimSize, Dtype, Shape};
+use crate::cost::Cost;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, LEVEL_COUNT};
 use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
@@ -20,7 +21,12 @@ pub struct ToMaxAndUnscaled<Tgt: Target> {
     pub max_vector_size: Option<DimSize>,
 }
 
+#[derive(Default)]
+pub struct ToMaxAndUnscaledSolver<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
+    type BSolver = ToMaxAndUnscaledSolver<Tgt>;
+
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let LogicalSpec::Primitive(head, _, serial_only) = &spec.0 else {
             // TODO: Add a more specific NotApplicableReason
@@ -96,6 +102,26 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
             }],
             spec: Some(spec.clone()),
         }))
+    }
+}
+
+impl<Tgt: Target> BottomUpSolver for ToMaxAndUnscaledSolver<Tgt> {
+    type Tgt = Tgt;
+
+    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Tgt>,
+        high: &Spec<Tgt>,
+    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!()
+    }
+
+    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+        todo!()
     }
 }
 

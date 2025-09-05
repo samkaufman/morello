@@ -12,7 +12,7 @@ use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
-use crate::scheduling::{ActionSolver, ActionT as _, ApplyError};
+use crate::scheduling::{ActionT as _, ActionTopDownSolver, ApplyError};
 use crate::spec::Spec;
 use crate::target::Target;
 
@@ -56,7 +56,7 @@ enum SpecTask<Tgt: Target> {
 #[derive(Debug)]
 enum WorkingPartialImpl<Tgt: Target> {
     Constructing {
-        solver: ActionSolver<Tgt>,
+        solver: ActionTopDownSolver<Tgt>,
         subspecs: Vec<Spec<Tgt>>,
         subspec_costs: Vec<Option<Cost>>, // empty = unsat; all Some = ready-to-complete
         producing_action_num: ActionNum,

@@ -9,20 +9,8 @@ use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 
 use crate::views::{Param, Tensor, TileError, View, ViewE};
-use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
-
-use broadcast_first::BroadcastFirst;
-use bufferize::Bufferize;
-use moves::Move;
-use select::Select;
-use spatial_split::SpatialSplit;
-use tiling::{Split, TileOut};
-use to_accum::ToAccum;
-use to_max_and_denom::ToMaxAndDenominator;
-use to_max_and_unscaled::ToMaxAndUnscaled;
-use to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 
 pub mod broadcast_first;
 pub mod bufferize;
@@ -35,9 +23,9 @@ pub mod to_max_and_denom;
 pub mod to_max_and_unscaled;
 pub mod to_softmax_parts;
 
-// TODO: Rename this. (`Action` should probably be X86-specific.)
-#[enum_dispatch]
 pub trait ActionT<Tgt: Target> {
+    type BSolver: BottomUpSolver + Default;
+
     fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         if !spec.is_canonical() {
             return Err(ApplyError::SpecNotCanonical);
@@ -56,53 +44,137 @@ pub trait ActionT<Tgt: Target> {
     ///
     /// The caller must ensure that `spec` is in canonical form. Passing a non-canonical form is a
     /// logic error.
-    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionTopDownSolver<Tgt>, ApplyError> {
         self.apply_unchecked_canon(spec)
-            .map(|applied| ActionSolver::Fallback(Box::new(applied)))
+            .map(|applied| ActionTopDownSolver::Fallback(Box::new(applied)))
     }
 }
 
-/// A scheduling decision which can be applied to a Spec to produce an Impl.
-///
-/// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
-/// decision from another, which makes it appropriate for storing in a database so that the
-/// corresponding Impl node can be computed given the Spec.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(bound(
-    deserialize = "Tgt::Kernel: Deserialize<'de>",
-    serialize = "Tgt::Kernel: Serialize"
-))]
-#[enum_dispatch(ActionT<Tgt>)]
-pub enum Action<Tgt: Target> {
-    /// Tile the output tensor and its inputs to respect the updated inputs.
-    TileOut(TileOut),
-    Split(Split),
-    /// Move a tensor to a different memory level, layout, and/or dtype.
-    Move(Move<Tgt>),
-    /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
-    ToAccum(ToAccum),
-    BroadcastFirst(BroadcastFirst<Tgt>),
-    /// Rewrites a Softmax into a SoftmaxDenominatorAndUnscaled and a DivideVecScalar.
-    ToSoftmaxParts(ToSoftmaxParts<Tgt>),
-    /// Rewrites a Softmax into SoftmaxDenominatorAndMax followed by SoftmaxComplete.
-    ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute<Tgt>),
-    /// Rewrites a SoftmaxDenominatorAndMax into a Max followed by SoftmaxDenominator.
-    ToMaxAndDenominator(ToMaxAndDenominator),
-    /// Rewrites a SoftmaxDenominatorAndUnscaled into a Max followed by
-    /// SoftmaxDenominatorAndUnscaledFromMax.
-    ToMaxAndUnscaled(ToMaxAndUnscaled<Tgt>),
-    Bufferize(Bufferize<Tgt>),
-    SpatialSplit(SpatialSplit),
-    // TODO: Remove 'force' bool from Select
-    #[serde(bound(
-        deserialize = "Select<Tgt>: Deserialize<'de>",
-        serialize = "Select<Tgt>: Serialize",
-    ))]
-    Select(Select<Tgt>),
+pub trait BottomUpSolver {
+    type Tgt: Target;
+
+    fn dependencies_for_spec(
+        &self,
+        spec: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>;
+
+    fn dependencies_for_range(
+        &self,
+        low: &Spec<Self::Tgt>,
+        high: &Spec<Self::Tgt>,
+    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)>;
+
+    fn visit_dependency(&self, spec: &Spec<Self::Tgt>, cost: &Cost);
+
+    fn visit_dependency_range(
+        &self,
+        _low: &Spec<Self::Tgt>,
+        _high: &Spec<Self::Tgt>,
+        _cost: &Cost,
+    ) {
+        todo!("Default implementation should call visit_dependency, or just remove this");
+    }
+}
+
+macro_rules! action_dispatch {
+    ( $(#[$meta:meta])* $name:ident, $solver:ident, $(($variant:tt, $innertype:ty)),*$(,)* ) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
+        #[serde(bound(
+            deserialize = "Tgt::Kernel: Deserialize<'de>",
+            serialize = "Tgt::Kernel: Serialize"
+        ))]
+        pub enum $name<Tgt: Target> {
+            $( $variant($innertype) ),*
+        }
+
+        #[derive(Default)]
+        #[allow(non_snake_case)]
+        pub struct $solver<Tgt: Target> {
+            $( $variant: <$innertype as ActionT<Tgt>>::BSolver ),*
+        }
+
+        impl<Tgt: Target> ActionT<Tgt> for $name<Tgt> {
+            type BSolver = $solver<Tgt>;
+
+            fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+                match self {
+                    $( Self::$variant(a) => a.apply_unchecked_canon(spec) ),*
+                }
+            }
+
+            fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionTopDownSolver<Tgt>, ApplyError> {
+                match self {
+                    $( Self::$variant(a) => a.top_down_solver(spec) ),*
+                }
+            }
+        }
+
+        impl<Tgt: Target> BottomUpSolver for $solver<Tgt> {
+            type Tgt = Tgt;
+
+            fn dependencies_for_spec(
+                &self,
+                spec: &Spec<Tgt>,
+            ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+                let it = std::iter::empty();
+                $( let it = it.chain(self.$variant.dependencies_for_spec(spec)); )*
+                it.collect()
+            }
+
+            fn dependencies_for_range(
+                &self,
+                low: &Spec<Tgt>,
+                high: &Spec<Tgt>,
+            ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+                let it = std::iter::empty();
+                $( let it = it.chain(self.$variant.dependencies_for_range(low, high)); )*
+                it.collect()
+            }
+
+            fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+                $( self.$variant.visit_dependency(spec, cost); )*
+            }
+
+            fn visit_dependency_range(&self, low: &Spec<Tgt>, high: &Spec<Tgt>, cost: &Cost) {
+                $( self.$variant.visit_dependency_range(low, high, cost); )*
+            }
+        }
+
+        $(
+            impl<Tgt: Target> From<$innertype> for $name<Tgt> {
+                fn from(value: $innertype) -> Self {
+                    Self::$variant(value)
+                }
+            }
+        )?
+    };
+}
+
+action_dispatch! {
+    /// A scheduling decision which can be applied to a Spec to produce an Impl.
+    ///
+    /// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
+    /// decision from another, which makes it appropriate for storing in a database so that the
+    /// corresponding Impl node can be computed given the Spec.
+    Action,
+    ActionBottomUpSolver,
+    (TileOut, tiling::TileOut),
+    (Split, tiling::Split),
+    (Move, moves::Move::<Tgt>),
+    (ToAccum, to_accum::ToAccum),
+    (BroadcastFirst, broadcast_first::BroadcastFirst<Tgt>),
+    (ToSoftmaxParts, to_softmax_parts::ToSoftmaxParts::<Tgt>),
+    (ToSoftmaxPartsRecompute, to_softmax_parts::ToSoftmaxPartsRecompute::<Tgt>),
+    (ToMaxAndDenominator, to_max_and_denom::ToMaxAndDenominator),
+    (ToMaxAndUnscaled, to_max_and_unscaled::ToMaxAndUnscaled<Tgt>),
+    (Bufferize, bufferize::Bufferize<Tgt>),
+    (SpatialSplit, spatial_split::SpatialSplit),
+    (Select, select::Select::<Tgt>),
 }
 
 #[derive(Debug)]
-pub enum ActionSolver<Tgt: Target> {
+pub enum ActionTopDownSolver<Tgt: Target> {
     PrimitiveTileOut(Box<PrimitiveTileOutSolver<Tgt>>),
     Move(Box<MoveActionSolver<Tgt>>),
     Fallback(Box<ImplNode<Tgt>>),
@@ -148,14 +220,14 @@ pub enum NotApplicableReason {
     Other(Option<&'static str>),
 }
 
-impl<Tgt: Target> ActionSolver<Tgt> {
+impl<Tgt: Target> ActionTopDownSolver<Tgt> {
     pub fn subspecs(&self) -> impl Iterator<Item = Spec<Tgt>> {
         match self {
-            ActionSolver::PrimitiveTileOut(solver) => {
+            ActionTopDownSolver::PrimitiveTileOut(solver) => {
                 // TODO: Avoid this clone
                 solver.body_specs.clone().into_iter()
             }
-            ActionSolver::Move(move_solver) => {
+            ActionTopDownSolver::Move(move_solver) => {
                 // TODO: Avoid these clones. Return an iterator of references.
                 let mut v: Vec<Spec<Tgt>> = Vec::with_capacity(3);
                 v.extend(move_solver.prologue.clone());
@@ -163,7 +235,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                 v.extend(move_solver.epilogue.clone());
                 v.into_iter()
             }
-            ActionSolver::Fallback(partial_impl) => {
+            ActionTopDownSolver::Fallback(partial_impl) => {
                 let mut partial_impl_subspecs = Vec::new();
                 collect_nested_specs(partial_impl, &mut partial_impl_subspecs);
                 partial_impl_subspecs.into_iter()
@@ -176,7 +248,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         I: Iterator<Item = Cost>,
     {
         match self {
-            ActionSolver::PrimitiveTileOut(solver) => {
+            ActionTopDownSolver::PrimitiveTileOut(solver) => {
                 if solver.body_specs.is_empty() {
                     unreachable!("PrimitiveTileOut should have at least one body spec");
                 }
@@ -232,7 +304,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     _ => unreachable!(),
                 }
             }
-            ActionSolver::Move(move_solver) => {
+            ActionTopDownSolver::Move(move_solver) => {
                 let mut main = move_solver.base_main_cost;
                 let mut child_peaks = vec![];
                 let mut depth = 0;
@@ -249,7 +321,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                     .snap_up_for_target::<Tgt>(false);
                 Cost { main, peaks, depth }
             }
-            ActionSolver::Fallback(partial_impl) => {
+            ActionTopDownSolver::Fallback(partial_impl) => {
                 compute_impl_cost(partial_impl, &mut child_costs)
             }
         }
@@ -318,27 +390,27 @@ impl<Tgt: Target> ActionSolver<Tgt> {
     }
 }
 
-impl<Tgt: Target> From<MoveActionSolver<Tgt>> for ActionSolver<Tgt> {
+impl<Tgt: Target> From<MoveActionSolver<Tgt>> for ActionTopDownSolver<Tgt> {
     fn from(move_solver: MoveActionSolver<Tgt>) -> Self {
-        ActionSolver::Move(Box::new(move_solver))
+        ActionTopDownSolver::Move(Box::new(move_solver))
     }
 }
 
-impl<Tgt: Target> From<Box<MoveActionSolver<Tgt>>> for ActionSolver<Tgt> {
+impl<Tgt: Target> From<Box<MoveActionSolver<Tgt>>> for ActionTopDownSolver<Tgt> {
     fn from(move_solver: Box<MoveActionSolver<Tgt>>) -> Self {
-        ActionSolver::Move(move_solver)
+        ActionTopDownSolver::Move(move_solver)
     }
 }
 
-impl<Tgt: Target> From<PrimitiveTileOutSolver<Tgt>> for ActionSolver<Tgt> {
+impl<Tgt: Target> From<PrimitiveTileOutSolver<Tgt>> for ActionTopDownSolver<Tgt> {
     fn from(tile_out_solver: PrimitiveTileOutSolver<Tgt>) -> Self {
-        ActionSolver::PrimitiveTileOut(Box::new(tile_out_solver))
+        ActionTopDownSolver::PrimitiveTileOut(Box::new(tile_out_solver))
     }
 }
 
-impl<Tgt: Target> From<Box<PrimitiveTileOutSolver<Tgt>>> for ActionSolver<Tgt> {
+impl<Tgt: Target> From<Box<PrimitiveTileOutSolver<Tgt>>> for ActionTopDownSolver<Tgt> {
     fn from(tile_out_solver: Box<PrimitiveTileOutSolver<Tgt>>) -> Self {
-        ActionSolver::PrimitiveTileOut(tile_out_solver)
+        ActionTopDownSolver::PrimitiveTileOut(tile_out_solver)
     }
 }
 

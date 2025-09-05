@@ -214,7 +214,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     }
 
     fn to_accum(&self) -> ImplNode<Tgt> {
-        let action = Action::ToAccum(ToAccum::default());
+        let action = Action::ToAccum(ToAccum);
         apply_unwrap(self, action)
     }
 
@@ -268,7 +268,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn to_max_and_denominator(&self) -> ImplNode<Tgt> {
         apply_unwrap(
             self,
-            Action::ToMaxAndDenominator(ToMaxAndDenominator::default()),
+            Action::ToMaxAndDenominator(ToMaxAndDenominator),
         )
     }
 
@@ -311,7 +311,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     }
 
     fn spatial_split(&self) -> ImplNode<Tgt> {
-        apply_unwrap(self, Action::SpatialSplit(SpatialSplit::default()))
+        apply_unwrap(self, Action::SpatialSplit(SpatialSplit))
     }
 
     fn broadcast_first(
