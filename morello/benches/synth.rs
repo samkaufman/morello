@@ -1,5 +1,4 @@
 use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBenchmarkConfig};
-use nonzero::nonzero as nz;
 use std::hint::black_box;
 
 use morello::db::FilesDatabase;
@@ -21,7 +20,7 @@ fn matmul_spec(size: u32) -> Spec<X86Target> {
 
 fn synth(goal: &Spec<X86Target>) {
     let db = FilesDatabase::new(None, true, 1, 128, 1);
-    morello::search::top_down(&db, black_box(goal), 1, Some(nz!(1usize)));
+    morello::search::top_down(&db, black_box(goal), 1);
 }
 
 #[library_benchmark]

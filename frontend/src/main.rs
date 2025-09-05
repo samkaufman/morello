@@ -5,7 +5,6 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use log::info;
 
-use std::num::NonZeroUsize;
 use std::{io, path};
 
 use morello::codegen::{BuildError, CodeGen};
@@ -58,10 +57,6 @@ struct Args {
     /// Target architecture
     #[arg(long, value_enum, hide_default_value = true, default_value_t = TargetId::default())]
     target: TargetId,
-
-    /// Number of parallel jobs for top-down search
-    #[arg(long, short)]
-    jobs: Option<usize>,
 
     /// Disable verification
     #[cfg(feature = "verification")]
@@ -241,8 +236,7 @@ where
     info!("Synthesizing {}", spec);
 
     let start_time = std::time::Instant::now();
-    let (_, hits, misses) =
-        morello::search::top_down(db, &spec, K.into(), args.jobs.and_then(NonZeroUsize::new));
+    let (_, hits, misses) = morello::search::top_down(db, &spec, K.into());
     info!("top_down took {:?}", start_time.elapsed());
     info!(
         "top_down missed {} times ({:.2}% of {})",

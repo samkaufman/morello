@@ -53,9 +53,9 @@ fn main() {
         .subschedule(&[0], |subspec| subspec.to_max_and_denominator())
         // This [0, 0] corresponds to Max
         .subschedule(&[0, 0], |subspec| {
-            subspec.to_accum().split(1).synthesize(&db, None)
+            subspec.to_accum().split(1).synthesize(&db)
         })
-        .subschedule(&[0, 0, 0], |subspec| subspec.synthesize(&db, None))
+        .subschedule(&[0, 0, 0], |subspec| subspec.synthesize(&db))
         // This [0, 1] corresponds to the SoftmaxDenominator
         .subschedule(&[0, 1], |subspec| {
             subspec
@@ -69,11 +69,11 @@ fn main() {
                 .move_param(2, CpuMemoryLevel::RF)
                 .select(CpuKernel::VectorSoftmaxDenominator)
         })
-        .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db, None))
-        .subschedule(&[0, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
-        .subschedule(&[0, 1, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
-        .subschedule(&[0, 1, 1, 1, 1, 0], |subspec| subspec.synthesize(&db, None))
-        .subschedule(&[0, 1, 1, 1, 1, 2], |subspec| subspec.synthesize(&db, None))
+        .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db))
+        .subschedule(&[0, 1, 1, 0], |subspec| subspec.synthesize(&db))
+        .subschedule(&[0, 1, 1, 1, 0], |subspec| subspec.synthesize(&db))
+        .subschedule(&[0, 1, 1, 1, 1, 0], |subspec| subspec.synthesize(&db))
+        .subschedule(&[0, 1, 1, 1, 1, 2], |subspec| subspec.synthesize(&db))
         // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete
@@ -82,7 +82,7 @@ fn main() {
                 .move_param(2, CpuMemoryLevel::L1)
                 .move_param(3, CpuMemoryLevel::L1)
                 .tile_out(&[1, 32])
-                .synthesize(&db, None)
+                .synthesize(&db)
         });
 
     println!("\nImpl resulting from manual scheduling:");

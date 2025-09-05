@@ -23,7 +23,6 @@ use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
 use crate::views::ViewE;
 use std::iter;
-use std::num::NonZeroUsize;
 
 /// A trait extending [ImplNode]s and [Spec]s with methods for more conveniently applying [Action]s.
 ///
@@ -97,12 +96,12 @@ pub trait SchedulingSugar<Tgt: Target> {
     ) -> ImplNode<Tgt>;
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
-    fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize(&self, db: &FilesDatabase) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
-    fn synthesize_all(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize_all(&self, db: &FilesDatabase) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
@@ -339,26 +338,26 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
-    fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize(&self, db: &FilesDatabase) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        top_down(db, self, 1, jobs);
+        top_down(db, self, 1);
         match db.get_impl(self).unwrap().first() {
             Some(imp) => imp.clone(),
             None => panic!("No Impl exists for {self}"),
         }
     }
 
-    fn synthesize_all(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize_all(&self, db: &FilesDatabase) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        self.synthesize(db, jobs)
+        self.synthesize(db)
     }
 }
 
@@ -522,22 +521,22 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.force_select(kernel))
     }
 
-    fn synthesize(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize(&self, db: &FilesDatabase) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        apply_to_leaf_spec(self, |spec| spec.synthesize(db, jobs))
+        apply_to_leaf_spec(self, |spec| spec.synthesize(db))
     }
 
-    fn synthesize_all(&self, db: &FilesDatabase, jobs: Option<NonZeroUsize>) -> ImplNode<Tgt>
+    fn synthesize_all(&self, db: &FilesDatabase) -> ImplNode<Tgt>
     where
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        apply_to_leaves(self, &|spec| spec.synthesize(db, jobs))
+        apply_to_leaves(self, &|spec| spec.synthesize(db))
     }
 }
 

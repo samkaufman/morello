@@ -160,11 +160,11 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
             subspec.to_max_and_unscaled(GL, row_major(RANK), None)
         })
         .subschedule(&[0, 0], |subspec| {
-            subspec.to_accum().split(1).synthesize(&db, None)
+            subspec.to_accum().split(1).synthesize(&db)
         })
-        .subschedule(&[0, 0, 0], |s| s.synthesize(&db, None))
+        .subschedule(&[0, 0, 0], |s| s.synthesize(&db))
         .subschedule(&[0, 1], |subspec| subspec.to_accum())
-        .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db, None))
+        .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db))
         // SoftmaxDenominatorAndUnscaledFromMaxAccum
         .subschedule(&[0, 1, 1], |subspec| {
             subspec
@@ -178,15 +178,15 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
                 .subschedule(&[1, 1], |s| {
                     s.move_relayout(0, VRF, row_major(RANK), Some(nz!(8u32)))
                         .move_relayout(3, VRF, row_major(RANK), Some(nz!(8u32)))
-                        .subschedule(&[0], |m| m.synthesize(&db, None))
-                        .subschedule(&[1, 1], |m| m.synthesize(&db, None))
+                        .subschedule(&[0], |m| m.synthesize(&db))
+                        .subschedule(&[1, 1], |m| m.synthesize(&db))
                         .subschedule(&[1, 0], |m| {
                             m.select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
                         })
                 })
-                .subschedule(&[0], |m| m.synthesize(&db, None))
-                .subschedule(&[1, 0], |m| m.synthesize(&db, None))
-                .subschedule(&[1, 2], |m| m.synthesize(&db, None))
+                .subschedule(&[0], |m| m.synthesize(&db))
+                .subschedule(&[1, 0], |m| m.synthesize(&db))
+                .subschedule(&[1, 2], |m| m.synthesize(&db))
         })
         // DivideVec
         .subschedule(&[1], |subspec| {
@@ -197,10 +197,10 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
                     broadcast
                         .move_relayout(0, L1, row_major(RANK), None)
                         .move_relayout(0, RF, row_major(RANK), None)
-                        .synthesize(&db, None)
-                        .subschedule(&[0], |s| s.synthesize(&db, None))
+                        .synthesize(&db)
+                        .subschedule(&[0], |s| s.synthesize(&db))
                 })
-                .subschedule(&[1], |d| d.synthesize(&db, None))
+                .subschedule(&[1], |d| d.synthesize(&db))
         })
 }
 
