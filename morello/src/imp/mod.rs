@@ -22,6 +22,91 @@ pub mod loops;
 pub mod pipeline;
 pub mod subspecs;
 
+// Macro definitions used in this module.
+pub mod macros {
+    #[macro_export]
+    macro_rules! impl_impl_for_enum {
+        ($(#[$meta:meta])* $enum_name:ident $(, $variant:ident => $type:ty) *$(,)*) => {
+            $(#[$meta])*
+            #[derive(Debug, Clone)]
+            pub enum $enum_name<Tgt: Target> {
+                $(
+                    $variant($type),
+                )*
+            }
+
+            impl<Tgt: Target> Impl<Tgt> for $enum_name<Tgt> {
+                type BindOut = Self;
+
+                fn children(&self) -> &[ImplNode<Tgt>] {
+                    match self {
+                        $(Self::$variant(inner) => inner.children(),)*
+                    }
+                }
+
+                fn default_child(&self) -> Option<usize> {
+                    match self {
+                        $(Self::$variant(inner) => inner.default_child(),)*
+                    }
+                }
+
+                fn memory_allocated(&self) -> MemoryAllocation {
+                    match self {
+                        $(Self::$variant(inner) => inner.memory_allocated(),)*
+                    }
+                }
+
+                fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
+                    match self {
+                        $(Self::$variant(inner) => inner.compute_main_cost(child_costs),)*
+                    }
+                }
+
+                fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
+                    match self {
+                        $(Self::$variant(inner) => Self::$variant(inner.replace_children(new_children)),)*
+                    }
+                }
+
+                fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
+                    match self {
+                        $(Self::$variant(inner) => inner.bind(get_argument).into(),)*
+                    }
+                }
+
+                fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
+                    match self {
+                        $(Self::$variant(inner) => inner.pprint_line(names),)*
+                    }
+                }
+
+                fn spec(&self) -> Option<&Spec<Tgt>> {
+                    match self {
+                        $(Self::$variant(inner) => inner.spec(),)*
+                    }
+                }
+
+                fn visit_params<F>(&self, visitor: &mut F)
+                where
+                    F: FnMut(u8, &TensorSpec<Tgt>),
+                {
+                    match self {
+                        $(Self::$variant(inner) => inner.visit_params(visitor),)*
+                    }
+                }
+            }
+
+            $(
+                impl<Tgt: Target> From<$type> for $enum_name<Tgt> {
+                    fn from(inner: $type) -> Self {
+                        Self::$variant(inner)
+                    }
+                }
+            )*
+        }
+    }
+}
+
 #[enum_dispatch]
 pub trait Impl<Tgt: Target> {
     type BindOut: Impl<Tgt>;
@@ -141,89 +226,5 @@ where
             })
         ];
         impl_leaf_strategy.boxed()
-    }
-}
-
-pub mod macros {
-    #[macro_export]
-    macro_rules! impl_impl_for_enum {
-        ($(#[$meta:meta])* $enum_name:ident $(, $variant:ident => $type:ty) *$(,)*) => {
-            $(#[$meta])*
-            #[derive(Debug, Clone)]
-            pub enum $enum_name<Tgt: Target> {
-                $(
-                    $variant($type),
-                )*
-            }
-
-            impl<Tgt: Target> Impl<Tgt> for $enum_name<Tgt> {
-                type BindOut = Self;
-
-                fn children(&self) -> &[ImplNode<Tgt>] {
-                    match self {
-                        $(Self::$variant(inner) => inner.children(),)*
-                    }
-                }
-
-                fn default_child(&self) -> Option<usize> {
-                    match self {
-                        $(Self::$variant(inner) => inner.default_child(),)*
-                    }
-                }
-
-                fn memory_allocated(&self) -> MemoryAllocation {
-                    match self {
-                        $(Self::$variant(inner) => inner.memory_allocated(),)*
-                    }
-                }
-
-                fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-                    match self {
-                        $(Self::$variant(inner) => inner.compute_main_cost(child_costs),)*
-                    }
-                }
-
-                fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-                    match self {
-                        $(Self::$variant(inner) => Self::$variant(inner.replace_children(new_children)),)*
-                    }
-                }
-
-                fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {
-                    match self {
-                        $(Self::$variant(inner) => inner.bind(get_argument).into(),)*
-                    }
-                }
-
-                fn pprint_line(&self, names: &mut NameEnv) -> Option<String> {
-                    match self {
-                        $(Self::$variant(inner) => inner.pprint_line(names),)*
-                    }
-                }
-
-                fn spec(&self) -> Option<&Spec<Tgt>> {
-                    match self {
-                        $(Self::$variant(inner) => inner.spec(),)*
-                    }
-                }
-
-                fn visit_params<F>(&self, visitor: &mut F)
-                where
-                    F: FnMut(u8, &TensorSpec<Tgt>),
-                {
-                    match self {
-                        $(Self::$variant(inner) => inner.visit_params(visitor),)*
-                    }
-                }
-            }
-
-            $(
-                impl<Tgt: Target> From<$type> for $enum_name<Tgt> {
-                    fn from(inner: $type) -> Self {
-                        Self::$variant(inner)
-                    }
-                }
-            )*
-        }
     }
 }

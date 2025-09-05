@@ -273,103 +273,103 @@ impl Layout {
     /// defined for layouts which "re-visit" a logical dimension while iterating over physical
     /// dimensions.
     pub fn strides(&self, logical_shape: &[DimSize]) -> Result<Shape, StridesError> {
-        let Layout { dims, contig: _ } = self;
+    let Layout { dims, contig: _ } = self;
 
-        if usize::from(*dims.iter().map(|(d, _)| d).max().unwrap()) + 1 != logical_shape.len() {
-            return Err(StridesError::InvalidShape(logical_shape.into()));
-        }
-
-        let mut seen = vec![false; logical_shape.len()];
-        let mut strides = smallvec![nz!(1u32); logical_shape.len()];
-        let mut last_stride = nz!(1u32);
-        for (logical_dim, _) in &dims.iter().rev().chunk_by(|(dim, _)| *dim) {
-            // We won't visit the chunk's contents. We're just interested in the dimension's
-            // physical order.
-            let logical_dim_usize = usize::from(logical_dim);
-            if seen[logical_dim_usize] {
-                return Err(StridesError::NonseqPhysicalDims(logical_dim));
-            }
-            strides[logical_dim_usize] = last_stride;
-            last_stride = last_stride
-                .checked_mul(logical_shape[logical_dim_usize])
-                .unwrap();
-            seen[logical_dim_usize] = true;
-        }
-        Ok(strides)
+    if usize::from(*dims.iter().map(|(d, _)| d).max().unwrap()) + 1 != logical_shape.len() {
+        return Err(StridesError::InvalidShape(logical_shape.into()));
     }
+
+    let mut seen = vec![false; logical_shape.len()];
+    let mut strides = smallvec![nz!(1u32); logical_shape.len()];
+    let mut last_stride = nz!(1u32);
+    for (logical_dim, _) in &dims.iter().rev().chunk_by(|(dim, _)| *dim) {
+        // We won't visit the chunk's contents. We're just interested in the dimension's
+        // physical order.
+        let logical_dim_usize = usize::from(logical_dim);
+        if seen[logical_dim_usize] {
+            return Err(StridesError::NonseqPhysicalDims(logical_dim));
+        }
+        strides[logical_dim_usize] = last_stride;
+        last_stride = last_stride
+            .checked_mul(logical_shape[logical_dim_usize])
+            .unwrap();
+        seen[logical_dim_usize] = true;
+    }
+    Ok(strides)
+}
 
     /// Build a [Layout] with physical dimensions corresponding to the given
     /// logical dimensions removed.
     ///
     /// The remaining dimensions will have their logical indices shifted.
     pub fn dim_drop(&self, dropped_dims: &HashSet<u8>) -> Layout {
-        if dropped_dims.is_empty() {
-            return self.clone();
+    if dropped_dims.is_empty() {
+        return self.clone();
+    }
+
+    let Layout {
+        ref dims,
+        contig: contiguous_abs,
+    } = *self;
+    let first_contig_idx = self.dims.len() - usize::from(self.contig);
+
+    let mut new_contig = contiguous_abs
+        - u8::try_from(
+            dims[first_contig_idx..]
+                .iter()
+                .filter(|(d, _)| dropped_dims.contains(d))
+                .count(),
+        )
+        .unwrap();
+
+    let mut new_dims = Vec::with_capacity(dims.len().saturating_sub(1));
+    for (idx, (logical_dim, phys_dim)) in dims.iter().enumerate() {
+        if dropped_dims.contains(logical_dim) {
+            continue;
         }
+        let new_logical_dim = logical_dim
+            - u8::try_from(dropped_dims.iter().filter(|&&d| d < *logical_dim).count()).unwrap();
 
-        let Layout {
-            ref dims,
-            contig: contiguous_abs,
-        } = *self;
-        let first_contig_idx = self.dims.len() - usize::from(self.contig);
-
-        let mut new_contig = contiguous_abs
-            - u8::try_from(
-                dims[first_contig_idx..]
-                    .iter()
-                    .filter(|(d, _)| dropped_dims.contains(d))
-                    .count(),
-            )
-            .unwrap();
-
-        let mut new_dims = Vec::with_capacity(dims.len().saturating_sub(1));
-        for (idx, (logical_dim, phys_dim)) in dims.iter().enumerate() {
-            if dropped_dims.contains(logical_dim) {
+        // Skip if the last dim is Dynamic, this one is Packed, and logical dims match.
+        match (new_dims.last_mut(), phys_dim) {
+            (None, _) => {
+                // fall through
+            }
+            (Some((last_logical_dim, _)), _) if *last_logical_dim != new_logical_dim => {
+                // fall through
+            }
+            (Some((_, PhysDim::Dynamic)), PhysDim::Packed(_)) => {
+                // This Packed is redundant. Skip it.
+                if idx >= first_contig_idx {
+                    new_contig -= 1;
+                }
                 continue;
             }
-            let new_logical_dim = logical_dim
-                - u8::try_from(dropped_dims.iter().filter(|&&d| d < *logical_dim).count()).unwrap();
-
-            // Skip if the last dim is Dynamic, this one is Packed, and logical dims match.
-            match (new_dims.last_mut(), phys_dim) {
-                (None, _) => {
-                    // fall through
+            (Some((_, PhysDim::Packed(last_pack))), PhysDim::Packed(pack)) => {
+                *last_pack = (last_pack.get() * pack.get()).try_into().unwrap();
+                if idx >= first_contig_idx {
+                    new_contig -= 1;
                 }
-                (Some((last_logical_dim, _)), _) if *last_logical_dim != new_logical_dim => {
-                    // fall through
-                }
-                (Some((_, PhysDim::Dynamic)), PhysDim::Packed(_)) => {
-                    // This Packed is redundant. Skip it.
-                    if idx >= first_contig_idx {
-                        new_contig -= 1;
-                    }
-                    continue;
-                }
-                (Some((_, PhysDim::Packed(last_pack))), PhysDim::Packed(pack)) => {
-                    *last_pack = (last_pack.get() * pack.get()).try_into().unwrap();
-                    if idx >= first_contig_idx {
-                        new_contig -= 1;
-                    }
-                    continue;
-                }
-                (Some((_, PhysDim::OddEven(_))), PhysDim::Packed(_))
-                | (Some(_), PhysDim::OddEven(_)) => {
-                    // fall through
-                }
-                (Some((_, PhysDim::Packed(_))), PhysDim::Dynamic)
-                | (Some((_, PhysDim::OddEven(_))), PhysDim::Dynamic)
-                | (Some((_, PhysDim::Dynamic)), PhysDim::Dynamic) => {
-                    unreachable!("invalid Layout")
-                }
+                continue;
             }
-
-            new_dims.push((new_logical_dim, *phys_dim));
+            (Some((_, PhysDim::OddEven(_))), PhysDim::Packed(_))
+            | (Some(_), PhysDim::OddEven(_)) => {
+                // fall through
+            }
+            (Some((_, PhysDim::Packed(_))), PhysDim::Dynamic)
+            | (Some((_, PhysDim::OddEven(_))), PhysDim::Dynamic)
+            | (Some((_, PhysDim::Dynamic)), PhysDim::Dynamic) => {
+                unreachable!("invalid Layout")
+            }
         }
 
-        let mut new_layout = Layout::new(new_dims);
-        new_layout.contig = new_contig;
-        new_layout
+        new_dims.push((new_logical_dim, *phys_dim));
     }
+
+    let mut new_layout = Layout::new(new_dims);
+    new_layout.contig = new_contig;
+    new_layout
+}
 
     pub fn swap_dims(&self, dims: (u8, u8)) -> Layout {
         let mut result = Layout::new(
@@ -412,6 +412,8 @@ impl Layout {
         parent_shape: &[DimSize],
         tile_shape: &[DimSize],
     ) -> Result<Layout, LayoutError> {
+        assert_eq!(parent_shape.len(), tile_shape.len());
+
         // TODO: Can we remove this case without affecting behavior?
         if tile_shape.iter().all(|d| d.get() == 1) {
             Ok(row_major(tile_shape.len().try_into().unwrap()))
@@ -438,111 +440,111 @@ impl Layout {
     // TODO: Instead of returning the `Contig`, update self.
     /// Drop Contig to the first broken physical dimension.
     fn lower_contig_to_first_broken_dimension(
-        &self,
-        parent_shape: &[DimSize],
-        tile_shape: &[DimSize],
-    ) -> Result<Contig, LayoutError> {
-        let Layout {
-            ref dims,
-            contig: source_contig,
-        } = *self;
-        let parent_physical_shape = self.expand_physical_shape(parent_shape)?;
-        let tile_physical_shape = self.expand_physical_shape(tile_shape)?;
-        debug_assert_eq!(parent_physical_shape.len(), tile_physical_shape.len());
-        let matching_suffix_len = parent_physical_shape
-            .iter()
-            .rev()
-            .zip(tile_physical_shape.iter().rev())
-            .find_position(|(p, t)| p != t)
-            .map(|(idx, _)| idx);
-        Ok(matching_suffix_len
-            .map(|d| d + 1)
-            .unwrap_or(dims.len())
-            .min(source_contig.into())
-            .try_into()
-            .unwrap())
-    }
+    &self,
+    parent_shape: &[DimSize],
+    tile_shape: &[DimSize],
+) -> Result<Contig, LayoutError> {
+    let Layout {
+        ref dims,
+        contig: source_contig,
+    } = *self;
+    let parent_physical_shape = self.expand_physical_shape(parent_shape)?;
+    let tile_physical_shape = self.expand_physical_shape(tile_shape)?;
+    debug_assert_eq!(parent_physical_shape.len(), tile_physical_shape.len());
+    let matching_suffix_len = parent_physical_shape
+        .iter()
+        .rev()
+        .zip(tile_physical_shape.iter().rev())
+        .find_position(|(p, t)| p != t)
+        .map(|(idx, _)| idx);
+    Ok(matching_suffix_len
+        .map(|d| d + 1)
+        .unwrap_or(dims.len())
+        .min(source_contig.into())
+        .try_into()
+        .unwrap())
+}
 
     /// Asserts that there are no consecutive packed or OddEven dimensions with the same logical
     /// dimension.
     ///
     /// This does nothing on release builds.
     fn assert_no_consecutive_dimensions(&self) {
-        #[cfg(debug_assertions)]
-        {
-            for idx in 1..self.dims.len() {
-                if self.dims[idx - 1].0 == self.dims[idx].0
-                    && matches!(self.dims[idx - 1].1, PhysDim::Dynamic | PhysDim::Packed(_))
-                    && matches!(self.dims[idx].1, PhysDim::Dynamic | PhysDim::Packed(_))
-                {
-                    panic!(
-                        "Consecutive matching dimensions for logical dimension {} in layout: {:?}",
-                        self.dims[idx].0, self.dims
-                    );
-                }
+    #[cfg(debug_assertions)]
+    {
+        for idx in 1..self.dims.len() {
+            if self.dims[idx - 1].0 == self.dims[idx].0
+                && matches!(self.dims[idx - 1].1, PhysDim::Dynamic | PhysDim::Packed(_))
+                && matches!(self.dims[idx].1, PhysDim::Dynamic | PhysDim::Packed(_))
+            {
+                panic!(
+                    "Consecutive matching dimensions for logical dimension {} in layout: {:?}",
+                    self.dims[idx].0, self.dims
+                );
             }
         }
     }
+}
 
     /// Merge matching, consecutive dimensions.
     fn merge_consecutive_dimensions(&mut self) {
-        let first_contig_idx = self.dims.len() - usize::from(self.contig);
+    let first_contig_idx = self.dims.len() - usize::from(self.contig);
 
-        let mut new_contig = self.contig;
-        let mut new_dims = Vec::with_capacity(self.dims.len());
-        new_dims.push(self.dims[0]);
+    let mut new_contig = self.contig;
+    let mut new_dims = Vec::with_capacity(self.dims.len());
+    new_dims.push(self.dims[0]);
 
-        for (idx, (dim, phys_dim)) in self.dims.iter().skip(1).enumerate() {
-            let (last_dim, last_phys_dim): &mut (u8, PhysDim) = new_dims.last_mut().unwrap();
-            if dim != last_dim {
-                new_dims.push((*dim, *phys_dim));
-                continue;
-            }
-
-            match (last_phys_dim, phys_dim) {
-                (PhysDim::Packed(l), PhysDim::Packed(n)) => {
-                    *l = l.checked_mul(*n).unwrap();
-                    if idx >= first_contig_idx {
-                        new_contig -= 1;
-                    }
-                }
-                (PhysDim::Dynamic, PhysDim::Packed(_)) => {
-                    if idx >= first_contig_idx {
-                        new_contig -= 1;
-                    }
-                }
-                (PhysDim::Dynamic, PhysDim::OddEven(_))
-                | (PhysDim::Packed(_), PhysDim::OddEven(_))
-                | (PhysDim::OddEven(_), PhysDim::Dynamic)
-                | (PhysDim::OddEven(_), PhysDim::Packed(_)) => {
-                    new_dims.push((*dim, *phys_dim));
-                }
-                (PhysDim::OddEven(_), PhysDim::OddEven(_)) => todo!(),
-                (PhysDim::Packed(_), PhysDim::Dynamic) => {
-                    unreachable!("Dynamic followed Packed same logical dimension");
-                }
-                (PhysDim::Dynamic, PhysDim::Dynamic) => {
-                    unreachable!("Repeating non-packed dimensions");
-                }
-            }
+    for (idx, (dim, phys_dim)) in self.dims.iter().skip(1).enumerate() {
+        let (last_dim, last_phys_dim): &mut (u8, PhysDim) = new_dims.last_mut().unwrap();
+        if dim != last_dim {
+            new_dims.push((*dim, *phys_dim));
+            continue;
         }
 
-        self.dims = new_dims;
-        self.contig = new_contig;
+        match (last_phys_dim, phys_dim) {
+            (PhysDim::Packed(l), PhysDim::Packed(n)) => {
+                *l = l.checked_mul(*n).unwrap();
+                if idx >= first_contig_idx {
+                    new_contig -= 1;
+                }
+            }
+            (PhysDim::Dynamic, PhysDim::Packed(_)) => {
+                if idx >= first_contig_idx {
+                    new_contig -= 1;
+                }
+            }
+            (PhysDim::Dynamic, PhysDim::OddEven(_))
+            | (PhysDim::Packed(_), PhysDim::OddEven(_))
+            | (PhysDim::OddEven(_), PhysDim::Dynamic)
+            | (PhysDim::OddEven(_), PhysDim::Packed(_)) => {
+                new_dims.push((*dim, *phys_dim));
+            }
+            (PhysDim::OddEven(_), PhysDim::OddEven(_)) => todo!(),
+            (PhysDim::Packed(_), PhysDim::Dynamic) => {
+                unreachable!("Dynamic followed Packed same logical dimension");
+            }
+            (PhysDim::Dynamic, PhysDim::Dynamic) => {
+                unreachable!("Repeating non-packed dimensions");
+            }
+        }
     }
+
+    self.dims = new_dims;
+    self.contig = new_contig;
+}
 
     /// Increase contig through any all-ones prefix.
     fn increase_contig_through_ones(&mut self, tile_shape: &[DimSize]) {
-        let physical_tile_shape = self.expand_physical_shape(tile_shape).unwrap();
-        let mut first_contig_idx = physical_tile_shape.len() - usize::from(self.contig);
-        while first_contig_idx > 0 {
-            first_contig_idx -= 1;
-            if physical_tile_shape[first_contig_idx].get() != 1 {
-                break;
-            }
-            self.contig += 1;
+    let physical_tile_shape = self.expand_physical_shape(tile_shape).unwrap();
+    let mut first_contig_idx = physical_tile_shape.len() - usize::from(self.contig);
+    while first_contig_idx > 0 {
+        first_contig_idx -= 1;
+        if physical_tile_shape[first_contig_idx].get() != 1 {
+            break;
         }
+        self.contig += 1;
     }
+}
 
     fn drop_unneeded_packings(&mut self, tile_shape: &[DimSize]) {
         let Layout {
@@ -611,23 +613,23 @@ impl Layout {
 
     /// Canonicalize runs of physical dimension which have size 1 for the given `shape`.
     fn reorder_size_one_dynamic_dimensions(
-        &mut self,
-        shape: &[DimSize],
-    ) -> Result<(), LayoutError> {
-        let physical_shape = self.expand_physical_shape(shape)?;
-        let Layout { dims, contig: _ } = self;
-        let mut start = 0;
-        while start < physical_shape.len() {
-            let mut end = start;
-            while end < physical_shape.len() && physical_shape[end].get() == 1 {
-                end += 1;
-            }
-            let ones_slice = &mut dims[start..end];
-            ones_slice.sort_by_key(|e| e.0);
-            start = end + 1;
+    &mut self,
+    shape: &[DimSize],
+) -> Result<(), LayoutError> {
+    let physical_shape = self.expand_physical_shape(shape)?;
+    let Layout { dims, contig: _ } = self;
+    let mut start = 0;
+    while start < physical_shape.len() {
+        let mut end = start;
+        while end < physical_shape.len() && physical_shape[end].get() == 1 {
+            end += 1;
         }
-        Ok(())
+        let ones_slice = &mut dims[start..end];
+        ones_slice.sort_by_key(|e| e.0);
+        start = end + 1;
     }
+    Ok(())
+}
 
     pub(crate) fn has_noncanon_size_one_dynamic_dimensions(&self, shape: &[DimSize]) -> bool {
         // This implementation could be much more efficient.
@@ -908,6 +910,27 @@ pub fn nhwc() -> Layout {
     layout![0, 2, 3, 1]
 }
 
+#[cfg(test)]
+pub fn arb_shape_and_same_rank_layout() -> impl proptest::strategy::Strategy<Value = (Shape, Layout)>
+{
+    use proptest::prelude::*;
+    use std::num::NonZeroU8;
+
+    proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
+        let shape = shape
+            .into_iter()
+            .map(|x| DimSize::new(x).unwrap())
+            .collect::<Vec<_>>();
+        let shape_nz = NonZeroU8::try_from(u8::try_from(shape.len()).unwrap()).unwrap();
+        let bounds = LayoutArbRankBounds {
+            min_rank: shape_nz,
+            max_rank: Some(shape_nz),
+        };
+        let all_layouts = any_with::<Layout>(bounds);
+        (Just(Shape::from(shape)), all_layouts)
+    })
+}
+
 pub mod macros {
     #[macro_export]
     macro_rules! layout {
@@ -943,7 +966,7 @@ mod tests {
     };
     use itertools::Itertools;
     use proptest::{
-        arbitrary::{any, any_with},
+        arbitrary::any,
         prelude::prop,
         prop_assert, prop_assert_eq, prop_assume, proptest,
         strategy::{Just, Strategy},
@@ -1527,21 +1550,5 @@ mod tests {
                 contig: 1,
             }
         );
-    }
-
-    fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
-        proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
-            let shape = shape
-                .into_iter()
-                .map(|x| DimSize::new(x).unwrap())
-                .collect::<Vec<_>>();
-            let shape_nz = NonZeroU8::try_from(u8::try_from(shape.len()).unwrap()).unwrap();
-            let bounds = LayoutArbRankBounds {
-                min_rank: shape_nz,
-                max_rank: Some(shape_nz),
-            };
-            let all_layouts = any_with::<Layout>(bounds);
-            (Just(Shape::from(shape)), all_layouts)
-        })
     }
 }
