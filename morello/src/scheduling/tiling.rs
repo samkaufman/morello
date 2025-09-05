@@ -1,6 +1,6 @@
 use crate::common::Dtype;
 use crate::common::{DimSize, Shape};
-use crate::cost::Cost;
+use crate::cost::NormalizedCost;
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
@@ -9,10 +9,12 @@ use crate::scheduling::{
     check_tile_out_applies, collect_nested_specs, tile_to_apply_err, ActionT, ActionTopDownSolver,
     ApplyError, BottomUpSolver, NotApplicableReason, PrimitiveTileOutSolver,
 };
+use crate::scheduling::{Action, NaiveBottomUpActionProvider, NaiveBottomUpSolver, VisitUpdater};
 use crate::spec::{
     CanonicalizeError, FillValue, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
     PrimitiveSpecType, Spec,
 };
+use crate::target::common_actions::{split_actions, tile_out_actions};
 use crate::target::{MemoryLevel, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
@@ -21,6 +23,7 @@ use itertools::{izip, Either, Itertools};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
+use std::iter;
 use std::iter::once;
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -49,7 +52,15 @@ pub struct Split {
 pub struct TileOutSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
 #[derive(Default)]
-pub struct SplitSolver<Tgt>(std::marker::PhantomData<Tgt>);
+pub struct SplitSolver<Tgt: Target> {
+    requests: Vec<(Spec<Tgt>, Spec<Tgt>)>,
+}
+
+#[derive(Default)]
+pub struct TileOutActionProvider<Tgt: Target>(std::marker::PhantomData<Tgt>);
+
+#[derive(Default)]
+pub struct SplitActionProvider<Tgt: Target>(std::marker::PhantomData<Tgt>);
 
 impl TileOut {
     fn tiled_output_shape(
@@ -82,7 +93,9 @@ impl TileOut {
 }
 
 impl<Tgt: Target> ActionT<Tgt> for TileOut {
-    type BSolver = TileOutSolver<Tgt>;
+    // TODO: Instead use `type BSolver = TileOutSolver<Tgt>;`
+    type BSolver = NaiveBottomUpSolver<Tgt, TileOutActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
@@ -250,10 +263,15 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         self.apply_unchecked_canon(spec)
             .map(|applied| ActionTopDownSolver::Fallback(Box::new(applied)))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
 impl<Tgt: Target> ActionT<Tgt> for Split {
-    type BSolver = SplitSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, SplitActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
@@ -473,6 +491,10 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
             LogicalSpec::Compose { .. } => todo!(),
         }
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
 /// A `TileOut` special case for [SoftmaxDenominatorAndUnscaledFromMax].
@@ -600,24 +622,26 @@ fn tile_out_loop_spec_with_shrunken_tiles<Tgt: Target>(
 impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
         self.dependencies_for_range(spec, spec)
     }
 
     fn dependencies_for_range(
-        &self,
+        &mut self,
         low: &Spec<Tgt>,
         high: &Spec<Tgt>,
     ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+        todo!("Call complete_spec for whatever has no dependencies");
+
         // TODO: If top is parallel and bottom is serial-only, split into two two ranges.
         //       Right now, if they differ, we'll over-visit the serial-only children.
 
         let both_serial_only = low.0.serial_only() && high.0.serial_only();
         let multi_dim = MULTI_DIM_TILING || !both_serial_only;
 
-        let parameter_shapes = low.0.parameter_shapes();
-        let low_output_shape = &parameter_shapes[low.0.unique_output_index().unwrap()];
-        let output_rank = low_output_shape.len();
+        let parameter_shapes = high.0.parameter_shapes();
+        let output_shape = &parameter_shapes[high.0.unique_output_index().unwrap()];
+        let output_rank = output_shape.len();
         let output_rank_u8 = u8::try_from(output_rank).unwrap();
 
         if multi_dim {
@@ -634,12 +658,28 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
         } else {
             let mut result = Vec::with_capacity(output_rank);
             for dim in 0..output_rank_u8 {
+                if output_shape[usize::from(dim)] == nz!(1u32) {
+                    continue;
+                }
+
                 let one_tile_action = TileOut::SingleLoop {
                     dim,
                     size: nz!(1u32),
                     parallel: !low.0.serial_only() && !high.0.serial_only(),
                 };
-                let one_tiled_spec = one_tile_action.top_down_solver(low).unwrap();
+
+                // TODO: Simplify the below.
+                // let one_tiled_spec = one_tile_action.top_down_solver(low).unwrap();
+                let one_tiled_spec = match one_tile_action.top_down_solver(high) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        panic!(
+                            "Expected top_down_solver to succeed: {:?}\n---\n{}\n{:?}",
+                            e, low, one_tile_action
+                        );
+                    }
+                };
+
                 let Ok(unit_subspec) = one_tiled_spec.subspecs().exactly_one() else {
                     panic!("Expected exactly one subspec");
                 };
@@ -649,7 +689,17 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
         }
     }
 
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    where
+        U: VisitUpdater<Tgt>,
+    {
+        todo!()
+    }
+
+    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+    where
+        U: VisitUpdater<Self::Tgt>,
+    {
         todo!()
     }
 }
@@ -657,12 +707,12 @@ impl<Tgt: Target> BottomUpSolver for TileOutSolver<Tgt> {
 impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
     type Tgt = Tgt;
 
-    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
+    fn dependencies_for_spec(&mut self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
         self.dependencies_for_range(spec, spec)
     }
 
     fn dependencies_for_range(
-        &self,
+        &mut self,
         low: &Spec<Tgt>,
         high: &Spec<Tgt>,
     ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
@@ -681,11 +731,49 @@ impl<Tgt: Target> BottomUpSolver for SplitSolver<Tgt> {
             LogicalSpec::Primitive(smallest_basics, auxes.clone(), serial),
             low.1.clone(),
         );
+        self.requests
+            .push((smallest_dependency.clone(), high.clone()));
         vec![(smallest_dependency, high.clone())]
     }
 
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
+    fn apply_no_dependency_updates<U>(&mut self, spec: &Spec<Self::Tgt>, updater: &mut U)
+    where
+        U: VisitUpdater<Self::Tgt>,
+    {
+        let LogicalSpec::Primitive(ref basics, _, _) = spec.0 else {
+            updater.complete_spec(spec);
+            return;
+        };
+        if !matches!(basics.typ, PrimitiveSpecType::Matmul { accum: true }) {
+            updater.complete_spec(spec);
+        }
+    }
+
+    fn visit_dependency<U>(&mut self, spec: &Spec<Tgt>, cost: &[NormalizedCost], updater: &mut U)
+    where
+        U: VisitUpdater<Tgt>,
+    {
         todo!()
+    }
+}
+
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for TileOutActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        tile_out_actions(logical_spec).collect()
+    }
+
+    fn debugging() -> Option<String> {
+        Some("TileOut".to_string())
+    }
+}
+
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for SplitActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        split_actions(logical_spec).collect()
+    }
+
+    fn debugging() -> Option<String> {
+        Some("Split".to_string())
     }
 }
 

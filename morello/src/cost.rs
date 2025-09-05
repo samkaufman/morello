@@ -1,9 +1,9 @@
 use std::cmp::Ordering;
 use std::num::NonZeroU64;
 
-use crate::imp::Impl;
 use crate::memorylimits::MemVec;
 use crate::target::Target;
+use crate::{common::DimSize, imp::Impl};
 
 use num_rational::Ratio;
 use serde::{Deserialize, Serialize};
@@ -18,14 +18,14 @@ pub struct Cost {
 
 #[derive(Clone, Eq, PartialEq, Debug, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
-pub(crate) struct NormalizedCost {
+pub struct NormalizedCost {
     pub intensity: CostIntensity,
     pub peaks: MemVec,
     pub depth: u8,
 }
 
 #[derive(Default, Hash, Clone, Copy, Eq, PartialEq, Debug, Deserialize, Serialize)]
-pub(crate) struct CostIntensity(Ratio<u32>);
+pub struct CostIntensity(Ratio<u32>);
 
 pub type MainCost = u32;
 
@@ -111,6 +111,14 @@ impl NormalizedCost {
             intensity: CostIntensity::new(cost.main, volume),
             peaks: cost.peaks,
             depth: cost.depth,
+        }
+    }
+
+    pub fn into_main_cost_for_volume(self, volume: NonZeroU64) -> Cost {
+        Cost {
+            main: self.intensity.into_main_cost_for_volume(volume),
+            peaks: self.peaks,
+            depth: self.depth,
         }
     }
 }

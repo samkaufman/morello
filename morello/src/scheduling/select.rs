@@ -1,11 +1,15 @@
 use crate::imp::kernels::KernelApp;
 use crate::imp::ImplNode;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
-use crate::scheduling::{ActionT, ApplyError, BottomUpSolver, NotApplicableReason};
-use crate::spec::Spec;
+use crate::scheduling::{
+    Action, ActionT, ApplyError, NaiveBottomUpActionProvider, NaiveBottomUpSolver,
+    NotApplicableReason,
+};
+use crate::spec::{LogicalSpec, Spec};
 use crate::target::{Kernel, Target};
 use crate::views::{Param, ViewE};
 use serde::{Deserialize, Serialize};
+use std::iter;
 
 // TODO: Remove 'force' bool from Select
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -14,8 +18,12 @@ pub struct Select<Tgt: Target>(pub Tgt::Kernel, pub bool);
 #[derive(Default)]
 pub struct SelectSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
+#[derive(Debug, Default)]
+pub struct SelectActionProvider<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
-    type BSolver = SelectSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, SelectActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let Select(k, force) = self;
@@ -59,27 +67,21 @@ impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
             spec: Some(spec.clone()),
         }))
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
-impl<Tgt: Target> BottomUpSolver for SelectSolver<Tgt> {
-    type Tgt = Tgt;
-
-    fn dependencies_for_spec(
-        &self,
-        spec: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
-        todo!()
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for SelectActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        // TODO: Don't enumerate every Action to find the Action:Select.
+        Tgt::actions(logical_spec)
+            .filter(|a| matches!(a, Action::Select(_)))
+            .collect()
     }
 
-    fn dependencies_for_range(
-        &self,
-        low: &Spec<Self::Tgt>,
-        high: &Spec<Self::Tgt>,
-    ) -> Vec<(Spec<Self::Tgt>, Spec<Self::Tgt>)> {
-        todo!()
-    }
-
-    fn visit_dependency(&self, spec: &Spec<Self::Tgt>, cost: &crate::cost::Cost) {
-        todo!()
+    fn debugging() -> Option<String> {
+        Some("Select".to_string())
     }
 }

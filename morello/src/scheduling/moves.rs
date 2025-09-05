@@ -1,12 +1,11 @@
 use crate::common::{DimSize, Dtype};
-use crate::cost::Cost;
 use crate::imp::allocs::{alloc_memory_allocation, move_cost, Alloc};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::{
-    ActionT, ActionTopDownSolver, ApplyError, BottomUpSolver, MoveActionSolver, NotApplicableReason,
+    ActionT, ActionTopDownSolver, ApplyError, MoveActionSolver, Action, NaiveBottomUpActionProvider, NaiveBottomUpSolver, NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::common_actions::move_actions;
@@ -15,6 +14,7 @@ use crate::tensorspec::{self, TensorSpec};
 use crate::utils::prev_power_of_two;
 use crate::views::{CacheView, Param, Tensor, ViewE};
 use serde::{Deserialize, Serialize};
+use std::iter;
 use std::mem;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -25,9 +25,6 @@ pub struct Move<Tgt: Target> {
     pub destination_layout: Layout,
     pub destination_vector_size: Option<DimSize>,
 }
-
-#[derive(Default)]
-pub struct MoveSolver<Tgt>(std::marker::PhantomData<Tgt>);
 
 /// Data useful to both a Move's [ActionSolver] or [ImplNode].
 struct AllocPlan<'a, Tgt: Target> {
@@ -40,8 +37,12 @@ struct AllocPlan<'a, Tgt: Target> {
     is_cache_miss: bool,
 }
 
+#[derive(Debug, Default)]
+pub struct MoveActionProvider<Tgt>(std::marker::PhantomData<Tgt>);
+
 impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
-    type BSolver = MoveSolver<Tgt>;
+    type BSolver = NaiveBottomUpSolver<Tgt, MoveActionProvider<Tgt>>;
+    type BSolverIter = iter::Once<Self::BSolver>;
 
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
@@ -133,35 +134,19 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
         }
         .into())
     }
+
+    fn bottom_up_solvers() -> Self::BSolverIter {
+        iter::once(Self::BSolver::default())
+    }
 }
 
-impl<Tgt: Target> BottomUpSolver for MoveSolver<Tgt> {
-    type Tgt = Tgt;
-
-    fn dependencies_for_spec(&self, spec: &Spec<Tgt>) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        let mut results = vec![];
-        for move_action in move_actions(&spec.0) {
-            match move_action.top_down_solver(spec) {
-                Ok(solver) => {
-                    results.extend(solver.subspecs().map(|s| (spec.clone(), s)));
-                }
-                Err(ApplyError::NotApplicable(_)) => {}
-                Err(ApplyError::SpecNotCanonical) => panic!(),
-            }
-        }
-        results
+impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for MoveActionProvider<Tgt> {
+    fn actions(logical_spec: &LogicalSpec<Tgt>) -> Vec<Action<Tgt>> {
+        move_actions(logical_spec).collect()
     }
 
-    fn dependencies_for_range(
-        &self,
-        low: &Spec<Tgt>,
-        high: &Spec<Tgt>,
-    ) -> Vec<(Spec<Tgt>, Spec<Tgt>)> {
-        todo!()
-    }
-
-    fn visit_dependency(&self, spec: &Spec<Tgt>, cost: &Cost) {
-        todo!()
+    fn debugging() -> Option<String> {
+        Some("Move".to_string())
     }
 }
 
