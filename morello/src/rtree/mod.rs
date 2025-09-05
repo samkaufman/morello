@@ -16,6 +16,7 @@ mod aabb;
 pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
 
 /// A trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
+/// It's used internally to implement RTreeDyn (each variant dispatches).
 #[enum_dispatch]
 trait RTreeGeneric<T> {
     type Intersectable<A>;
@@ -53,13 +54,21 @@ trait RTreeGeneric<T> {
         T: Clone,
         F: FnMut(T, T) -> T;
 
-    /// Update by subtracting the space filled by another [RTreeGeneric].
-    /// That tree's values are ignored.
-    ///
-    /// Note: The current implementation is very slow.
-    fn subtract(&mut self, subtrahend_tree: &Self)
+    fn subtract(
+        &mut self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
     where
         T: Clone;
+
+    fn subtract_tree<V>(
+        &mut self,
+        subtrahend_tree: &RTreeDyn<V>,
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
+    where
+        T: Clone,
+        V: Clone;
 
     fn intersection_candidates_with_other_tree<'a, A>(
         &'a self,
@@ -134,14 +143,31 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn subtract(&mut self, subtrahend_tree: &Self)
+            pub fn subtract(
+                &mut self, low: &[BimapSInt], high: &[BimapSInt]
+            ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
             where
-                T: Clone
+                T: Clone, // TODO: Remove this bound. Shouldn't be needed.
             {
-                match (self, subtrahend_tree) {
-                    $( (RTreeDyn::$name(t), RTreeDyn::$name(s)) => RTreeGeneric::subtract(t, s), )*
-                    _ => panic!("Mismatched ranks"),
-                };
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::subtract(t, low, high), )*
+                }
+            }
+
+            /// Update by subtracting the space filled by another [RTreeGeneric].
+            /// That tree's values are ignored.
+            ///
+            /// Note: The current implementation is very slow.
+            pub fn subtract_tree<V>(
+                &mut self, subtrahend_tree: &RTreeDyn<V>
+            ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
+            where
+                T: Clone,
+                V: Clone,
+            {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::subtract_tree(t, subtrahend_tree), )*
+                }
             }
 
             pub fn iter(&self) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
@@ -149,6 +175,21 @@ macro_rules! rtreedyn_cases {
                     $( RTreeDyn::$name(t) => Box::new(
                         t.iter().map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value))
                     ), )*
+                }
+            }
+
+            pub fn locate_in_envelope_intersecting(
+                &self,
+                bottom: &[BimapSInt],
+                top: &[BimapSInt],
+            ) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
+                match self {
+                    $( RTreeDyn::$name(t) => {
+                        Box::new(t.locate_in_envelope_intersecting(&AABB::from_corners(
+                            bottom.try_into().unwrap(),
+                            top.try_into().unwrap(),
+                        )).map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value)))
+                    } )*
                 }
             }
 
@@ -168,11 +209,11 @@ macro_rules! rtreedyn_cases {
 }
 
 rtreedyn_cases!(
-    1, D1, 2, D2, 3, D3, 4, D4, 5, D5, 6, D6, 7, D7, 8, D8, 9, D9, 10, D10, 11, D11, 12, D12, 13,
-    D13, 14, D14, 15, D15, 16, D16, 17, D17, 18, D18, 19, D19, 20, D20, 21, D21, 22, D22, 23, D23,
-    24, D24, 25, D25, 26, D26, 27, D27, 28, D28, 29, D29, 30, D30, 31, D31, 32, D32, 33, D33, 34,
-    D34, 35, D35, 36, D36, 37, D37, 38, D38, 39, D39, 40, D40, 41, D41, 42, D42, 43, D43, 44, D44,
-    45, D45, 46, D46, 47, D47, 48, D48, 49, D49, 50, D50, 51, D51, 52, D52, 53, D53, 54, D54
+    2, D2, 3, D3, 4, D4, 5, D5, 6, D6, 7, D7, 8, D8, 9, D9, 10, D10, 11, D11, 12, D12, 13, D13, 14,
+    D14, 15, D15, 16, D16, 17, D17, 18, D18, 19, D19, 20, D20, 21, D21, 22, D22, 23, D23, 24, D24,
+    25, D25, 26, D26, 27, D27, 28, D28, 29, D29, 30, D30, 31, D31, 32, D32, 33, D33, 34, D34, 35,
+    D35, 36, D36, 37, D37, 38, D38, 39, D39, 40, D40, 41, D41, 42, D42, 43, D43, 44, D44, 45, D45,
+    46, D46, 47, D47, 48, D48, 49, D49, 50, D50, 51, D51, 52, D52, 53, D53, 54, D54
 );
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -434,27 +475,63 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
     }
 
-    fn subtract(&mut self, subtrahend_tree: &Self)
+    fn subtract(
+        &mut self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
     where
         T: Clone,
     {
+        assert_eq!(low.len(), high.len());
+        let mut subtrahend_tree = RTreeDyn::empty(low.len());
+        subtrahend_tree.insert(low, high, ());
+        self.subtract_tree(&subtrahend_tree)
+            .into_iter()
+            .map(|(b, t, v, _)| (b, t, v))
+            .collect()
+    }
+
+    fn subtract_tree<V>(
+        &mut self,
+        subtrahend_tree: &RTreeDyn<V>,
+    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
+    where
+        T: Clone,
+        V: Clone,
+    {
+        let mut subtracted_partitions = vec![];
         let mut new_subrectangles = vec![];
-        for rhs in subtrahend_tree.iter() {
+        for (rhs_bottom, rhs_top, rhs_value) in subtrahend_tree.iter() {
             debug_assert!(new_subrectangles.is_empty());
-            let rhs_envelope = rhs.envelope();
+            let rhs_envelope =
+                AABB::from_corners(rhs_bottom.try_into().unwrap(), rhs_top.try_into().unwrap());
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
                 let RTreeRect { bottom, top, value } = intersecting_rect;
-                let mut subrectangles =
-                    rect_subtract(&bottom.arr, &top.arr, &rhs.bottom.arr, &rhs.top.arr);
-                if let Some((last_bottom, last_top)) = subrectangles.pop() {
-                    new_subrectangles.reserve(subrectangles.len() + 1);
-                    new_subrectangles.extend(
-                        subrectangles
-                            .into_iter()
-                            .map(|(bottom, top)| (bottom, top, value.clone())),
-                    );
-                    new_subrectangles.push((last_bottom, last_top, value));
-                }
+                let subrectangles = rect_subtract(&bottom.arr, &top.arr, rhs_bottom, rhs_top);
+                new_subrectangles.extend(
+                    subrectangles
+                        .into_iter()
+                        .map(|(bottom, top)| (bottom, top, value.clone())),
+                );
+                let intersection_bottom = bottom
+                    .arr
+                    .iter()
+                    .zip(rhs_bottom)
+                    .map(|(b, rb)| *b.max(rb))
+                    .collect::<Vec<_>>();
+                let intersection_top = top
+                    .arr
+                    .iter()
+                    .zip(rhs_top)
+                    .map(|(t, rt)| *t.min(rt))
+                    .collect::<Vec<_>>();
+                subtracted_partitions.push((
+                    intersection_bottom,
+                    intersection_top,
+                    value,
+                    rhs_value.clone(),
+                ));
             }
             // TODO: Is there really no bulk insert?
             for (bottom, top, value) in new_subrectangles.drain(..) {
@@ -465,6 +542,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 });
             }
         }
+        subtracted_partitions
     }
 
     fn intersection_candidates_with_other_tree<'a, A>(
@@ -938,8 +1016,9 @@ mod tests {
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 1], &[2, 2], (), true);
+        subtrahend.merge_insert(&[1, 1], &[2, 2], (), true);
 
-        minuhend.subtract(&subtrahend);
+        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
@@ -955,56 +1034,71 @@ mod tests {
                 },
             ])
         );
+        assert_eq!(intersections, &[(vec![1, 1], vec![2, 2], (), ())]);
     }
 
     #[test]
     fn test_rtree_subtract_2() {
-        let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
-        minuhend.merge_insert(&[5, 1], &[5, 7], (), true);
+        let mut minuhend: RTree<RTreeRect<2, _>> = RTree::new();
+        minuhend.merge_insert(&[1, 1], &[3, 3], "a", true);
+        minuhend.merge_insert(&[5, 1], &[5, 7], "b", true);
 
-        let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
-        subtrahend.merge_insert(&[1, 1], &[9, 9], (), true);
+        let mut subtrahend: RTree<RTreeRect<2, _>> = RTree::new();
+        subtrahend.merge_insert(&[1, 1], &[9, 9], "c", true);
 
-        minuhend.subtract(&subtrahend);
+        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(minuhend.into_iter().count(), 0);
+        assert_eq!(
+            intersections,
+            &[
+                (vec![1, 1], vec![3, 3], "a", "c"),
+                (vec![5, 1], vec![5, 7], "b", "c"),
+            ]
+        );
     }
 
     #[test]
     fn test_rtree_subtract_3() {
-        let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
-        minuhend.merge_insert(&[1, 1], &[3, 7], (), true);
-        minuhend.merge_insert(&[5, 1], &[7, 7], (), true);
+        let mut minuhend: RTree<RTreeRect<2, _>> = RTree::new();
+        minuhend.merge_insert(&[1, 1], &[3, 7], "a", true);
+        minuhend.merge_insert(&[5, 1], &[7, 7], "b", true);
 
         let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
         subtrahend.merge_insert(&[1, 2], &[7, 3], (), true);
 
-        minuhend.subtract(&subtrahend);
+        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
                 RTreeRect {
                     bottom: [1, 1].into(),
                     top: [3, 1].into(),
-                    value: ()
+                    value: "a"
                 },
                 RTreeRect {
                     bottom: [5, 1].into(),
                     top: [7, 1].into(),
-                    value: ()
+                    value: "b"
                 },
                 RTreeRect {
                     bottom: [1, 4].into(),
                     top: [3, 7].into(),
-                    value: ()
+                    value: "a"
                 },
                 RTreeRect {
                     bottom: [5, 4].into(),
                     top: [7, 7].into(),
-                    value: ()
+                    value: "b"
                 },
             ])
-        )
+        );
+        assert_eq!(
+            intersections,
+            &[
+                (vec![1, 2], vec![3, 3], "a", ()),
+                (vec![5, 2], vec![7, 3], "b", ()),
+            ]
+        );
     }
 
     #[test]
@@ -1077,7 +1171,7 @@ mod tests {
                 .arr
                 .iter()
                 .zip(&space_max.arr)
-                .map(|(l, h)| *l..=*h)
+                .map(|(l, h)| (*l..=*h))
                 .multi_cartesian_product();
             for pt in pts_iter {
                 let pt = RTreePt::<3> {
@@ -1246,7 +1340,7 @@ mod tests {
     //         .prop_flat_map(|intensity| {
     //             proptest::option::of((
     //                 Just(intensity),
-    //                 Just(MemVec::zero::<Avx2Target>()),
+    //                 Just(MemVec::zero::<X86Target>()),
     //                 0..2u8,
     //                 0..2u16,
     //             ))
