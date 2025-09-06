@@ -718,7 +718,7 @@ impl<Tgt: Target> ActionEncodeDecode<Tgt> for Action<Tgt> {
     fn encode(&self, spec: &Spec<Tgt>) -> ActionNum {
         Tgt::actions(&spec.0)
             .position(|a| a == *self)
-            .unwrap()
+            .unwrap_or_else(|| panic!("Action {self:?} does not apply to {}", spec.0))
             .try_into()
             .unwrap()
     }
@@ -1561,5 +1561,57 @@ mod tests {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod shared_tests {
+    #[macro_export]
+    macro_rules! emit_shared_naivebottomupactionprovider_tests {
+        ($tgt:ty, $provider:ty, $suffix:ident) => {
+            paste::paste! { proptest::prelude::proptest! {
+                #[test]
+                fn [< test_naivebottomupsolver_queries_for_single_canonical_spec_ $suffix >](
+                    spec in $crate::spec::arb_canonical_spec::<$tgt>(None, None)
+                ) {
+                    use std::collections::HashSet;
+                    use std::default::Default;
+                    use $crate::db::db_spec_bimap;
+                    use $crate::scheduling::{
+                        SpecGeometry, BottomUpSolver, NaiveBottomUpSolver, DependencyRequest
+                    };
+
+                    let mut solver = NaiveBottomUpSolver::<$tgt, $provider>::default();
+                    let single_spec_geometry = SpecGeometry::single(
+                        &spec,
+                        std::rc::Rc::new(db_spec_bimap(false)),
+                    );
+                    let request = solver.request(&single_spec_geometry);
+
+                    let mut query_specs = HashSet::new();
+                    if let Some(queries_geometry) = request.queries() {
+                        queries_geometry.iter().for_each(|rect| {
+                            query_specs.extend(rect.iter_specs());
+                        });
+                    }
+
+                    let mut expansion_specs = HashSet::new();
+                    let actions =
+                        <$provider as NaiveBottomUpActionProvider<$tgt>>::actions(&spec.0);
+                    for action in actions {
+                        if let Ok(lowered_impl) = action.apply(&spec) {
+                            lowered_impl.visit_leaves(&mut |leaf| {
+                                if let ImplNode::SpecApp(spec_app) = leaf {
+                                    expansion_specs.insert(spec_app.0.clone());
+                                }
+                                true
+                            });
+                        }
+                    }
+
+                    proptest::prelude::prop_assert_eq!(query_specs, expansion_specs);
+                }
+            } }
+        };
     }
 }

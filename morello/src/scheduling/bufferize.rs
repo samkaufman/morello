@@ -143,11 +143,11 @@ mod tests {
     use crate::imp::Impl;
     use crate::layout::row_major;
     use crate::scheduling_sugar::SchedulingSugar;
-    use crate::shape;
     use crate::spec::{PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
     use crate::tensorspec::TensorSpecAux;
     use crate::views::{Param, ViewE};
+    use crate::{emit_shared_naivebottomupactionprovider_tests, shape};
 
     /// Test that bufferizing a chain of 3 Matmuls produces the correct sub-Spec applications.
     #[test]
@@ -245,4 +245,15 @@ mod tests {
             ViewE::Param(Param(4, _, _))
         ));
     }
+
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        BufferizeActionProvider<X86Target>,
+        bufferize_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        BufferizeActionProvider<ArmTarget>,
+        bufferize_arm
+    );
 }

@@ -49,6 +49,7 @@ wide = "0.7"
 
 [dev-dependencies]
 iai-callgrind = "0.12.3"
+paste = "1.0.15"
 proptest = "1.2.0"
 proptest-derive = "0.5.0"
 divan = "0.1"

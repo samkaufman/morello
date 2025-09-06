@@ -333,7 +333,8 @@ mod tests {
     use crate::layout::{batched_col_major, row_major};
     use crate::scheduling::Action;
     use crate::spec;
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
+    use crate::{emit_shared_naivebottomupactionprovider_tests, lspec};
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
@@ -427,4 +428,15 @@ mod tests {
             children => panic!("expected one Matmul Spec child, got {children:?}"),
         };
     }
+
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        MoveActionProvider<X86Target>,
+        move_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        MoveActionProvider<ArmTarget>,
+        move_arm
+    );
 }

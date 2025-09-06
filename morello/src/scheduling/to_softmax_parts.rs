@@ -300,3 +300,33 @@ where
     lowered_limits.discretize::<Tgt>();
     Ok(lowered_limits)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        emit_shared_naivebottomupactionprovider_tests,
+        target::{ArmTarget, X86Target},
+    };
+
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        ToSoftmaxPartsActionProvider<X86Target>,
+        tosoftmaxparts_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        ToSoftmaxPartsActionProvider<ArmTarget>,
+        tosoftmaxparts_arm
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        ToSoftmaxPartsRecomputeActionProvider<X86Target>,
+        tosoftmaxpartsrecompute_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        ToSoftmaxPartsRecomputeActionProvider<ArmTarget>,
+        tosoftmaxpartsrecompute_arm
+    );
+}
