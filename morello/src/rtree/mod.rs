@@ -7,6 +7,7 @@ use rstar::Envelope as _;
 use rstar::{Point, PointDistance, RTree, RTreeObject};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
 

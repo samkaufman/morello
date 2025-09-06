@@ -181,3 +181,23 @@ where
     lowered_limits.discretize::<Tgt>();
     Ok(lowered_limits)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        emit_shared_naivebottomupactionprovider_tests,
+        target::{ArmTarget, X86Target},
+    };
+
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        ToMaxAndUnscaledActionProvider<X86Target>,
+        tomaxandunscaled_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        ToMaxAndUnscaledActionProvider<ArmTarget>,
+        tomaxandunscaled_arm
+    );
+}

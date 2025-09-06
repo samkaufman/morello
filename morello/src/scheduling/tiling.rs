@@ -1435,11 +1435,11 @@ fn combine_contig_cutoffs(
 mod tests {
     use super::*;
     use crate::db::db_spec_bimap;
+    use crate::emit_shared_naivebottomupactionprovider_tests;
     use crate::grid::canon::CanonicalBimap;
     use crate::grid::general::BiMap;
     use crate::imp::Impl;
     use crate::layout::{arb_shape_and_same_rank_layout, row_major, Layout, PhysDim};
-    use crate::lspec;
     use crate::scheduling::{Action, SpecGeometry};
     use crate::shape;
     use crate::spec;
@@ -2218,6 +2218,27 @@ mod tests {
         prop_assert_eq!(apply_dependencies, solver_dependencies);
         Ok(())
     }
+
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        TileOutActionProvider<X86Target>,
+        tileout_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        TileOutActionProvider<ArmTarget>,
+        tileout_arm
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        SplitActionProvider<X86Target>,
+        split_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        SplitActionProvider<ArmTarget>,
+        split_arm
+    );
 
     fn locate_rect_containing_point<'a, R, V>(rects: R, point: &[BimapSInt]) -> Option<&'a V>
     where

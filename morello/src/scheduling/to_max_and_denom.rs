@@ -89,3 +89,23 @@ impl<Tgt: Target> NaiveBottomUpActionProvider<Tgt> for ToMaxAndDenominatorAction
         vec![]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        emit_shared_naivebottomupactionprovider_tests,
+        target::{ArmTarget, X86Target},
+    };
+
+    emit_shared_naivebottomupactionprovider_tests!(
+        X86Target,
+        ToMaxAndDenominatorActionProvider<X86Target>,
+        tomaxanddenom_x86
+    );
+    emit_shared_naivebottomupactionprovider_tests!(
+        ArmTarget,
+        ToMaxAndDenominatorActionProvider<ArmTarget>,
+        tomaxanddenom_arm
+    );
+}
