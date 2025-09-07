@@ -351,7 +351,9 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             to_remove.clear();
         }
 
-        insert_and_subtract_overlap(self, to_insert);
+        if !skip_insert {
+            insert_and_subtract_overlap(self, to_insert);
+        }
     }
 
     fn fold_insert<F>(
