@@ -335,7 +335,10 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     to_insert.top = merged_envelope.upper().clone();
                     to_insert.bottom = merged_envelope.lower().clone();
 
-                    to_remove.queue_removal(candidate.clone());
+                    // If we expand insert to merge, we'll need to start over with a new
+                    // ContainedAndAdjacentSelFn which has an updated to_insert.
+                    // TODO: Starting over for every adjacent/mergeble rect has bad asymptotics!
+                    break;
                 }
             }
 
@@ -1085,6 +1088,44 @@ mod tests {
         )
     }
 
+    // Distilled from the trace of an old bug where merge_inset performed "simultaneous"
+    // merges with multiple adjacent rectangles, not carrying the updated, merged shape
+    // from the first merge.
+    #[test]
+    fn test_no_overlap_1() {
+        let mut tree = RTree::<RTreeRect<2, _>>::new();
+
+        tree.insert(RTreeRect {
+            bottom: [2, 3].into(),
+            top: [2, 3].into(),
+            value: 1,
+        });
+        tree.insert(RTreeRect {
+            bottom: [2, 2].into(),
+            top: [2, 2].into(),
+            value: 4,
+        });
+        tree.insert(RTreeRect {
+            bottom: [3, 2].into(),
+            top: [3, 2].into(),
+            value: 1,
+        });
+        tree.merge_insert(&[3, 3], &[3, 3], 1);
+
+        let tree_rects = tree.iter().collect::<Vec<_>>();
+        for (i, r) in tree_rects.iter().enumerate() {
+            for r2 in &tree_rects[..i] {
+                assert!(
+                    !r.envelope().intersects(&r2.envelope()),
+                    "Found intersection in R*-Tree: [{:?}]",
+                    tree.iter()
+                        .map(|r| format!("({:?}, {:?}, {:?})", r.bottom.arr, r.top.arr, r.value))
+                        .join(", ")
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_fold_insert_no_intersection() {
         let mut tree = RTreeDyn::empty(2);
@@ -1350,22 +1391,22 @@ mod tests {
     /// Construct an RTree, insert rects with the given points and the same value, and assert that
     /// they are all merged into a single rectangle
     fn assert_merged<const D: usize>(rects: &[([BimapSInt; D], [BimapSInt; D])]) {
-        let mut tree = RTree::new();
-        for (bottom, top) in rects {
-            tree.merge_insert(bottom, top, (), true);
-        }
-        let merged_envelope = rects.iter().fold(
-            AABB::<D>::from_corners(rects[0].0.into(), rects[0].1.into()),
-            |mut acc, (b, t)| {
-                acc.merge(&AABB::from_corners((*b).into(), (*t).into()));
-                acc
-            },
-        );
-        assert_eq!(
-            tree.iter().map(|r| r.envelope()).collect::<Vec<_>>(),
-            &[merged_envelope]
-        );
+    let mut tree = RTree::new();
+    for (bottom, top) in rects {
+        tree.merge_insert(bottom, top, (), true);
     }
+    let merged_envelope = rects.iter().fold(
+        AABB::<D>::from_corners(rects[0].0.into(), rects[0].1.into()),
+        |mut acc, (b, t)| {
+            acc.merge(&AABB::from_corners((*b).into(), (*t).into()));
+            acc
+        },
+    );
+    assert_eq!(
+        tree.iter().map(|r| r.envelope()).collect::<Vec<_>>(),
+        &[merged_envelope]
+    );
+}
 
     #[test]
     fn test_rect_partition_intersection_no_overlap() {
