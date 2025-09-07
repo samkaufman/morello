@@ -1403,22 +1403,22 @@ mod tests {
     /// Construct an RTree, insert rects with the given points and the same value, and assert that
     /// they are all merged into a single rectangle
     fn assert_merged<const D: usize>(rects: &[([BimapSInt; D], [BimapSInt; D])]) {
-    let mut tree = RTree::new();
-    for (bottom, top) in rects {
-        tree.merge_insert(bottom, top, (), true);
+        let mut tree = RTree::new();
+        for (bottom, top) in rects {
+            tree.merge_insert(bottom, top, (), true);
+        }
+        let merged_envelope = rects.iter().fold(
+            AABB::<D>::from_corners(rects[0].0.into(), rects[0].1.into()),
+            |mut acc, (b, t)| {
+                acc.merge(&AABB::from_corners((*b).into(), (*t).into()));
+                acc
+            },
+        );
+        assert_eq!(
+            tree.iter().map(|r| r.envelope()).collect::<Vec<_>>(),
+            &[merged_envelope]
+        );
     }
-    let merged_envelope = rects.iter().fold(
-        AABB::<D>::from_corners(rects[0].0.into(), rects[0].1.into()),
-        |mut acc, (b, t)| {
-            acc.merge(&AABB::from_corners((*b).into(), (*t).into()));
-            acc
-        },
-    );
-    assert_eq!(
-        tree.iter().map(|r| r.envelope()).collect::<Vec<_>>(),
-        &[merged_envelope]
-    );
-}
 
     #[test]
     fn test_rect_partition_intersection_no_overlap() {
