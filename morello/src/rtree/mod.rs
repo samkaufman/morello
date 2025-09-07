@@ -835,9 +835,17 @@ mod tests {
     use super::*;
     use crate::utils::diagonals;
     use itertools::Itertools;
+    use proptest::prelude::*;
     use proptest::strategy::{Just, Strategy};
     use proptest::{prop_assert, prop_assert_eq, proptest};
     use std::rc::Rc;
+
+    #[derive(proptest_derive::Arbitrary, Debug)]
+    enum InsertMode {
+        Merge,
+        Fold,
+        FoldMerging,
+    }
 
     #[test]
     #[should_panic]
@@ -1110,7 +1118,7 @@ mod tests {
             top: [3, 2].into(),
             value: 1,
         });
-        tree.merge_insert(&[3, 3], &[3, 3], 1);
+        tree.merge_insert(&[3, 3], &[3, 3], 1, true);
 
         let tree_rects = tree.iter().collect::<Vec<_>>();
         for (i, r) in tree_rects.iter().enumerate() {
@@ -1288,16 +1296,20 @@ mod tests {
             }
         }
 
-
         #[test]
         fn test_rtree_never_contains_overlaps(
             rects in proptest::collection::vec(arb_rect::<3>(), 2..=3),
+            insert_mode in any::<InsertMode>(),
         ) {
             let mut tree = RTree::<RTreeRect<3, Rc<u8>>>::new();
             for r in &rects {
                 // Box values so that we can later compare memory addresses to determine
-                // whether rects are the same.
-                tree.merge_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), false);
+                // whether a rects are the same.
+                match insert_mode {
+                    InsertMode::Merge => tree.merge_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), true),
+                    InsertMode::Fold => tree.fold_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), false, |a, _| a),
+                    InsertMode::FoldMerging => tree.fold_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), true, |a, _| a),
+                };
             }
 
             for r in tree.iter() {
