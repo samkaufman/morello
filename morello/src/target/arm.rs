@@ -184,7 +184,7 @@ impl CpuTarget for ArmTarget {
         TargetId::Arm
     }
 
-    fn vec_types() -> &'static [VecType; 16] {
+    fn vec_types() -> &'static [VecType] {
         &ARM_VEC_TYPES
     }
 }

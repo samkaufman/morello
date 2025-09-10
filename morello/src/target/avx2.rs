@@ -185,7 +185,7 @@ impl CpuTarget for Avx2Target {
         TargetId::Avx2
     }
 
-    fn vec_types() -> &'static [VecType; 16] {
+    fn vec_types() -> &'static [VecType] {
         &X86_VEC_TYPES
     }
 }

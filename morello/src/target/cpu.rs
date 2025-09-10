@@ -46,7 +46,7 @@ pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
     fn target_id() -> TargetId;
-    fn vec_types() -> &'static [VecType; 16];
+    fn vec_types() -> &'static [VecType];
 }
 
 #[derive(
@@ -574,7 +574,7 @@ impl<T: CpuTarget> Target for T {
         <Self as CpuTarget>::target_id()
     }
 
-    fn vec_types() -> &'static [VecType; 16] {
+    fn vec_types() -> &'static [VecType] {
         <Self as CpuTarget>::vec_types()
     }
 }

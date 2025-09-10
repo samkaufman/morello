@@ -2293,7 +2293,7 @@ fn get_axis_steps<Tgt: Target>(l: &Loop<Tgt>) -> Vec<(u8, u32, u32)> {
 }
 
 fn get_vector(
-    vec_types: &'static [VecType; 16],
+    vec_types: &'static [VecType],
     dtype: Dtype,
     vector_size: DimSize,
 ) -> &'static VecType {
