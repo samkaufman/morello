@@ -178,7 +178,7 @@ fn main_per_db(
     };
     let stages_completed = read_stages_to_skip(&fingerprint, db_path);
     if stages_completed != 0 {
-        info!("First {} stages already computed", stages_completed);
+        info!("First {stages_completed} stages already computed");
     }
     if args.stages.map(|s| s <= stages_completed) == Some(true) {
         return;
@@ -253,7 +253,7 @@ fn main_per_db(
             );
 
             if let Some(example_spec) = stage.first_mut().and_then(|v| v.peek()) {
-                info!("Example problem Spec: {}", example_spec);
+                info!("Example problem Spec: {example_spec}");
             }
 
             #[cfg(feature = "db-stats")]

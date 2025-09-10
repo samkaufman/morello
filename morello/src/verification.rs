@@ -90,7 +90,7 @@ impl BuiltArtifact {
         // Pass the filename as an argument.
         let mut cmd = Command::new(&self.binary_path);
         cmd.args(files.iter().map(|f| f.path()));
-        log::debug!("Running {:?}", cmd);
+        log::debug!("Running {cmd:?}");
         let output = cmd.output()?;
 
         Ok(read_output(

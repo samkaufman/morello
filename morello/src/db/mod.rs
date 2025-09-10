@@ -165,7 +165,7 @@ impl FilesDatabase {
         let actual_total_cache_size =
             shard_count * (cache_per_shard_size + cache_per_shard_samples);
         if actual_total_cache_size != cache_size {
-            log::warn!("Database using cache size: {}", actual_total_cache_size);
+            log::warn!("Database using cache size: {actual_total_cache_size}");
         }
 
         let shards = ShardVec(
@@ -589,9 +589,7 @@ impl Shard {
                                         plain_error,
                                     }) => {
                                         log::error!(
-                                            "Continuing after errors reading page; {:?} and {:?}",
-                                            zstd_error,
-                                            plain_error
+                                            "Continuing after errors reading page; {zstd_error:?} and {plain_error:?}"
                                         );
                                         Page {
                                             contents: PageContents::RTree(Box::new(
@@ -879,7 +877,7 @@ fn analyze_visit_dir<Tgt>(
             Ok(r) => r,
             Err(e) => {
                 if skip_read_errors {
-                    log::warn!("Error reading page: {:?}", e);
+                    log::warn!("Error reading page: {e:?}");
                     continue;
                 }
                 panic!("Error reading page: {e:?}");
