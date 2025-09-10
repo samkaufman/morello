@@ -3,8 +3,9 @@ use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::Spec;
 use morello::target::{
+    Avx2Target,
     CpuMemoryLevel::{self, RF},
-    Target, X86Target,
+    Target,
 };
 // ANCHOR_END: specdef_use
 // ANCHOR: schedule_use
@@ -17,7 +18,7 @@ use morello::codegen::CodeGen;
 
 fn main() {
     // ANCHOR: specdef
-    let mut spec: Spec<X86Target> = spec!(Matmul(
+    let mut spec: Spec<Avx2Target> = spec!(Matmul(
         [1, 1, 32, 1],
         (u32, RF, row_major), // `RF` = tensor is in register file
         (u32, RF, row_major),

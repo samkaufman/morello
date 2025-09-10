@@ -32,7 +32,7 @@ flag indicating that this the implementation should run on a single thread
 ```
 
 
-Notice that the Spec is parameterized by `X86Target`. Morello *targets* are
+Notice that the Spec is parameterized by `Avx2Target`. Morello *targets* are
 types which define a set of target-specific instructions, a set of available
 Spec rewrites, and basic cost and memory models. (**TODO:** What else?
 **TODO:** Describe re-targeting.) As you might have guessed, this example will

@@ -2,14 +2,14 @@ use divan::counter::ItemsCount;
 use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::spec::Spec;
-use morello::target::{Target, X86Target};
+use morello::target::{Avx2Target, Target};
 use morello::{cost::Cost, memorylimits::MemVec};
 use std::hint::black_box;
 
 const BATCHES: [u32; 4] = [1, 2, 4, 8];
 const SIZES: [u32; 6] = [32, 64, 128, 256, 512, 1024];
 
-fn mk_specs_set() -> Vec<Spec<X86Target>> {
+fn mk_specs_set() -> Vec<Spec<Avx2Target>> {
     let mut specs = Vec::new();
     for &b in &BATCHES {
         for &m in &SIZES {
@@ -17,9 +17,9 @@ fn mk_specs_set() -> Vec<Spec<X86Target>> {
                 for &n in &SIZES {
                     specs.push(morello::spec!(Matmul(
                         [b, m, k, n],
-                        (u32, X86Target::default_level(), row_major),
-                        (u32, X86Target::default_level(), row_major),
-                        (u32, X86Target::default_level(), row_major),
+                        (u32, Avx2Target::default_level(), row_major),
+                        (u32, Avx2Target::default_level(), row_major),
+                        (u32, Avx2Target::default_level(), row_major),
                         serial
                     )));
                 }
@@ -36,7 +36,7 @@ fn db_puts_overlap(bencher: divan::Bencher) {
     let decisions: Vec<_> = (0..specs.len())
         .map(|i| {
             // Keep peaks very small to always satisfy spec memory limits.
-            let peaks = MemVec::zero::<X86Target>();
+            let peaks = MemVec::zero::<Avx2Target>();
             let cost = Cost {
                 main: 10_000 * (i as u32 % 4),
                 peaks,

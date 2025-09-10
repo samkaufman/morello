@@ -167,7 +167,7 @@ mod tests {
     use crate::common::Dtype;
     use crate::layout::row_major;
     use crate::shape;
-    use crate::target::{Target, X86Target};
+    use crate::target::{Avx2Target, Target};
     use crate::tensorspec::TensorSpec;
     use crate::views::Param;
     use itertools::Itertools;
@@ -312,10 +312,10 @@ mod tests {
         fn test_simple_tiling_volume_preserved(
             (tiling, origin_shape) in simple_tiling_and_origin_shape_strategy()
         ) {
-            let spec = TensorSpec::<X86Target>::new_canon(
+            let spec = TensorSpec::<Avx2Target>::new_canon(
                 origin_shape.clone(),
                 Dtype::Uint32,
-                X86Target::levels()[0],
+                Avx2Target::levels()[0],
                 row_major(origin_shape.len().try_into().unwrap()),
                 None,
             );
@@ -361,10 +361,10 @@ mod tests {
     #[test]
     fn test_apply_with_boundaries_simple() {
         // Tile 3x4x4 over 5x7x6 (non-multiple in every dimension)
-        let spec = TensorSpec::<X86Target>::new_canon(
+        let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![5, 7, 6],
             Dtype::Uint32,
-            X86Target::levels()[0],
+            Avx2Target::levels()[0],
             row_major(3),
             None,
         );
@@ -409,10 +409,10 @@ mod tests {
     #[test]
     fn test_apply_with_boundaries_no_boundaries() {
         // Tile 2x3 over 4x6 (multiples in all dimensions)
-        let spec = TensorSpec::<X86Target>::new_canon(
+        let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![4, 6],
             Dtype::Uint32,
-            X86Target::levels()[0],
+            Avx2Target::levels()[0],
             row_major(2),
             None,
         );
@@ -427,10 +427,10 @@ mod tests {
     #[test]
     fn test_apply_with_boundaries_some_nonmultiples() {
         // Tile 2x4x3 over 6x7x9 (multiple in dims 0 and 2, non-multiple in dim 1)
-        let spec = TensorSpec::<X86Target>::new_canon(
+        let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![6, 7, 9],
             Dtype::Uint32,
-            X86Target::levels()[0],
+            Avx2Target::levels()[0],
             row_major(3),
             None,
         );

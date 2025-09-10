@@ -313,7 +313,7 @@ mod tests {
     use crate::layout::{batched_col_major, row_major};
     use crate::scheduling::Action;
     use crate::spec;
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::target::{Avx2Target, CpuMemoryLevel};
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn test_move_planning_into_cache_with_extra_degenerate_dims_preserves_layout_and_contig() {
         let batched_cm = batched_col_major(3);
-        let spec: Spec<X86Target> = spec!(MatmulAccum(
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
             (f32, CpuMemoryLevel::GL, batched_cm.clone()),
             (f32, CpuMemoryLevel::GL, row_major),
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(plan.new_spec.contiguous_abs(), batched_cm.contiguous_full());
     }
 
-    fn child_impls_into_specs(imp: &ImplNode<X86Target>) -> Vec<Spec<X86Target>> {
+    fn child_impls_into_specs(imp: &ImplNode<Avx2Target>) -> Vec<Spec<Avx2Target>> {
         imp.children()
             .iter()
             .map(|child| {
@@ -375,10 +375,10 @@ mod tests {
     }
 
     fn shared_test_subspecs_when_moving_into_degenerate_packed_layout(
-        child_get: impl FnOnce(&Spec<X86Target>, Action<X86Target>) -> Vec<Spec<X86Target>>,
+        child_get: impl FnOnce(&Spec<Avx2Target>, Action<Avx2Target>) -> Vec<Spec<Avx2Target>>,
     ) {
         let batched_cm = batched_col_major(3);
-        let spec: Spec<X86Target> = spec!(MatmulAccum(
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
             (f32, CpuMemoryLevel::GL, batched_cm),
             (f32, CpuMemoryLevel::GL, row_major),

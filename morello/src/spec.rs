@@ -3259,7 +3259,7 @@ mod tests {
     use crate::scheduling::{Action, ActionT as _, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::target::CpuMemoryLevel::{GL, L1, RF};
-    use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target, LEVEL_COUNT};
+    use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel, MemoryLevel, Target, LEVEL_COUNT};
     use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::views::View;
@@ -3272,7 +3272,7 @@ mod tests {
 
     #[test]
     fn test_lspec_1() {
-        let spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+        let spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [32, 2, 3, 3],
             (u8, GL, row_major),
             (i8, GL, row_major, c0),
@@ -3296,7 +3296,7 @@ mod tests {
             layout: row_major(3),
             vector_size: None,
         };
-        let expected = LogicalSpec::<X86Target>::Primitive(
+        let expected = LogicalSpec::<Avx2Target>::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::Matmul { accum: true },
                 spec_shape: shape![32, 2, 3, 3],
@@ -3310,11 +3310,11 @@ mod tests {
 
     #[test]
     fn test_spec_macro_shorthand() {
-        let s: Spec<X86Target> = spec!(
+        let s: Spec<Avx2Target> = spec!(
             Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)),
             [8, 8, 256, 128]
         );
-        let expected_ls: LogicalSpec<X86Target> =
+        let expected_ls: LogicalSpec<Avx2Target> =
             lspec!(Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)));
         assert_eq!(s.0, expected_ls);
         assert_eq!(
@@ -3338,7 +3338,7 @@ mod tests {
             unreachable!();
         };
 
-        let expected_parameters: Vec<TensorSpec<X86Target>> = vec![
+        let expected_parameters: Vec<TensorSpec<Avx2Target>> = vec![
             TensorSpec::new_noncanon_with_aux(
                 [0, 2, 3]
                     .into_iter()
@@ -3518,7 +3518,7 @@ mod tests {
     proptest! {
         #[test]
         fn test_parameter_shapes_and_every_parameter_shape_matches(
-            spec in any::<LogicalSpec<X86Target>>()
+            spec in any::<LogicalSpec<Avx2Target>>()
         ) {
             let shapes_left = spec.parameter_shapes();
             let shapes_right = (0..spec.operand_count())
@@ -3529,7 +3529,7 @@ mod tests {
 
         #[test]
         fn test_parameter_levels_matches_parameters_levels(
-            spec in any::<LogicalSpec<X86Target>>()
+            spec in any::<LogicalSpec<Avx2Target>>()
         ) {
             let levels_from_parameter_levels = spec.parameter_levels();
             let levels_from_parameters = spec.parameters().iter().map(|p| p.level()).collect::<Vec<_>>();
@@ -3547,8 +3547,8 @@ mod tests {
 
         // TODO: Add ARM variant
         #[test]
-        fn test_parameter_level_matches_parameter_levels_x86(
-            spec in any::<LogicalSpec<X86Target>>()
+        fn test_parameter_level_matches_parameter_levels_avx2(
+            spec in any::<LogicalSpec<Avx2Target>>()
         ) {
             for (i, level) in spec.parameter_levels().into_iter().enumerate() {
                 prop_assert_eq!(level, spec.parameter_level(i));
@@ -3556,7 +3556,7 @@ mod tests {
         }
 
         #[test]
-        fn test_no_action_panics_x86(spec in arb_canonical_spec::<X86Target>(None, None)) {
+        fn test_no_action_panics_avx2(spec in arb_canonical_spec::<Avx2Target>(None, None)) {
             shared_test_no_action_panics(spec);
         }
 
@@ -3567,8 +3567,8 @@ mod tests {
 
         #[test]
         #[ignore]
-        fn test_actions_are_valid_through_consumed_memory_x86(
-            logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
+        fn test_actions_are_valid_through_consumed_memory_avx2(
+            logical_spec in arb_canonical_logical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE))
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
@@ -3576,7 +3576,7 @@ mod tests {
         #[test]
         #[ignore]
         fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in arb_canonical_logical_spec::<X86Target>(Some(TEST_SMALL_SIZE))
+            logical_spec in arb_canonical_logical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE))
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
@@ -3597,14 +3597,14 @@ mod tests {
 
         #[test]
         fn test_parameters_len_matches_operand_count(
-            logical_spec in any::<LogicalSpec<X86Target>>()
+            logical_spec in any::<LogicalSpec<Avx2Target>>()
         ) {
             prop_assert_eq!(logical_spec.parameters().len(), logical_spec.operand_count());
         }
 
         #[test]
         fn test_canonicalize_is_noop_if_already_canonical(
-            logical_spec in any::<LogicalSpec<X86Target>>()
+            logical_spec in any::<LogicalSpec<Avx2Target>>()
         ) {
             let mut canonicalized_logical_spec = logical_spec.clone();
             if canonicalized_logical_spec.canonicalize().is_ok() {
@@ -3626,7 +3626,7 @@ mod tests {
 
         #[test]
         fn test_canonicalizing_specs_canonicalizes_parameters(
-            logical_spec in any::<LogicalSpec<X86Target>>()
+            logical_spec in any::<LogicalSpec<Avx2Target>>()
         ) {
             let mut logical_spec = logical_spec;
             match logical_spec.canonicalize() {
@@ -3667,7 +3667,7 @@ mod tests {
                         let auxes_strategy = basics
                             .parameter_shapes()
                             .into_iter()
-                            .map(|s| any_with::<TensorSpecAux<X86Target>>((TensorSpecArbMaxShape(s), Some(dtype))))
+                            .map(|s| any_with::<TensorSpecAux<Avx2Target>>((TensorSpecArbMaxShape(s), Some(dtype))))
                             .collect::<Vec<_>>();
                         (Just(basics), auxes_strategy, any::<bool>())
                     })
@@ -3675,7 +3675,7 @@ mod tests {
                         auxes.iter().all(|aux| !aux.level.vector_rf())
                     })
                     .prop_filter_map("Spec should be canonical", |(basics, auxes, serial_only)| {
-                        let s = Spec(LogicalSpec::Primitive(basics, auxes, serial_only), X86Target::max_mem());
+                        let s = Spec(LogicalSpec::Primitive(basics, auxes, serial_only), Avx2Target::max_mem());
                         if s.is_canonical() {
                             Some(s)
                         } else {
@@ -3705,9 +3705,9 @@ mod tests {
 
         #[test]
         fn test_move_actions_never_returns_within_level_copy(
-            spec in arb_canonical_spec::<X86Target>(None, None)
+            spec in arb_canonical_spec::<Avx2Target>(None, None)
         ) {
-            for action in X86Target::actions(&spec.0) {
+            for action in Avx2Target::actions(&spec.0) {
                 if let Ok(ImplNode::Alloc(alloc)) = action.apply(&spec) {
                     assert_ne!(&alloc.source_spec, alloc.introduced.spec(),
                         "Copying Alloc introduced by action {action:?}");
@@ -3717,16 +3717,16 @@ mod tests {
 
         #[test]
         fn test_action_applies_everywhere_down_through_peak_memory(
-            (spec, action, _, lower_limit) in arb_spec_action_and_lower_limit::<X86Target>()
+            (spec, action, _, lower_limit) in arb_spec_action_and_lower_limit::<Avx2Target>()
         ) {
             let lower_spec = Spec(spec.0.clone(), lower_limit);
-            assert!(X86Target::actions(&lower_spec.0).contains(&action),
+            assert!(Avx2Target::actions(&lower_spec.0).contains(&action),
                 "Action {action:?} was not present in lower-limits Spec {lower_spec:?}");
         }
 
         #[test]
-        fn test_no_action_produces_same_spec_with_higher_memory_limit_x86(
-            spec in arb_canonical_spec::<X86Target>(None, None)
+        fn test_no_action_produces_same_spec_with_higher_memory_limit_avx2(
+            spec in arb_canonical_spec::<Avx2Target>(None, None)
         ) {
             shared_test_no_action_produces_same_spec_with_higher_memory_limit(&spec)
         }
@@ -3740,9 +3740,9 @@ mod tests {
 
         #[test]
         fn test_actions_produce_canonical_subspecs(
-            spec in arb_canonical_spec::<X86Target>(None, None)
+            spec in arb_canonical_spec::<Avx2Target>(None, None)
         ) {
-            X86Target::actions(&spec.0).for_each(|action| {
+            Avx2Target::actions(&spec.0).for_each(|action| {
                 let Ok(applied) = action.apply(&spec) else {
                     return;
                 };
@@ -3778,7 +3778,7 @@ mod tests {
         }
 
         #[test]
-        fn test_specbimap_is_invertible_x86(spec in any::<Spec<X86Target>>()) {
+        fn test_specbimap_is_invertible_avx2(spec in any::<Spec<Avx2Target>>()) {
             // binary-scaled SurMap is not tested
             shared_test_specbimap_is_invertible(spec, false);
         }
@@ -3791,7 +3791,7 @@ mod tests {
         }
 
         #[test]
-        fn test_parameter_fn_matches_parameters_fn(spec in any::<LogicalSpec<X86Target>>()) {
+        fn test_parameter_fn_matches_parameters_fn(spec in any::<LogicalSpec<Avx2Target>>()) {
             let parameters = spec.parameters();
             let individual_parameters = (0..parameters.len()).map(|i| spec.parameter(i)).collect::<Vec<_>>();
             prop_assert_eq!(parameters, individual_parameters);
@@ -3799,18 +3799,18 @@ mod tests {
 
         #[test]
         #[should_panic]
-        fn test_parameter_fn_panics_above_parameter_len(spec in any::<LogicalSpec<X86Target>>()) {
+        fn test_parameter_fn_panics_above_parameter_len(spec in any::<LogicalSpec<Avx2Target>>()) {
             spec.parameter(spec.parameters().len());
         }
 
         #[test]
         #[should_panic]
-        fn test_parameter_fn_panics_above_parameter_count(spec in any::<LogicalSpec<X86Target>>()) {
+        fn test_parameter_fn_panics_above_parameter_count(spec in any::<LogicalSpec<Avx2Target>>()) {
             spec.parameter(spec.operand_count());
         }
 
         #[test]
-        fn test_parameters_match_parameter_shapes(spec in any::<LogicalSpec<X86Target>>()) {
+        fn test_parameters_match_parameter_shapes(spec in any::<LogicalSpec<Avx2Target>>()) {
             let parameters = spec.parameters();
             let parameter_shapes = spec.parameter_shapes();
             prop_assert_eq!(parameters.len(), parameter_shapes.len());
@@ -3820,7 +3820,7 @@ mod tests {
         }
 
         #[test]
-        fn test_replace_io_noop(logical_spec in any::<LogicalSpec<X86Target>>()) {
+        fn test_replace_io_noop(logical_spec in any::<LogicalSpec<Avx2Target>>()) {
             let mut replaced = logical_spec.clone();
             replaced.replace_io(&logical_spec.parameters());
             prop_assert_eq!(logical_spec, replaced);
@@ -3828,9 +3828,9 @@ mod tests {
 
         #[test]
         fn test_bufferized_compose_parameters_match_pipeline_parameters(
-            tinp in arb_compose_spec::<X86Target>(None)
+            tinp in arb_compose_spec::<Avx2Target>(None)
                 .prop_filter_map("Spec was not canonical", |logical_spec| {
-                    let mut s = Spec(logical_spec, X86Target::max_mem());
+                    let mut s = Spec(logical_spec, Avx2Target::max_mem());
                     if s.canonicalize().is_err() {
                         return None;
                     }
@@ -3852,7 +3852,7 @@ mod tests {
                     let value_size = u32::from(components[*index].dtypes[0].size());
                     let bytes_needed = buf_volume * value_size;
                     let rf_idx =
-                        X86Target::levels().iter().position(|l| l == &CpuMemoryLevel::RF).unwrap();
+                        Avx2Target::levels().iter().position(|l| l == &CpuMemoryLevel::RF).unwrap();
                     let remaining_in_rf = match s.1.clone().into_standard() {
                         MemoryLimits::Standard(standard) => standard.get_unscaled(rf_idx),
                     };
@@ -4054,7 +4054,7 @@ mod tests {
             })
     }
 
-    fn matmul_chain_test_data() -> LogicalSpec<X86Target> {
+    fn matmul_chain_test_data() -> LogicalSpec<Avx2Target> {
         let basic0 = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: false },
             spec_shape: shape![16, 128, 128, 128],

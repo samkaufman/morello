@@ -172,17 +172,17 @@ const X86_VEC_TYPES: [VecType; 16] = [
 ];
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Default, Debug, Serialize)]
-pub struct X86Target;
+pub struct Avx2Target;
 
 #[derive(Clone, Copy, Debug, Hash, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub struct X86Kernel(CpuKernel);
 
-impl CpuTarget for X86Target {
+impl CpuTarget for Avx2Target {
     type Kernel = X86Kernel;
 
     fn target_id() -> TargetId {
-        TargetId::X86
+        TargetId::Avx2
     }
 
     fn vec_types() -> &'static [VecType; 16] {
@@ -191,7 +191,7 @@ impl CpuTarget for X86Target {
 }
 
 impl Kernel for X86Kernel {
-    type Tgt = X86Target;
+    type Tgt = Avx2Target;
 
     fn argument_count(&self) -> u8 {
         self.0.argument_count()

@@ -1120,7 +1120,7 @@ mod tests {
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
         spec::arb_canonical_spec,
-        target::{MemoryLevel, X86Target},
+        target::{Avx2Target, MemoryLevel},
         utils::{bit_length, bit_length_inverse_u32},
     };
     use itertools::{izip, Itertools};
@@ -1200,7 +1200,7 @@ mod tests {
 
         #[test]
         fn test_simple_put_then_get_works(
-            decision in arb_spec_and_decision::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+            decision in arb_spec_and_decision::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let top_spec = decision.spec.clone();
             let top_actions_costs = decision.actions_costs.clone();
@@ -1216,7 +1216,7 @@ mod tests {
         // TODO: Add tests for top-2, etc. Impls
         #[test]
         fn test_put_then_get_fills_across_memory_limits(
-            decision in arb_spec_and_decision::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+            decision in arb_spec_and_decision::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
             let db = FilesDatabase::new(None, false, 1, 128, 1);
@@ -1232,10 +1232,10 @@ mod tests {
             let peaks = if let Some((_, c)) = top_actions_costs.first() {
                 c.peaks.clone()
             } else {
-                MemVec::zero::<X86Target>()
+                MemVec::zero::<Avx2Target>()
             };
             let expected = ActionCostVec(top_actions_costs);
-            izip!(X86Target::levels(), spec_limits.iter(), peaks.iter())
+            izip!(Avx2Target::levels(), spec_limits.iter(), peaks.iter())
                 .map(|(level, l, p)| {
                     if level.counts_registers() {
                         (u32::try_from(p).unwrap()..=u32::try_from(l).unwrap()).collect::<Vec<_>>()
@@ -1262,7 +1262,7 @@ mod tests {
         //
         // #[test]
         // fn test_two_puts_return_correct_gets_for_second_put(
-        //     decision_pair in arb_spec_and_decision_pair::<X86Target>()
+        //     decision_pair in arb_spec_and_decision_pair::<Avx2Target>()
         // ) {
         //     let db = RocksDatabase::try_new(None, false, 1).unwrap();
         //     let (decision_a, decision_b) = decision_pair;
@@ -1286,7 +1286,7 @@ mod tests {
         //         decision_peaks.push(if let Some((_, c)) = d.actions_costs.first() {
         //             c.peaks.clone()
         //         } else {
-        //             MemVec::zero::<X86Target>()
+        //             MemVec::zero::<Avx2Target>()
         //         });
         //     }
 

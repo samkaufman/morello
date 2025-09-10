@@ -249,20 +249,20 @@ pub(crate) fn unique_dims_per_axis<Tgt: Target>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::X86Target;
+    use crate::target::Avx2Target;
 
     #[test]
     fn test_compute_loop_main_cost_serial_1d() {
         // Single axis. Boundary has 1 step.
-        let cost = compute_loop_main_cost::<X86Target>(&[(9, 8)], false, &[5, 4]);
+        let cost = compute_loop_main_cost::<Avx2Target>(&[(9, 8)], false, &[5, 4]);
         assert_eq!(cost, 5 * 8 + 4);
     }
 
     #[test]
     fn test_compute_loop_main_cost_parallel_1d() {
         // Single axis, parallel. Boundary has 1 step.
-        let procs = u32::from(X86Target::processors());
-        let cost = compute_loop_main_cost::<X86Target>(&[(9, 8)], true, &[5, 5]);
+        let procs = u32::from(Avx2Target::processors());
+        let cost = compute_loop_main_cost::<Avx2Target>(&[(9, 8)], true, &[5, 5]);
         let expected = 5 * 8u32.div_ceil(procs) + 5 + PAR_TILE_OVERHEAD;
         assert_eq!(cost, expected);
     }
@@ -270,14 +270,14 @@ mod tests {
     #[test]
     fn test_compute_loop_main_cost_serial_exact_div_1d() {
         // Single axis that divides evenly => no boundary contribution
-        let cost = compute_loop_main_cost::<X86Target>(&[(8, 8)], false, &[4]);
+        let cost = compute_loop_main_cost::<Avx2Target>(&[(8, 8)], false, &[4]);
         assert_eq!(cost, 4 * 8);
     }
 
     #[test]
     fn test_compute_loop_main_cost_serial_2d() {
         let dims = &[(3, 2), (5, 4)];
-        let cost = compute_loop_main_cost::<X86Target>(dims, false, &[7, 6, 9, 10]);
+        let cost = compute_loop_main_cost::<Avx2Target>(dims, false, &[7, 6, 9, 10]);
         let expected = (7 * 2 * 4) + 6 + 9 + 10; // 3 boundary regions (each executed once)
         assert_eq!(cost, expected);
     }
@@ -286,7 +286,7 @@ mod tests {
     fn test_compute_loop_main_cost_serial_2d_with_one_exact_axis() {
         // Only axis 1 has boundary conditions.
         let dims = &[(8, 8), (4, 3)];
-        let cost = compute_loop_main_cost::<X86Target>(dims, false, &[2, 3]);
+        let cost = compute_loop_main_cost::<Avx2Target>(dims, false, &[2, 3]);
         let expected = (2 * 8 * 3) + 3; // 1 boundary region
         assert_eq!(cost, expected);
     }

@@ -31,7 +31,7 @@ impl HeaderEmitter {
             out.write_str("#include <float.h>\n")?;
         }
         match target {
-            TargetId::X86 => {
+            TargetId::Avx2 => {
                 out.write_str(include_str!("../codegen/partials/x86.c"))?;
             }
             TargetId::Arm => {

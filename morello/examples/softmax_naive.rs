@@ -9,8 +9,9 @@ use morello::smallvec::smallvec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
+    Avx2Target,
     CpuMemoryLevel::{self, GL},
-    Target, X86Target,
+    Target,
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -39,7 +40,7 @@ fn main() {
             .collect(),
         true,
     );
-    let spec = Spec::<X86Target>(logical_spec, X86Target::max_mem());
+    let spec = Spec::<Avx2Target>(logical_spec, Avx2Target::max_mem());
     println!("Logical Spec: {}", spec.0);
 
     let db = FilesDatabase::new(None, true, 1, 10_000, 1);

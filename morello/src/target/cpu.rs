@@ -1902,7 +1902,7 @@ mod tests {
         scheduling::{moves::Move, Action, ActionT, ApplyError, NotApplicableReason},
         shape, spec,
         spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
-        target::{Target, X86Target},
+        target::{Avx2Target, Target},
         views::Param,
     };
     use nonzero::nonzero as nz;
@@ -1916,7 +1916,7 @@ mod tests {
             dtype in any::<Dtype>(),
         ) {
             let shape = shape.into_iter().map(|x| DimSize::new(x).unwrap()).collect::<Vec<_>>();
-            assert_unique_layouts(&X86Target::all_layouts_for_shape(&shape, dtype));
+            assert_unique_layouts(&Avx2Target::all_layouts_for_shape(&shape, dtype));
         }
 
         #[test]
@@ -1925,10 +1925,10 @@ mod tests {
             dtype in any::<Dtype>(),
         ) {
             let shape = shape.into_iter().map(|x| DimSize::new(x).unwrap()).collect::<Vec<_>>();
-            let superset: HashSet<_> = X86Target::all_layouts_for_shape(&shape, dtype)
+            let superset: HashSet<_> = Avx2Target::all_layouts_for_shape(&shape, dtype)
                 .into_iter()
                 .collect();
-            let subset: HashSet<_> = X86Target::move_destination_layouts(&shape, dtype)
+            let subset: HashSet<_> = Avx2Target::move_destination_layouts(&shape, dtype)
                 .into_iter()
                 .collect();
             assert!(superset.is_superset(&subset));
@@ -1943,7 +1943,7 @@ mod tests {
         // ) {
         //     let expr_id = OpaqueSymbol::new();
         //     let mut index_exprs: Vec<(Vec<i32>, Layout)> = Vec::new();
-        //     for layout in X86Target::move_destination_layouts(&shape, dtype) {
+        //     for layout in Avx2Target::move_destination_layouts(&shape, dtype) {
         //         let ie = layout.buffer_indexing_expr(&expr_id, &shape);
         //         let evaluated_pts = eval_all_index_expr_points(&ie, &shape);
         //         for (prev_pts, prev_layout) in index_exprs.iter() {
@@ -1974,11 +1974,11 @@ mod tests {
 
         #[test]
         fn test_actions_include_move_actions_for_all_parameters(
-            spec in arb_canonical_spec::<X86Target>(None, None),
+            spec in arb_canonical_spec::<Avx2Target>(None, None),
         ) {
             let lspec = &spec.0;
             let mut seen_source_idxs = HashSet::new();
-            for action in X86Target::actions(lspec) {
+            for action in Avx2Target::actions(lspec) {
                 if let Action::Move(Move { source_idx, .. }) = action {
                     seen_source_idxs.insert(source_idx);
                 }
@@ -1995,7 +1995,7 @@ mod tests {
                     .into_iter()
                     .enumerate()
                     .for_each(|(idx, parameter)| {
-                        let dest_layouts = X86Target::move_destination_layouts(
+                        let dest_layouts = Avx2Target::move_destination_layouts(
                             parameter.shape(), parameter.dtype()
                         );
                         if !dest_layouts.is_empty() {
@@ -2027,7 +2027,7 @@ mod tests {
 
     #[test]
     fn test_twovecbroadcastvecmult_applies_to_operands() {
-        let logical_spec: LogicalSpec<X86Target> = lspec!(MatmulAccum(
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 2, 16],
             (u8, CpuMemoryLevel::L1, row_major),
             (i8, CpuMemoryLevel::VRF, batched_col_major(3), 32),
@@ -2042,7 +2042,7 @@ mod tests {
     fn test_all_layouts_for_bf16_includes_interleaved_dim2_oddeven16() {
         let shape = vec![nz!(1u32), nz!(1u32), nz!(2048u32)];
         let want = layout![0, 1, 2, 2 oe(16)];
-        let layouts = X86Target::all_layouts_for_shape(&shape, Dtype::Bfloat16);
+        let layouts = Avx2Target::all_layouts_for_shape(&shape, Dtype::Bfloat16);
         assert!(
             layouts.contains(&want),
             "Expected layouts to include {want:?} for shape {shape:?}, but it did not.",
@@ -2064,7 +2064,7 @@ mod tests {
 
     #[test]
     fn test_kernel_memory_constrains_placement() {
-        let spec: Spec<X86Target> = spec!(
+        let spec: Spec<Avx2Target> = spec!(
             MatmulAccum(
                 [1, 1, 1, 16],
                 (u8, CpuMemoryLevel::RF, row_major),
@@ -2072,7 +2072,7 @@ mod tests {
                 (u8, CpuMemoryLevel::VRF, row_major, 16),
                 serial
             ),
-            MemoryLimits::Standard(MemVec::zero::<X86Target>())
+            MemoryLimits::Standard(MemVec::zero::<Avx2Target>())
         );
         assert!(spec.is_canonical());
 
@@ -2115,8 +2115,8 @@ mod tests {
             row_major(2),
             None,
         );
-        let parameter0: Param<X86Target> = Param::new(0, arg0);
-        let parameter1: Param<X86Target> = Param::new(1, arg1);
+        let parameter0: Param<Avx2Target> = Param::new(0, arg0);
+        let parameter1: Param<Avx2Target> = Param::new(1, arg1);
         let cost = CpuKernel::VectorAssign.main_cost(&[parameter0, parameter1]);
         assert_eq!(cost, 8 * ASSIGN_INST_COST);
     }

@@ -5,20 +5,20 @@ use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::spec;
 use morello::spec::Spec;
-use morello::target::{Target, X86Target};
+use morello::target::{Avx2Target, Target};
 
 #[export_name = "morello_bench_synth::matmul_spec"]
-fn matmul_spec(size: u32) -> Spec<X86Target> {
+fn matmul_spec(size: u32) -> Spec<Avx2Target> {
     spec!(Matmul(
         [1, size, size, size],
-        (u32, X86Target::default_level(), row_major),
-        (u32, X86Target::default_level(), row_major),
-        (u32, X86Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
         serial
     ))
 }
 
-fn synth(goal: &Spec<X86Target>) {
+fn synth(goal: &Spec<Avx2Target>) {
     let db = FilesDatabase::new(None, true, 1, 128, 1);
     morello::search::top_down(&db, black_box(goal), 1);
 }

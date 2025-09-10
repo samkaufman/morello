@@ -81,7 +81,7 @@ pub trait CodeGen<Tgt: Target> {
 
     fn cli_vec_flags() -> Box<dyn Iterator<Item = &'static str>> {
         let (target_flags, host_flags) = match Tgt::target_id() {
-            TargetId::X86 => {
+            TargetId::Avx2 => {
                 let host_flags = if env::consts::OS == "macos" {
                     &X86_MAC_HOST_CLI_VEC_FLAGS
                 } else {

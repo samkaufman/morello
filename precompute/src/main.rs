@@ -34,7 +34,7 @@ use morello::smallvec::smallvec;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
-use morello::target::{CpuMemoryLevel, MemoryLevel, Target, X86Target};
+use morello::target::{Avx2Target, CpuMemoryLevel, MemoryLevel, Target};
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::{bit_length, diagonals};
 
@@ -164,8 +164,8 @@ fn main_per_db(
     multi_opt: Option<MultiProgress>,
     deadline: Option<Instant>,
 ) {
-    let levels = X86Target::levels();
-    let MemoryLimits::Standard(top) = X86Target::max_mem();
+    let levels = Avx2Target::levels();
+    let MemoryLimits::Standard(top) = Avx2Target::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
@@ -385,7 +385,7 @@ fn main_per_db(
     }
 }
 
-fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
+fn goal_bounds(args: &Args) -> Vec<LogicalSpec<Avx2Target>> {
     let mut bounds = vec![];
     let move_needed_rank = match args.through {
         ThroughSpec::Conv => 4,
@@ -453,7 +453,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<X86Target>> {
 }
 
 /// Returns a logical Move Spec of given size and rank.
-fn move_top(size: DimSize, rank: u8) -> LogicalSpec<X86Target> {
+fn move_top(size: DimSize, rank: u8) -> LogicalSpec<Avx2Target> {
     lspec!(Move(
         iter::repeat_n(size, rank.into()),
         (u32, CpuMemoryLevel::GL, row_major),

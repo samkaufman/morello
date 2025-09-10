@@ -791,12 +791,12 @@ pub fn arb_memorylimits_ext<Tgt: Target>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::{ArmTarget, CpuMemoryLevel, X86Target};
+    use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel};
     use proptest::{array::uniform4, prelude::*};
 
     #[test]
-    fn test_zero_levels_slower_than_all_x86() {
-        shared_test_zero_levels_slower_than_all::<X86Target>();
+    fn test_zero_levels_slower_than_all_avx2() {
+        shared_test_zero_levels_slower_than_all::<Avx2Target>();
     }
 
     #[test]
@@ -879,13 +879,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "Value 200 too large for raw encoding and not bit-length-encoding")]
     fn test_set_panics_on_non_power_of_two_above_127() {
-        let mut memvec = MemVec::zero::<X86Target>();
+        let mut memvec = MemVec::zero::<Avx2Target>();
         memvec.set(0, 200); // This should panic
     }
 
     #[test]
     fn test_memvec_set_snap_up() {
-        let mut memvec = MemVec::zero::<X86Target>();
+        let mut memvec = MemVec::zero::<Avx2Target>();
         for i in 0..=128 {
             memvec.set_snap_up(0, i);
             assert_eq!(memvec.get_unscaled(0), i);
@@ -914,11 +914,11 @@ mod tests {
         }
 
         #[test]
-        fn test_zero_levels_slow_than_all_consistent_with_any_nonzero_x86(
-            limits in arb_memorylimits::<X86Target>(&MemVec::new([1; LEVEL_COUNT])),
+        fn test_zero_levels_slow_than_all_consistent_with_any_nonzero_avx2(
+            limits in arb_memorylimits::<Avx2Target>(&MemVec::new([1; LEVEL_COUNT])),
             bounds in prop::collection::vec(any::<CpuMemoryLevel>(), 0..=3)
         ) {
-            shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero::<X86Target>(
+            shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero::<Avx2Target>(
                 limits, &bounds
             );
         }

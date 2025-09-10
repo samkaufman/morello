@@ -6,11 +6,11 @@ use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::spec;
 use morello::spec::Spec;
-use morello::target::{CpuKernel, MemoryLevel};
 use morello::target::{
+    Avx2Target,
     CpuMemoryLevel::{GL, L1, RF, VRF},
-    X86Target,
 };
+use morello::target::{CpuKernel, MemoryLevel};
 use morello::utils::ToWriteFmt;
 use nonzero::nonzero as nz;
 use std::io;
@@ -24,7 +24,7 @@ const MOVE_TILE_SIZE: u32 = 32;
 
 fn main() {
     // Compute a batch=4 matrix multiplication. (Four independent matmuls!)
-    let mut spec: Spec<X86Target> = spec!(MatmulAccum(
+    let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
         [4, 2048, 2048, 2048],
         (f32, GL, row_major),
         (f32, GL, row_major),
@@ -148,7 +148,7 @@ fn main() {
     );
 }
 
-fn naive_scalar_move_impl(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+fn naive_scalar_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     move_spec
         .tile_out(&[1, 1, 1])
         .move_relayout(0, L1, row_major, None)
@@ -158,7 +158,7 @@ fn naive_scalar_move_impl(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
 }
 
-fn naive_vector_move_impl(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+fn naive_vector_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let ot_h = MOVE_TILE_SIZE.min(move_spec.0.parameter_shape(0)[1].get());
     let ot_w = MOVE_TILE_SIZE.min(move_spec.0.parameter_shape(0)[2].get());
     let imp = if ot_h == move_spec.0.parameter_shape(0)[1].get()

@@ -10,8 +10,9 @@ use morello::shape;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
+    Avx2Target,
     CpuMemoryLevel::{GL, L1, RF, VRF},
-    Target, X86Target,
+    Target,
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -44,13 +45,13 @@ fn main() {
         vector_size: None,
     };
 
-    let mut spec = Spec::<X86Target>(
+    let mut spec = Spec::<Avx2Target>(
         LogicalSpec::Compose {
             components: vec![basics2, basics1, basics0],
             operand_auxes: vec![aux.clone(), aux.clone(), aux.clone(), aux],
             serial_only: true,
         },
-        X86Target::max_mem(),
+        Avx2Target::max_mem(),
     );
     spec.canonicalize().unwrap();
 
@@ -112,7 +113,7 @@ fn main() {
     println!("// kernel runtime: {kernel_runtime:.4}s ({throughput:.2}/sec)");
 }
 
-fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     spec.split(128)
         .move_relayout(1, GL, layout_b(), None)
         .tile_out(&[1, 128, 1024])
@@ -146,7 +147,7 @@ fn schedule_matmulaccum(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         })
 }
 
-fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     use morello::db::FilesDatabase;
     use morello::target::CpuMemoryLevel::{GL, L1, RF, VRF};
 
@@ -204,7 +205,7 @@ fn schedule_softmax(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
         })
 }
 
-fn schedule_zero(spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+fn schedule_zero(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     spec.tile_out(&[1, 32, 1])
         .move_param(0, L1)
         .tile_out(&[1, 16, 1])

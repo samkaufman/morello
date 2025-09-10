@@ -727,7 +727,7 @@ mod tests {
     use super::*;
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout};
-    use crate::target::{ArmTarget, CpuMemoryLevel, MemoryLevel, Target, X86Target};
+    use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel, MemoryLevel, Target};
     use crate::tensorspec::{arb_noncanon_tensorspec, TensorSpec, TensorSpecArbMaxShape};
     use crate::{layout, shape};
     use proptest::prelude::*;
@@ -736,8 +736,8 @@ mod tests {
     proptest! {
         // TODO: Make an ARM variant
         #[test]
-        fn test_canonicalize_errors_if_vector_not_a_multiple_x86(
-            tspec in arb_noncanon_tensorspec::<X86Target>(&[nz!(16u32), nz!(16u32)])
+        fn test_canonicalize_errors_if_vector_not_a_multiple_avx2(
+            tspec in arb_noncanon_tensorspec::<Avx2Target>(&[nz!(16u32), nz!(16u32)])
                 .prop_filter("TensorSpec is not in VRF", |t| t.level().vector_rf())
         ) {
             let volume = tspec.volume().get();
@@ -762,7 +762,7 @@ mod tests {
 
         // TODO: Modify `any::<TensorSpec<_>>` to generate multiple ranks and dtypes.
         #[test]
-        fn test_tensorspec_canonicalize_should_be_idempodent_x86(tspec in any::<TensorSpec<X86Target>>()) {
+        fn test_tensorspec_canonicalize_should_be_idempodent_avx2(tspec in any::<TensorSpec<Avx2Target>>()) {
             shared_tensorspec_canonicalize_should_be_idempodent(tspec)
         }
 
@@ -773,8 +773,8 @@ mod tests {
         }
 
         #[test]
-        fn test_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_x86(
-            tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(shape![4, 4, 4, 4]))
+        fn test_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change_avx2(
+            tspec in any_with::<TensorSpec<Avx2Target>>(TensorSpecArbMaxShape(shape![4, 4, 4, 4]))
         ) {
             shared_tensorspec_canonicalize_only_changes_contig_if_layout_dims_change(tspec)
         }
@@ -788,10 +788,10 @@ mod tests {
 
         // TODO: Add ARM variant
         #[test]
-        fn test_tensorspecaux_canonicalize_is_noop_if_already_canonical_x86(
+        fn test_tensorspecaux_canonicalize_is_noop_if_already_canonical_avx2(
             shape in [1..=16u32, 1..=16u32]
                 .prop_map(|v| v.map(|x| x.try_into().unwrap())),
-            aux in any::<TensorSpecAux<X86Target>>()
+            aux in any::<TensorSpecAux<Avx2Target>>()
         ) {
             let mut canonicalized_aux = aux.clone();
             if canonicalized_aux.canonicalize(&shape).is_ok() {
@@ -807,10 +807,10 @@ mod tests {
         fn test_tensorspecauxnondepbimap_inverts(
             (dtype, aux) in any::<Dtype>()
                 .prop_flat_map(|d| {
-                    (Just(d), any_with::<TensorSpecAux<X86Target>>((Default::default(), Some(d))))
+                    (Just(d), any_with::<TensorSpecAux<Avx2Target>>((Default::default(), Some(d))))
                 })
         ) {
-            let bimap = TensorSpecAuxNonDepBimap::<X86Target> {
+            let bimap = TensorSpecAuxNonDepBimap::<Avx2Target> {
                 dtype,
                 phantom: std::marker::PhantomData,
             };
@@ -822,7 +822,7 @@ mod tests {
     #[test]
     fn test_tensorspec_canonicalize_drops_unused_dynamic_dimensions() {
         let layout = layout![1, 0, 1 p(8)];
-        let tensorspec = TensorSpec::<X86Target>::new_canon(
+        let tensorspec = TensorSpec::<Avx2Target>::new_canon(
             shape![32, 8],
             Dtype::Uint8,
             CpuMemoryLevel::GL,
@@ -836,7 +836,7 @@ mod tests {
     // TODO: Rename
     #[test]
     fn test_1() {
-        let mut tspec = TensorSpec::<X86Target> {
+        let mut tspec = TensorSpec::<Avx2Target> {
             shape: shape![5, 2, 8, 4],
             dtype: crate::common::Dtype::Uint8,
             aux: {
@@ -858,7 +858,7 @@ mod tests {
     fn test_cannot_build_tensorspec_with_invalid_vector_size_canon() {
         let mut l = layout![0 p(4)];
         l.set_contiguous_none();
-        TensorSpec::<X86Target>::new_canon(
+        TensorSpec::<Avx2Target>::new_canon(
             shape![1, 1, 1],
             Dtype::Uint32,
             CpuMemoryLevel::VRF,
@@ -872,7 +872,7 @@ mod tests {
     fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon() {
         let mut l = layout![0 p(4)];
         l.set_contiguous_none();
-        TensorSpec::<X86Target>::new_noncanon(
+        TensorSpec::<Avx2Target>::new_noncanon(
             shape![1, 1, 1],
             Dtype::Uint32,
             CpuMemoryLevel::VRF,
@@ -886,7 +886,7 @@ mod tests {
     fn test_cannot_build_tensorspec_with_invalid_vector_size_noncanon_with_aux() {
         let mut layout = layout![0 p(4)];
         layout.set_contiguous_none();
-        TensorSpec::<X86Target>::new_noncanon_with_aux(
+        TensorSpec::<Avx2Target>::new_noncanon_with_aux(
             shape![1, 1, 1],
             Dtype::Uint32,
             TensorSpecAux {

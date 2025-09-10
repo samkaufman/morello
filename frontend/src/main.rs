@@ -14,7 +14,7 @@ use morello::db::FilesDatabase;
 use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::smallvec::smallvec;
-use morello::target::{ArmTarget, CpuMemoryLevel::GL, CpuTarget, Target, TargetId, X86Target};
+use morello::target::{ArmTarget, Avx2Target, CpuMemoryLevel::GL, CpuTarget, Target, TargetId};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 use morello::{
@@ -147,7 +147,7 @@ fn main() -> Result<()> {
         threads,
     );
     match &args.target {
-        TargetId::X86 => main_per_db::<X86Target>(&args, &db),
+        TargetId::Avx2 => main_per_db::<Avx2Target>(&args, &db),
         TargetId::Arm => main_per_db::<ArmTarget>(&args, &db),
     }
 }

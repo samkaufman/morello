@@ -1,11 +1,11 @@
 mod arm;
+mod avx2;
 mod common_actions;
 pub(crate) mod cpu;
-mod x86;
 
 pub use arm::ArmTarget;
+pub use avx2::Avx2Target;
 pub use cpu::{CpuKernel, CpuMemoryLevel, CpuTarget};
-pub use x86::X86Target;
 
 use crate::common::DimSize;
 use crate::cost::MainCost;
@@ -96,14 +96,14 @@ pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {
 #[derive(Clone, Copy)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum TargetId {
-    X86,
+    Avx2,
     Arm,
 }
 
 impl Default for TargetId {
     fn default() -> Self {
         match std::env::consts::ARCH {
-            "x86" | "x86_64" => TargetId::X86,
+            "x86" | "x86_64" => TargetId::Avx2,
             "arm" | "aarch64" => TargetId::Arm,
             arch => unimplemented!("Architecture {} not supported", arch),
         }

@@ -8,8 +8,8 @@ use morello::spec;
 use morello::spec::Spec;
 use morello::target::CpuKernel;
 use morello::target::{
+    Avx2Target,
     CpuMemoryLevel::{GL, L1, RF, VRF},
-    X86Target,
 };
 use morello::utils::ToWriteFmt;
 
@@ -18,7 +18,7 @@ use nonzero::nonzero as nz;
 use std::io;
 
 fn main() {
-    let mut spec: Spec<X86Target> = spec!(MatmulAccum(
+    let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
         [1, 2048, 2048, 2048],
         (f32, GL, row_major),
         (f32, GL, row_major),

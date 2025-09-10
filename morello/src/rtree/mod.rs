@@ -957,7 +957,7 @@ mod tests {
     //         .prop_flat_map(|intensity| {
     //             proptest::option::of((
     //                 Just(intensity),
-    //                 Just(MemVec::zero::<X86Target>()),
+    //                 Just(MemVec::zero::<Avx2Target>()),
     //                 0..2u8,
     //                 0..2u16,
     //             ))

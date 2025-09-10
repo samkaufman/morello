@@ -4,18 +4,18 @@ use std::hint::black_box;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::LogicalSpec;
-use morello::target::{CpuMemoryLevel::GL, Target, X86Target};
+use morello::target::{Avx2Target, CpuMemoryLevel::GL, Target};
 
 #[library_benchmark]
 fn copy_actions_into_vec() {
-    let logical_spec: LogicalSpec<X86Target> = lspec!(Matmul(
+    let logical_spec: LogicalSpec<Avx2Target> = lspec!(Matmul(
         [1, 64, 64, 64],
         (u32, GL, row_major),
         (u32, GL, row_major),
         (u32, GL, row_major),
         serial
     ));
-    black_box(X86Target::actions(&logical_spec).collect::<Vec<_>>());
+    black_box(Avx2Target::actions(&logical_spec).collect::<Vec<_>>());
 }
 
 library_benchmark_group!(

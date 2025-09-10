@@ -4,38 +4,38 @@ use std::hint::black_box;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::LogicalSpec;
-use morello::target::{Target, X86Target};
+use morello::target::{Avx2Target, Target};
 
 // TODO: Add a benchmark for Compose
 
 #[export_name = "morello_bench_logicalspec_parameters::matmul_spec"]
-fn matmul_spec(size: u32) -> LogicalSpec<X86Target> {
+fn matmul_spec(size: u32) -> LogicalSpec<Avx2Target> {
     lspec!(Matmul(
         [1, size, size, size],
-        (u32, X86Target::default_level(), row_major),
-        (u32, X86Target::default_level(), row_major),
-        (u32, X86Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
         serial
     ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::conv_spec"]
-fn conv_spec(size: u32) -> LogicalSpec<X86Target> {
+fn conv_spec(size: u32) -> LogicalSpec<Avx2Target> {
     lspec!(Conv(
         [size, size, size, 1, 1, size, size],
-        (u32, X86Target::default_level(), row_major),
-        (u32, X86Target::default_level(), row_major),
-        (u32, X86Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
         serial
     ))
 }
 
 #[export_name = "morello_bench_logicalspec_parameters::move_spec"]
-fn move_spec(size: u32) -> LogicalSpec<X86Target> {
+fn move_spec(size: u32) -> LogicalSpec<Avx2Target> {
     lspec!(Move(
         [size, size],
-        (u32, X86Target::default_level(), row_major),
-        (u32, X86Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_level(), row_major),
         serial
     ))
 }

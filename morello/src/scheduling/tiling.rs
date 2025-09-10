@@ -1071,8 +1071,8 @@ mod tests {
     use crate::spec::Spec;
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{
+        Avx2Target,
         CpuMemoryLevel::{self, GL},
-        X86Target,
     };
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape, TensorSpecAux};
     use crate::views::{View, ViewE};
@@ -1129,7 +1129,7 @@ mod tests {
             layout: rm4.clone(),
             vector_size: None,
         };
-        let operand_auxes: Vec<TensorSpecAux<X86Target>> = vec![
+        let operand_auxes: Vec<TensorSpecAux<Avx2Target>> = vec![
             l1rm4.clone(),
             rfrm4.clone(),
             l1rm4,
@@ -1155,7 +1155,7 @@ mod tests {
                 operand_auxes,
                 serial_only: false,
             },
-            X86Target::max_mem(),
+            Avx2Target::max_mem(),
         );
 
         // Compose them together and attempt to tile the Conv's loop (dim index 3) with size=1
@@ -1171,9 +1171,9 @@ mod tests {
         );
     }
 
-    fn shared_test_non_multiple_tiling_succeeds(action: Action<X86Target>) {
+    fn shared_test_non_multiple_tiling_succeeds(action: Action<Avx2Target>) {
         let bcm_layout = crate::layout![0, 2, 1];
-        let spec: Spec<X86Target> = spec!(MatmulAccum(
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [4, 8, 8, 8],
             (f32, CpuMemoryLevel::GL, bcm_layout),
             (f32, CpuMemoryLevel::GL, row_major),
@@ -1190,7 +1190,7 @@ mod tests {
     #[test]
     fn test_non_even_tiling_loop_and_cost() {
         // Test tiling of 10x10 to 3x3
-        let spec: Spec<X86Target> = spec!(MatmulAccum(
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [4, 10, 10, 10],
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major),
@@ -1213,7 +1213,7 @@ mod tests {
     #[test]
     fn test_tile_out_daufm() {
         // Create a SoftmaxDenominatorAndUnscaledFromMax Spec
-        let spec = Spec::<X86Target>(
+        let spec = Spec::<Avx2Target>(
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
@@ -1233,7 +1233,7 @@ mod tests {
                 ],
                 false,
             ),
-            X86Target::max_mem(),
+            Avx2Target::max_mem(),
         );
 
         let tile_action = TileOut::SingleLoop {
@@ -1309,7 +1309,7 @@ mod tests {
         /// identical.
         #[test]
         fn test_update_aux_for_tiling_identical_shapes_preserves_aux(
-            mut tspec in any_with::<TensorSpec<X86Target>>(TensorSpecArbMaxShape(shape![8, 8, 8]))
+            mut tspec in any_with::<TensorSpec<Avx2Target>>(TensorSpecArbMaxShape(shape![8, 8, 8]))
         ) {
             let shape = tspec.shape().to_vec();
             let original_aux = tspec.aux.clone();
@@ -1323,7 +1323,7 @@ mod tests {
         /// with at least one BoundaryTile argument for each boundary body.
         #[test]
         fn test_tiling_operations_with_boundary_regions_have_boundary_tiles(
-            (spec, action) in arb_canonical_spec::<X86Target>(Some(nz!(8u32)), None)
+            (spec, action) in arb_canonical_spec::<Avx2Target>(Some(nz!(8u32)), None)
                 .prop_filter_map("Must have unique output", |spec| {
                     spec.0.unique_output_index().map(|idx| (spec, idx))
                 })
@@ -1411,7 +1411,7 @@ mod tests {
 
         #[test]
         fn test_split_with_multiple_k_produces_no_boundaries(
-            (spec, action) in arb_canonical_spec::<X86Target>(Some(nz!(16u32)), None)
+            (spec, action) in arb_canonical_spec::<Avx2Target>(Some(nz!(16u32)), None)
                 .prop_filter_map("Must be Matmul with accum", |spec| {
                     match &spec.0 {
                         LogicalSpec::Primitive(PrimitiveBasics {
@@ -1454,7 +1454,7 @@ mod tests {
             spec_shape: shape![1, 4, 4], // [b, m, n] - matches MatmulAccum output
             dtypes: vec![Dtype::Float32, Dtype::Float32],
         };
-        let aux: TensorSpecAux<X86Target> = TensorSpecAux {
+        let aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
             level: CpuMemoryLevel::GL,
             layout: row_major(3),
             vector_size: None,
@@ -1465,7 +1465,7 @@ mod tests {
                 operand_auxes: vec![aux.clone(), aux.clone(), aux],
                 serial_only: false,
             },
-            X86Target::max_mem(),
+            Avx2Target::max_mem(),
         );
         compose_spec.canonicalize().unwrap();
 
@@ -1491,7 +1491,7 @@ mod tests {
 
     #[test]
     fn test_conv_tiling_produces_no_boundary_regions() {
-        let conv_spec: Spec<X86Target> = spec!(
+        let conv_spec: Spec<Avx2Target> = spec!(
             Conv(
                 [4, 7, 5, 8, 6, 4, 8],
                 (f32, CpuMemoryLevel::RF, row_major),
@@ -1551,7 +1551,7 @@ mod tests {
     /// a Param.
     #[test]
     fn test_split_apply_yields_tile_bound_specapp() {
-        let spec: Spec<X86Target> = spec!(MatmulAccum(
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 64, 64, 64],
             (f32, GL, row_major),
             (f32, GL, row_major),
@@ -1596,7 +1596,7 @@ mod tests {
     /// not Param views.
     #[test]
     fn test_tileout_apply_yields_tile_bound_specapp() {
-        let spec: Spec<X86Target> = spec!(MatmulAccum(
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 64, 64, 64],
             (f32, GL, row_major),
             (f32, GL, row_major),

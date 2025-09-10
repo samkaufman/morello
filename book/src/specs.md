@@ -9,7 +9,7 @@ on the amount of memory that can be used at each memory level.
 For example, the following constructs a Spec targeting X86:
 
 ```rust
-Spec::<X86Target>(
+Spec::<Avx2Target>(
     lspec!(Matmul(
         [M, K, N],
         (bf16, GL, row_major),
@@ -17,7 +17,7 @@ Spec::<X86Target>(
         (f32, GL, row_major),
         serial
     )),
-    X86Target::max_mem(),
+    Avx2Target::max_mem(),
 )
 ```
 

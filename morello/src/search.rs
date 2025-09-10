@@ -791,8 +791,9 @@ mod tests {
     use crate::spec::{arb_canonical_primitive_spec, arb_canonical_spec, LogicalSpec};
     use crate::target::MemoryLevel;
     use crate::target::{
+        Avx2Target,
         CpuMemoryLevel::{GL, L1, RF},
-        X86Target, LEVEL_COUNT,
+        LEVEL_COUNT,
     };
     use crate::utils::{bit_length, bit_length_inverse};
     use nonzero::nonzero as nz;
@@ -809,7 +810,7 @@ mod tests {
         #[test]
         #[ignore]
         fn test_can_synthesize_any_canonical_primitive_spec(
-            spec in arb_canonical_primitive_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+            spec in arb_canonical_primitive_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = FilesDatabase::new(None, false, 1, 2048, 1);
             top_down(&db, &spec, 1);
@@ -821,7 +822,7 @@ mod tests {
         // #[test]
         // #[ignore]
         // fn test_can_synthesize_any_canonical_compose_spec(
-        //     spec in arb_canonical_compose_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        //     spec in arb_canonical_compose_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         // ) {
         //     let db = FilesDatabase::new(None, false, 1, 2048, 1);
         //     top_down(&db, &spec, 1);
@@ -833,7 +834,7 @@ mod tests {
         // #[test]
         // #[ignore]
         // fn test_can_synthesize_any_canonical_compose_spec(
-        //     spec in arb_canonical_compose_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        //     spec in arb_canonical_compose_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         // ) {
         //     let db = FilesDatabase::new(None, false, 1, 2048, 1);
         //     top_down(&db, &spec, 1);
@@ -842,7 +843,7 @@ mod tests {
         #[test]
         #[ignore]
         fn test_more_memory_never_worsens_solution_with_shared_db(
-            spec_pair in lower_and_higher_canonical_specs::<X86Target>()
+            spec_pair in lower_and_higher_canonical_specs::<Avx2Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
             let db = FilesDatabase::new(None, false, 1, 128, 1);
@@ -866,14 +867,14 @@ mod tests {
         #[test]
         #[ignore]
         fn test_synthesis_at_peak_memory_yields_same_decision(
-            spec in arb_canonical_spec::<X86Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+            spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = FilesDatabase::new(None, false, 1, 128, 1);
             let first_solutions = top_down(&db, &spec, 1);
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
             } else {
-                MemVec::zero::<X86Target>()
+                MemVec::zero::<Avx2Target>()
             };
             let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
             let lower_solutions = top_down(&db, &lower_spec, 1);
@@ -923,7 +924,7 @@ mod tests {
     fn create_simple_cost(main: u32) -> Cost {
         Cost {
             main,
-            peaks: MemVec::zero::<X86Target>(),
+            peaks: MemVec::zero::<Avx2Target>(),
             depth: 0,
         }
     }
@@ -1110,9 +1111,9 @@ mod tests {
     }
 
     fn shared_test_synthesis_puts_all_dependencies_of_optimal_solution(
-        logical_spec: LogicalSpec<X86Target>,
+        logical_spec: LogicalSpec<Avx2Target>,
     ) {
-        let spec = Spec::<X86Target>(
+        let spec = Spec::<Avx2Target>(
             logical_spec,
             MemoryLimits::Standard(MemVec::new([1, 1, 1, 0])),
         );
@@ -1130,7 +1131,7 @@ mod tests {
 
     #[test]
     fn test_synthesis_at_peak_memory_yields_same_decision_1() {
-        let spec = Spec::<X86Target>(
+        let spec = Spec::<Avx2Target>(
             lspec!(FillZero([2, 2, 2, 2], (u8, GL, row_major, c0))),
             MemoryLimits::Standard(MemVec::new([0, 16, 64, 32])),
         );
@@ -1140,7 +1141,7 @@ mod tests {
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()
         } else {
-            MemVec::zero::<X86Target>()
+            MemVec::zero::<Avx2Target>()
         };
         let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
         let lower_solutions = top_down(&db, &lower_spec, 1);
@@ -1149,7 +1150,7 @@ mod tests {
 
     fn lower_and_higher_canonical_specs<Tgt: Target>(
     ) -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
-        let MemoryLimits::Standard(mut top_memvec) = X86Target::max_mem();
+        let MemoryLimits::Standard(mut top_memvec) = Avx2Target::max_mem();
         top_memvec = top_memvec.map(|v| v.min(TEST_SMALL_MEM));
 
         let top_memory_a = Rc::new(MemoryLimits::Standard(top_memvec));

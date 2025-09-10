@@ -332,17 +332,17 @@ mod tests {
     use crate::scheduling::{moves::Move, Action};
     use crate::shape;
     use crate::spec::arb_canonical_logical_spec;
-    use crate::target::X86Target;
+    use crate::target::Avx2Target;
     use itertools::Itertools;
     use proptest::prelude::*;
     use std::collections::HashSet;
 
     #[test]
     fn test_gen_tile_sizes_empty() {
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], true, false).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, true).count(), 0);
-        assert_eq!(gen_tile_sizes::<X86Target>(&[], false, false).count(), 0);
+        assert_eq!(gen_tile_sizes::<Avx2Target>(&[], false, false).count(), 0);
+        assert_eq!(gen_tile_sizes::<Avx2Target>(&[], true, false).count(), 0);
+        assert_eq!(gen_tile_sizes::<Avx2Target>(&[], false, true).count(), 0);
+        assert_eq!(gen_tile_sizes::<Avx2Target>(&[], false, false).count(), 0);
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         let d = expected.first().map_or(0, |shape| shape.len());
         assert!(expected.iter().all(|shape| shape.len() == d));
 
-        let actual: Vec<Shape> = gen_tile_sizes::<X86Target>(&tensor_shape, drop_given, multi_dim)
+        let actual: Vec<Shape> = gen_tile_sizes::<Avx2Target>(&tensor_shape, drop_given, multi_dim)
             .inspect(|s| assert_eq!(s.len(), d))
             .sorted()
             .collect::<Vec<_>>();
@@ -463,9 +463,9 @@ mod tests {
     proptest! {
         #[test]
         fn test_move_actions_never_returns_duplicates(
-            spec in arb_canonical_logical_spec::<X86Target>(None)
+            spec in arb_canonical_logical_spec::<Avx2Target>(None)
         ) {
-            let actions = move_actions::<X86Target>(&spec).collect::<Vec<_>>();
+            let actions = move_actions::<Avx2Target>(&spec).collect::<Vec<_>>();
             let mut seen_moves = HashSet::new();
             let mut duplicate_count = 0;
             for action in &actions {
@@ -497,9 +497,9 @@ mod tests {
 
         #[test]
         fn test_move_actions_preserves_layout_for_cache_destinations(
-            spec in arb_canonical_logical_spec::<X86Target>(None)
+            spec in arb_canonical_logical_spec::<Avx2Target>(None)
         ) {
-            let actions = move_actions::<X86Target>(&spec).collect::<Vec<_>>();
+            let actions = move_actions::<Avx2Target>(&spec).collect::<Vec<_>>();
             let operands = spec.parameters();
 
             let mut cache_moves_by_operand = vec![HashSet::new(); operands.len()];

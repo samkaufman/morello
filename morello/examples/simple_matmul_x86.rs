@@ -10,8 +10,9 @@ use morello::spec;
 use morello::spec::Spec;
 use morello::target::CpuKernel;
 use morello::target::{
+    Avx2Target,
     CpuMemoryLevel::{self, GL},
-    Target, X86Target,
+    Target,
 };
 use morello::utils::ToWriteFmt;
 
@@ -35,7 +36,7 @@ fn main() {
             (u32, GL, row_major),
             serial
         ),
-        X86Target::max_mem(),
+        Avx2Target::max_mem(),
     );
     println!("Logical Spec: {}", spec.0);
 
@@ -212,7 +213,7 @@ fn main() {
 //  memset((void *)(&v), 0, 4);
 //  l1_tile[index] = v;
 /// ```
-fn zero_schedule(zero: &Spec<X86Target>) -> ImplNode<X86Target> {
+fn zero_schedule(zero: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     zero.move_param(0, CpuMemoryLevel::RF)
         .subschedule(&[0], |z| z.select(CpuKernel::MemsetZero))
         .subschedule(&[1], |move_back| move_back.select(CpuKernel::ValueAssign))
@@ -223,7 +224,7 @@ fn zero_schedule(zero: &Spec<X86Target>) -> ImplNode<X86Target> {
 /// Specifically, this checks if the Move's tensor is a single value. If it is, it directly assigns
 /// the value using the `ValueAssign` kernel. If not, it tiles the tensor and then assigns the values
 /// using the `ValueAssign` kernel.
-fn move_schedule(move_spec: &Spec<X86Target>) -> ImplNode<X86Target> {
+fn move_schedule(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let is_single_value = move_spec.0.parameter_shapes()[0]
         .iter()
         .all(|size| size.get() == 1);

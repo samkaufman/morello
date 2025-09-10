@@ -617,15 +617,15 @@ mod tests {
         imp::ImplNode,
         memorylimits::MemVec,
         spec::arb_canonical_spec,
-        target::{ArmTarget, X86Target},
+        target::{ArmTarget, Avx2Target},
     };
     use proptest::prelude::*;
 
     proptest! {
         // TODO: Add an ARM variant
         #[test]
-        fn test_fast_path_is_equivalent_to_slow(spec in arb_canonical_spec::<X86Target>(None, None)) {
-            for action in X86Target::actions(&spec.0) {
+        fn test_fast_path_is_equivalent_to_slow(spec in arb_canonical_spec::<Avx2Target>(None, None)) {
+            for action in Avx2Target::actions(&spec.0) {
                 match (action.top_down_solver(&spec), action.apply(&spec)) {
                     (Ok(solver), Ok(applied)) => {
                         let subspecs = solver.subspecs().collect::<Vec<_>>();
@@ -639,7 +639,7 @@ mod tests {
                             .map(|subspec_idx| {
                                 Cost {
                                     main: subspec_idx.into(),
-                                    peaks: MemVec::zero::<X86Target>(),
+                                    peaks: MemVec::zero::<Avx2Target>(),
                                     depth: subspec_idx,
                                 }
                             })
@@ -657,8 +657,8 @@ mod tests {
         }
 
         #[test]
-        fn test_actions_introduce_subspec_arguments_with_matching_parameters_x86(
-            spec in arb_canonical_spec::<X86Target>(None, None),
+        fn test_actions_introduce_subspec_arguments_with_matching_parameters_avx2(
+            spec in arb_canonical_spec::<Avx2Target>(None, None),
         ) {
             shared_test_actions_introduce_subspec_arguments_with_matching_parameters(spec)?;
         }
@@ -671,8 +671,8 @@ mod tests {
         }
 
         #[test]
-        fn test_actions_do_not_introduce_self_nested_subspec_x86(
-            spec in arb_canonical_spec::<X86Target>(None, None),
+        fn test_actions_do_not_introduce_self_nested_subspec_avx2(
+            spec in arb_canonical_spec::<Avx2Target>(None, None),
         ) {
             shared_test_actions_do_not_introduce_self_nested_subspec(spec)?;
         }

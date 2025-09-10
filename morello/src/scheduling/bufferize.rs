@@ -125,7 +125,7 @@ mod tests {
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::shape;
     use crate::spec::{PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{CpuMemoryLevel, X86Target};
+    use crate::target::{Avx2Target, CpuMemoryLevel};
     use crate::tensorspec::TensorSpecAux;
     use crate::views::{Param, ViewE};
 
@@ -152,13 +152,13 @@ mod tests {
             layout: row_major(3),
             vector_size: None,
         };
-        let mut spec = Spec::<X86Target>(
+        let mut spec = Spec::<Avx2Target>(
             LogicalSpec::Compose {
                 components: vec![basics2.clone(), basics1.clone(), basics0.clone()],
                 operand_auxes: vec![aux.clone(), aux.clone(), aux.clone(), aux.clone(), aux],
                 serial_only: true,
             },
-            X86Target::max_mem(),
+            Avx2Target::max_mem(),
         );
         spec.canonicalize().unwrap();
         let imp = spec.bufferize(1, CpuMemoryLevel::GL, row_major, None);
