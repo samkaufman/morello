@@ -292,20 +292,6 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             self.vector_size(),
         )
     }
-
-    // TODO: Shouldn't need this method. Should be implicit in Spec validity.
-    pub fn can_move_to(&self, _dest_layout: &Layout, dest_level: &Tgt::Level) -> bool {
-        // If the destination is in VRF, then the operand volume must be a multiple of at least one
-        // of the vector sizes.
-        let vector_bytes = dest_level.vector_bytes();
-        if !vector_bytes.is_empty() {
-            let bytes = self.volume().get() * u32::from(self.dtype.size());
-            if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 impl<Tgt: Target> Display for TensorSpec<Tgt> {
