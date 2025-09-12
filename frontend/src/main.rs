@@ -11,10 +11,14 @@ use morello::codegen::{BuildError, CodeGen};
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
 use morello::db::FilesDatabase;
+use morello::grid::canon::CanonicalBimap;
+use morello::grid::general::BiMap;
 use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::smallvec::smallvec;
-use morello::target::{ArmTarget, Avx2Target, CpuMemoryLevel::GL, CpuTarget, Target, TargetId};
+use morello::target::{
+    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel::GL, CpuTarget, Target, TargetId,
+};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 use morello::{
@@ -148,6 +152,7 @@ fn main() -> Result<()> {
     );
     match &args.target {
         TargetId::Avx2 => main_per_db::<Avx2Target>(&args, &db),
+        TargetId::Avx512 => main_per_db::<Avx512Target>(&args, &db),
         TargetId::Arm => main_per_db::<ArmTarget>(&args, &db),
     }
 }
@@ -155,6 +160,8 @@ fn main() -> Result<()> {
 fn main_per_db<Tgt>(args: &Args, db: &FilesDatabase) -> Result<()>
 where
     Tgt: CpuTarget,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     let subcmd = &args.subcmd;
     let query_spec = match subcmd {
@@ -221,7 +228,7 @@ where
                     .map(|layout| {
                         debug_assert!(layout.is_fully_contiguous()); // row_major should be contig.
                         TensorSpecAux::<Tgt> {
-                            level: GL,
+                            level: GL.into(),
                             layout,
                             vector_size: None,
                         }

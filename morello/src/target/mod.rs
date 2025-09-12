@@ -1,10 +1,13 @@
 mod arm;
 mod avx2;
+mod avx512;
 mod common_actions;
 pub(crate) mod cpu;
+mod x86;
 
 pub use arm::ArmTarget;
 pub use avx2::Avx2Target;
+pub use avx512::Avx512Target;
 pub use cpu::{CpuKernel, CpuMemoryLevel, CpuTarget};
 
 use crate::common::DimSize;
@@ -97,6 +100,7 @@ pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum TargetId {
     Avx2,
+    Avx512,
     Arm,
 }
 

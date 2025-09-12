@@ -32,17 +32,18 @@ pub trait SchedulingSugar<Tgt: Target> {
     fn tile_out(&self, output_shape: &[u32]) -> ImplNode<Tgt>;
     fn tile_out_parallel(&self, output_shape: &[u32]) -> ImplNode<Tgt>;
     fn split(&self, k: u32) -> ImplNode<Tgt>;
-    fn move_param(&self, source_idx: u8, destination_level: Tgt::Level) -> ImplNode<Tgt>;
+    fn move_param(&self, source_idx: u8, destination_level: impl Into<Tgt::Level>)
+        -> ImplNode<Tgt>;
     fn move_vrf(
         &self,
         source_idx: u8,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_vector_size: DimSize,
     ) -> ImplNode<Tgt>;
     fn move_relayout(
         &self,
         source_idx: u8,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
@@ -50,47 +51,47 @@ pub trait SchedulingSugar<Tgt: Target> {
         &self,
         source_idx: u8,
         destination_dtype: Dtype,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_accum(&self) -> ImplNode<Tgt>;
     fn to_softmax_parts(
         &self,
-        max_level: Tgt::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: Layout,
         max_vector_size: Option<DimSize>,
-        exps_level: Tgt::Level,
+        exps_level: impl Into<Tgt::Level>,
         exps_layout: Layout,
         exps_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_softmax_parts_recompute(
         &self,
-        max_level: Tgt::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
-        denominator_level: Tgt::Level,
+        denominator_level: impl Into<Tgt::Level>,
         denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn to_max_and_denominator(&self) -> ImplNode<Tgt>;
     fn to_max_and_unscaled(
         &self,
-        max_level: Tgt::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: Layout,
         max_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn bufferize(
         &self,
         index: usize,
-        level: Tgt::Level,
+        level: impl Into<Tgt::Level>,
         layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
     fn spatial_split(&self) -> ImplNode<Tgt>;
     fn broadcast_first(
         &self,
-        level: Tgt::Level,
+        level: impl Into<Tgt::Level>,
         layout: Layout,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
@@ -144,13 +145,17 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
-    fn move_param(&self, source_idx: u8, destination_level: Tgt::Level) -> ImplNode<Tgt> {
+    fn move_param(
+        &self,
+        source_idx: u8,
+        destination_level: impl Into<Tgt::Level>,
+    ) -> ImplNode<Tgt> {
         let dest = self.0.parameter(usize::from(source_idx));
         let destination_dtype = dest.dtype();
         let action = Action::Move(Move {
             source_idx,
             destination_dtype,
-            destination_level,
+            destination_level: destination_level.into(),
             destination_layout: dest.layout().clone(),
             destination_vector_size: None,
         });
@@ -160,7 +165,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn move_vrf(
         &self,
         source_idx: u8,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_vector_size: DimSize,
     ) -> ImplNode<Tgt> {
         let dest = self.0.parameter(usize::from(source_idx));
@@ -168,7 +173,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         let action = Action::Move(Move {
             source_idx,
             destination_dtype,
-            destination_level,
+            destination_level: destination_level.into(),
             destination_layout: dest.layout().clone(),
             destination_vector_size: Some(destination_vector_size),
         });
@@ -178,7 +183,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn move_relayout(
         &self,
         source_idx: u8,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -187,7 +192,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         let action = Action::Move(Move {
             source_idx,
             destination_dtype,
-            destination_level,
+            destination_level: destination_level.into(),
             destination_layout: destination_layout.build(dest.shape()),
             destination_vector_size,
         });
@@ -198,7 +203,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         &self,
         source_idx: u8,
         destination_dtype: Dtype,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -206,7 +211,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         let action = Action::Move(Move {
             source_idx,
             destination_dtype,
-            destination_level,
+            destination_level: destination_level.into(),
             destination_layout: destination_layout.build(&dest_shape),
             destination_vector_size,
         });
@@ -220,20 +225,20 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
 
     fn to_softmax_parts(
         &self,
-        denominator_level: <Tgt as Target>::Level,
+        denominator_level: impl Into<Tgt::Level>,
         denominator_layout: Layout,
         denominator_vector_size: Option<DimSize>,
-        exps_level: <Tgt as Target>::Level,
+        exps_level: impl Into<Tgt::Level>,
         exps_layout: Layout,
         exps_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_unwrap(
             self,
             Action::ToSoftmaxParts(ToSoftmaxParts {
-                denominator_level,
+                denominator_level: denominator_level.into(),
                 denominator_layout,
                 denominator_vector_size,
-                exps_level,
+                exps_level: exps_level.into(),
                 exps_layout,
                 exps_vector_size,
             }),
@@ -242,10 +247,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
 
     fn to_softmax_parts_recompute(
         &self,
-        max_level: Tgt::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
-        denominator_level: Tgt::Level,
+        denominator_level: impl Into<Tgt::Level>,
         denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -255,10 +260,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(
             self,
             Action::ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute {
-                max_level,
+                max_level: max_level.into(),
                 max_layout,
                 max_vector_size,
-                denominator_level,
+                denominator_level: denominator_level.into(),
                 denominator_layout,
                 denominator_vector_size,
             }),
@@ -274,14 +279,14 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
 
     fn to_max_and_unscaled(
         &self,
-        max_level: Tgt::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: Layout,
         max_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         apply_unwrap(
             self,
             Action::ToMaxAndUnscaled(ToMaxAndUnscaled {
-                max_level,
+                max_level: max_level.into(),
                 max_layout,
                 max_vector_size,
             }),
@@ -291,7 +296,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     fn bufferize(
         &self,
         index: usize,
-        level: Tgt::Level,
+        level: impl Into<Tgt::Level>,
         layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -303,7 +308,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
             self,
             Action::Bufferize(Bufferize {
                 index,
-                level,
+                level: level.into(),
                 layout: layout.build(&consumer.parameter_shape(0)),
                 vector_size,
             }),
@@ -316,12 +321,12 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
 
     fn broadcast_first(
         &self,
-        level: Tgt::Level,
+        level: impl Into<Tgt::Level>,
         layout: Layout,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
         let action = Action::BroadcastFirst(BroadcastFirst {
-            broadcast_level: level,
+            broadcast_level: level.into(),
             broadcast_layout: layout,
             broadcast_vector_size: vector_size,
         });
@@ -374,14 +379,18 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.split(k))
     }
 
-    fn move_param(&self, source_idx: u8, destination_level: Tgt::Level) -> ImplNode<Tgt> {
+    fn move_param(
+        &self,
+        source_idx: u8,
+        destination_level: impl Into<Tgt::Level>,
+    ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| spec.move_param(source_idx, destination_level))
     }
 
     fn move_vrf(
         &self,
         source_idx: u8,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_vector_size: DimSize,
     ) -> ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
@@ -392,7 +401,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     fn move_relayout(
         &self,
         source_idx: u8,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -410,7 +419,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         &self,
         source_idx: u8,
         destination_dtype: Dtype,
-        destination_level: Tgt::Level,
+        destination_level: impl Into<Tgt::Level>,
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -431,10 +440,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn to_softmax_parts(
         &self,
-        max_level: <Tgt as Target>::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: Layout,
         max_vector_size: Option<DimSize>,
-        exps_level: <Tgt as Target>::Level,
+        exps_level: impl Into<Tgt::Level>,
         exps_layout: Layout,
         exps_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -452,10 +461,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn to_softmax_parts_recompute(
         &self,
-        max_level: Tgt::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
-        denominator_level: Tgt::Level,
+        denominator_level: impl Into<Tgt::Level>,
         denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -477,7 +486,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn to_max_and_unscaled(
         &self,
-        max_level: <Tgt as Target>::Level,
+        max_level: impl Into<Tgt::Level>,
         max_layout: Layout,
         max_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -489,7 +498,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     fn bufferize(
         &self,
         index: usize,
-        level: Tgt::Level,
+        level: impl Into<Tgt::Level>,
         layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
@@ -504,7 +513,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn broadcast_first(
         &self,
-        level: Tgt::Level,
+        level: impl Into<Tgt::Level>,
         layout: Layout,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {

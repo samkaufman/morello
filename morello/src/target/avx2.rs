@@ -3,194 +3,35 @@ use crate::common::Dtype;
 use crate::cost::MainCost;
 use crate::memorylimits::MemoryAllocation;
 use crate::spec::LogicalSpec;
+use crate::target::CpuMemoryLevel;
 use crate::{codegen::c_utils::VecType, views::View};
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
-const X86_VEC_TYPES: [VecType; 16] = [
-    VecType {
-        dtype: Dtype::Bfloat16,
-        value_cnt: 16,
-        name: "vbf16_16",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        load_fn_arg0: "__m256i",
-        store_fn: "_mm256_storeu_si256",
-        store_fn_arg0: "__m256i",
-    },
-    VecType {
-        dtype: Dtype::Bfloat16,
-        value_cnt: 8,
-        name: "vbf16_8",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        load_fn_arg0: "__m128i",
-        store_fn: "_mm_storeu_si128",
-        store_fn_arg0: "__m128i",
-    },
-    VecType {
-        dtype: Dtype::Float32,
-        value_cnt: 8,
-        name: "vf8",
-        native_type_name: "__m256",
-        load_fn: "_mm256_loadu_ps",
-        load_fn_arg0: "float const",
-        store_fn: "_mm256_storeu_ps",
-        store_fn_arg0: "float",
-    },
-    VecType {
-        dtype: Dtype::Float32,
-        value_cnt: 4,
-        name: "vf4",
-        native_type_name: "__m128",
-        load_fn: "_mm_loadu_ps",
-        load_fn_arg0: "float",
-        store_fn: "_mm_storeu_ps",
-        store_fn_arg0: "float",
-    },
-    VecType {
-        dtype: Dtype::Sint32,
-        value_cnt: 8,
-        name: "vsi8",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        load_fn_arg0: "__m256i",
-        store_fn: "_mm256_storeu_si256",
-        store_fn_arg0: "__m256i",
-    },
-    VecType {
-        dtype: Dtype::Sint32,
-        value_cnt: 4,
-        name: "vsi4",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        load_fn_arg0: "__m128i",
-        store_fn: "_mm_storeu_si128",
-        store_fn_arg0: "__m128i",
-    },
-    VecType {
-        dtype: Dtype::Uint32,
-        value_cnt: 8,
-        name: "vui8",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        load_fn_arg0: "__m256i",
-        store_fn: "_mm256_storeu_si256",
-        store_fn_arg0: "__m256i",
-    },
-    VecType {
-        dtype: Dtype::Uint32,
-        value_cnt: 4,
-        name: "vui4",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        load_fn_arg0: "__m128i",
-        store_fn: "_mm_storeu_si128",
-        store_fn_arg0: "__m128i",
-    },
-    VecType {
-        dtype: Dtype::Sint16,
-        value_cnt: 16,
-        name: "vsi16",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        load_fn_arg0: "__m256i",
-        store_fn: "_mm256_storeu_si256",
-        store_fn_arg0: "__m256i",
-    },
-    VecType {
-        dtype: Dtype::Sint16,
-        value_cnt: 8,
-        name: "vsi8",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        load_fn_arg0: "__m128i",
-        store_fn: "_mm_storeu_si128",
-        store_fn_arg0: "__m128i",
-    },
-    VecType {
-        dtype: Dtype::Uint16,
-        value_cnt: 16,
-        name: "vui16",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        load_fn_arg0: "__m256i",
-        store_fn: "_mm256_storeu_si256",
-        store_fn_arg0: "__m256i",
-    },
-    VecType {
-        dtype: Dtype::Uint16,
-        value_cnt: 8,
-        name: "vui8",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        load_fn_arg0: "__m128i",
-        store_fn: "_mm_storeu_si128",
-        store_fn_arg0: "__m128i",
-    },
-    VecType {
-        dtype: Dtype::Sint8,
-        value_cnt: 32,
-        name: "vsb32",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        load_fn_arg0: "__m256i",
-        store_fn: "_mm256_storeu_si256",
-        store_fn_arg0: "__m256i",
-    },
-    VecType {
-        dtype: Dtype::Sint8,
-        value_cnt: 16,
-        name: "vsb16",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        load_fn_arg0: "__m128i",
-        store_fn: "_mm_storeu_si128",
-        store_fn_arg0: "__m128i",
-    },
-    VecType {
-        dtype: Dtype::Uint8,
-        value_cnt: 32,
-        name: "vub32",
-        native_type_name: "__m256i",
-        load_fn: "_mm256_loadu_si256",
-        load_fn_arg0: "__m256i",
-        store_fn: "_mm256_storeu_si256",
-        store_fn_arg0: "__m256i",
-    },
-    VecType {
-        dtype: Dtype::Uint8,
-        value_cnt: 16,
-        name: "vub16",
-        native_type_name: "__m128i",
-        load_fn: "_mm_loadu_si128",
-        load_fn_arg0: "__m128i",
-        store_fn: "_mm_storeu_si128",
-        store_fn_arg0: "__m128i",
-    },
-];
+super::x86::define_x86_vec_types!(X86_AVX2_VEC_TYPES, 16);
 
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Default, Debug, Serialize)]
 pub struct Avx2Target;
 
 #[derive(Clone, Copy, Debug, Hash, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
-pub struct X86Kernel(CpuKernel);
+pub struct Avx2Kernel(CpuKernel);
 
 impl CpuTarget for Avx2Target {
-    type Kernel = X86Kernel;
+    type Kernel = Avx2Kernel;
+    type Level = CpuMemoryLevel;
 
     fn target_id() -> TargetId {
         TargetId::Avx2
     }
 
     fn vec_types() -> &'static [VecType] {
-        &X86_VEC_TYPES
+        &X86_AVX2_VEC_TYPES
     }
 }
 
-impl Kernel for X86Kernel {
+impl Kernel for Avx2Kernel {
     type Tgt = Avx2Target;
 
     fn argument_count(&self) -> u8 {
@@ -218,7 +59,7 @@ impl Kernel for X86Kernel {
     }
 }
 
-impl From<CpuKernel> for X86Kernel {
+impl From<CpuKernel> for Avx2Kernel {
     fn from(kernel: CpuKernel) -> Self {
         Self(kernel)
     }

@@ -45,6 +45,10 @@ pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
+    type Level: MemoryLevel
+        + From<CpuMemoryLevel>
+        + Into<CpuMemoryLevel>
+        + PartialEq<CpuMemoryLevel>;
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType];
 }
@@ -142,7 +146,7 @@ pub enum CpuMemoryLevel {
 pub struct CpuMemoryLevelBimap;
 
 impl<T: CpuTarget> Target for T {
-    type Level = CpuMemoryLevel;
+    type Level = <Self as CpuTarget>::Level;
     type Kernel = <Self as CpuTarget>::Kernel;
     type ActionsIter<'a> = Box<dyn Iterator<Item = Action<Self>> + 'a>;
 
@@ -162,18 +166,22 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn default_level() -> Self::Level {
-        CpuMemoryLevel::GL
+        CpuMemoryLevel::GL.into()
     }
 
     fn levels() -> [Self::Level; LEVEL_COUNT] {
-        CPU_LEVELS
+        CPU_LEVELS.map(Into::into)
     }
 
     fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
-        match slower {
+        match slower.into() {
             CpuMemoryLevel::RF | CpuMemoryLevel::VRF => vec![slower],
-            CpuMemoryLevel::L1 => vec![slower, CpuMemoryLevel::RF, CpuMemoryLevel::VRF],
-            CpuMemoryLevel::GL => vec![slower, CpuMemoryLevel::L1],
+            CpuMemoryLevel::L1 => vec![
+                slower,
+                CpuMemoryLevel::RF.into(),
+                CpuMemoryLevel::VRF.into(),
+            ],
+            CpuMemoryLevel::GL => vec![slower, CpuMemoryLevel::L1.into()],
         }
     }
 
@@ -683,16 +691,12 @@ impl CpuKernel {
                             lhs @ TensorSpec {
                                 shape: lhs_shape,
                                 dtype: Dtype::Uint8,
-                                aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::L1,
-                                    ..
-                                },
+                                aux: _,
                             },
                             rhs @ TensorSpec {
                                 shape: rhs_shape,
                                 dtype: Dtype::Sint8,
                                 aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::VRF,
                                     vector_size: Some(rhs_vector_size),
                                     ..
                                 },
@@ -700,10 +704,7 @@ impl CpuKernel {
                             out @ TensorSpec {
                                 shape: out_shape,
                                 dtype: Dtype::Sint16,
-                                aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::VRF,
-                                    ..
-                                },
+                                aux: _,
                             }
                         ] if lhs_shape[..] == [nz!(1u32), nz!(1u32), nz!(2u32)]
                           && rhs_shape[..2] == [nz!(1u32), nz!(2u32)]
@@ -712,6 +713,9 @@ impl CpuKernel {
                           && out_shape[2].get() * 2 == rhs_vector_size.get()
                           && rhs.layout() == &batched_col_major(3) && out.layout().is_row_major()
                           && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
+                          && lhs.level() == CpuMemoryLevel::L1
+                          && rhs.level() == CpuMemoryLevel::VRF
+                          && out.level() == CpuMemoryLevel::VRF
                     )
             }
             CpuKernel::DotProductLoop => {
@@ -722,23 +726,18 @@ impl CpuKernel {
                             lhs @ TensorSpec {
                                 shape: lhs_shape,
                                 dtype: Dtype::Float32,
-                                aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::L1,
-                                    ..
-                                },
+                                aux: _,
                             },
                             rhs @ TensorSpec {
                                 shape: _,
                                 dtype: Dtype::Float32,
-                                aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::L1, ..
-                                },
+                                aux: _,
                             },
                             TensorSpec {
                                 shape: out_shape,
                                 dtype: Dtype::Float32,
                                 aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::RF,
+                                    level: out_level,
                                     ..
                                 },
                             }
@@ -748,6 +747,9 @@ impl CpuKernel {
                           && lhs.layout().is_row_major()
                           && rhs.layout() == &col_major(2)
                           && lhs.is_contiguous() && rhs.is_contiguous()
+                          && lhs.level() == CpuMemoryLevel::L1
+                          && rhs.level() == CpuMemoryLevel::L1
+                          && *out_level == CpuMemoryLevel::RF
                     )
             }
             CpuKernel::DotProductLoopF32Bf16F32 => {
@@ -786,7 +788,7 @@ impl CpuKernel {
                             shape: src_shape,
                             dtype: Dtype::Bfloat16,
                             aux: TensorSpecAux {
-                                level: CpuMemoryLevel::VRF,
+                                level: _,
                                 layout: src_layout,
                                 vector_size: src_vs,
                             },
@@ -795,7 +797,7 @@ impl CpuKernel {
                             shape: dest_shape,
                             dtype: Dtype::Float32,
                             aux: TensorSpecAux {
-                                level: CpuMemoryLevel::VRF,
+                                level: _,
                                 layout: dest_layout,
                                 vector_size: dest_vs,
                             },
@@ -809,6 +811,8 @@ impl CpuKernel {
                       && src_layout.is_row_major()
                       && dest_layout.dims.iter().all(|(_, pd)| pd == &PhysDim::Dynamic || pd == &leaved)
                       && dest_layout.dims.iter().filter(|(_, pd)| pd == &leaved).count() == 1
+                      && src.level() == CpuMemoryLevel::VRF
+                      && dest.level() == CpuMemoryLevel::VRF
                 )
             }
             CpuKernel::VectorDeinterleaveF32Bf16 => {
@@ -1201,7 +1205,7 @@ impl CpuKernel {
                                 shape: lhs_shape,
                                 dtype: Dtype::Bfloat16,
                                 aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::RF,
+                                    level: lhs_level,
                                     vector_size: None,
                                     ..
                                 },
@@ -1210,13 +1214,15 @@ impl CpuKernel {
                                 shape: rhs_shape,
                                 dtype: Dtype::Float32,
                                 aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::RF,
+                                    level: rhs_level,
                                     vector_size: None,
                                     ..
                                 },
                             }
                         ] if lhs_shape.iter().all(|d| d.get() == 1)
                           && rhs_shape.iter().all(|d| d.get() == 1)
+                          && *lhs_level == CpuMemoryLevel::RF
+                          && *rhs_level == CpuMemoryLevel::RF
                     )
             }
             CpuKernel::VectorCastBf16F32 => {
@@ -1228,7 +1234,7 @@ impl CpuKernel {
                                 shape: lhs_shape,
                                 dtype: Dtype::Bfloat16,
                                 aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::VRF,
+                                    level: lhs_level,
                                     layout: lhs_layout,
                                     vector_size: Some(lhs_vector_size),
                                     ..
@@ -1238,7 +1244,7 @@ impl CpuKernel {
                                 shape: rhs_shape,
                                 dtype: Dtype::Float32,
                                 aux: TensorSpecAux {
-                                    level: CpuMemoryLevel::VRF,
+                                    level: rhs_level,
                                     layout: rhs_layout,
                                     vector_size: Some(rhs_vector_size),
                                     ..
@@ -1250,6 +1256,8 @@ impl CpuKernel {
                           && lhs_vector_size.get() == 16
                           && rhs_vector_size.get() == 8
                           && lhs_layout == rhs_layout
+                          && *lhs_level == CpuMemoryLevel::VRF
+                          && *rhs_level == CpuMemoryLevel::VRF
                     )
             }
             CpuKernel::MemsetZero => {
@@ -1526,25 +1534,17 @@ fn dotproductloop_applies<Tgt: CpuTarget>(
             lhs @ TensorSpec {
                 shape: lhs_shape,
                 dtype: ldt,
-                aux: TensorSpecAux {
-                    level: CpuMemoryLevel::L1,
-                    ..
-                },
+                aux: _
             },
             rhs @ TensorSpec {
                 shape: _,
                 dtype: Dtype::Bfloat16,
-                aux: TensorSpecAux {
-                    level: CpuMemoryLevel::L1, ..
-                },
+                aux: _
             },
-            TensorSpec {
+            out @ TensorSpec {
                 shape: out_shape,
                 dtype: Dtype::Float32,
-                aux: TensorSpecAux {
-                    level: CpuMemoryLevel::RF,
-                    ..
-                },
+                aux: _
             }
         ] if *ldt == lhs_dtype
           && lhs_shape[2].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
@@ -1554,6 +1554,9 @@ fn dotproductloop_applies<Tgt: CpuTarget>(
           && allowed_lhs_layouts.contains(lhs.layout())
           && rhs.layout() == &Layout::new([0, 2, 1].map(|d| (d, PhysDim::Dynamic)).into())
           && lhs.is_contiguous() && rhs.is_contiguous()
+          && lhs.level() == CpuMemoryLevel::L1
+          && rhs.level() == CpuMemoryLevel::L1
+          && out.level() == CpuMemoryLevel::RF
     )
 }
 
@@ -1676,7 +1679,8 @@ fn physicaltransposebyte_applies_to_operands<Tgt>(
     vector_values: u32,
 ) -> bool
 where
-    Tgt: Target<Level = CpuMemoryLevel>,
+    Tgt: Target,
+    Tgt::Level: PartialEq<CpuMemoryLevel>,
 {
     if !matches!(typ, PrimitiveSpecType::Move) {
         return false;
@@ -1689,13 +1693,14 @@ where
                 dtype: Dtype::Uint8 | Dtype::Sint8,
                 aux:
                     TensorSpecAux {
-                        level: CpuMemoryLevel::VRF,
+                        level: rhs_level,
                         layout,
                         vector_size: Some(v),
                     },
             } if shape[..] == *shape![2, vector_values]
                 && layout.is_fully_contiguous()
-                && v.get() == vector_values => {}
+                && v.get() == vector_values
+                && *rhs_level == CpuMemoryLevel::VRF => {}
             _ => return false,
         };
     }
@@ -1709,9 +1714,11 @@ where
     true
 }
 
-pub fn shared_broadcastvecmult_applies_to_operands<Tgt: Target<Level = CpuMemoryLevel>>(
-    operands: &[TensorSpec<Tgt>],
-) -> bool {
+pub fn shared_broadcastvecmult_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
+where
+    Tgt: Target,
+    Tgt::Level: PartialEq<CpuMemoryLevel>,
+{
     let scalar_level = operands[0].level();
     if scalar_level != CpuMemoryLevel::RF && scalar_level != CpuMemoryLevel::L1 {
         return false;

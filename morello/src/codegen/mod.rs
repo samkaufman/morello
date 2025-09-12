@@ -37,11 +37,14 @@ const CLI_FLAGS: [&str; 5] = [
 ];
 const OPENMP_FLAG: &str = "-fopenmp";
 
-const X86_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
+const AVX2_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
+const AVX2_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
+const AVX2_OTHER_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-march=x86-64", "-lm"];
+const AVX512_CLI_VEC_FLAGS: [&str; 2] = ["-mavx512f", "-mfma"];
+const AVX512_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
+const AVX512_OTHER_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-march=x86-64", "-lm"];
 const ARM_CLI_VEC_FLAGS: [&str; 0] = [];
-const X86_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
 const ARM_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "arm64"];
-const X86_OTHER_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-march=x86-64", "-lm"];
 const ARM_OTHER_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-march=arm64", "-lm"];
 
 const MIN_SAMPLES: u32 = 3;
@@ -80,23 +83,13 @@ pub trait CodeGen<Tgt: Target> {
     }
 
     fn cli_vec_flags() -> Box<dyn Iterator<Item = &'static str>> {
-        let (target_flags, host_flags) = match Tgt::target_id() {
-            TargetId::Avx2 => {
-                let host_flags = if env::consts::OS == "macos" {
-                    &X86_MAC_HOST_CLI_VEC_FLAGS
-                } else {
-                    X86_OTHER_HOST_CLI_VEC_FLAGS.as_slice()
-                };
-                (X86_CLI_VEC_FLAGS.as_slice(), host_flags)
-            }
-            TargetId::Arm => {
-                let host_flags = if env::consts::OS == "macos" {
-                    &ARM_MAC_HOST_CLI_VEC_FLAGS
-                } else {
-                    ARM_OTHER_HOST_CLI_VEC_FLAGS.as_slice()
-                };
-                (ARM_CLI_VEC_FLAGS.as_slice(), host_flags)
-            }
+        let (target_flags, host_flags): (&[_], &[_]) = match (Tgt::target_id(), env::consts::OS) {
+            (TargetId::Avx2, "macos") => (&AVX2_CLI_VEC_FLAGS, &AVX2_MAC_HOST_CLI_VEC_FLAGS),
+            (TargetId::Avx2, _) => (&AVX2_CLI_VEC_FLAGS, &AVX2_OTHER_HOST_CLI_VEC_FLAGS),
+            (TargetId::Avx512, "macos") => (&AVX512_CLI_VEC_FLAGS, &AVX512_MAC_HOST_CLI_VEC_FLAGS),
+            (TargetId::Avx512, _) => (&AVX512_CLI_VEC_FLAGS, &AVX512_OTHER_HOST_CLI_VEC_FLAGS),
+            (TargetId::Arm, "macos") => (&ARM_CLI_VEC_FLAGS, &ARM_MAC_HOST_CLI_VEC_FLAGS),
+            (TargetId::Arm, _) => (&ARM_CLI_VEC_FLAGS, &ARM_OTHER_HOST_CLI_VEC_FLAGS),
         };
         Box::new(target_flags.iter().chain(host_flags.iter()).cloned())
     }

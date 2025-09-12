@@ -450,13 +450,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         shape: &[DimSize],
         vector_size: Option<DimSize>,
         dtype: Dtype,
-        level: CpuMemoryLevel,
+        level: Tgt::Level,
     ) -> CBuffer {
         debug_assert_eq!(vector_size.is_some(), level == CpuMemoryLevel::VRF);
 
         let name = self.namer.fresh_name();
         let size = shape.iter().map(|d| d.get()).product::<u32>();
-        match level {
+        match level.into() {
             CpuMemoryLevel::VRF => {
                 let vector_size = vector_size.unwrap();
                 let vec_type = get_vector(Tgt::vec_types(), dtype, vector_size);
@@ -1673,13 +1673,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             &shape![1, 32],
                             Some(nz!(32u32)),
                             intermediate_dtype,
-                            VRF,
+                            VRF.into(),
                         );
                         let intermediate_higher = self.make_buffer(
                             &shape![1, 32],
                             Some(nz!(32u32)),
                             intermediate_dtype,
-                            VRF,
+                            VRF.into(),
                         );
                         intermediate_lower.emit(w, InitType::None, depth)?;
                         intermediate_higher.emit(w, InitType::None, depth)?;

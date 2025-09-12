@@ -3143,7 +3143,7 @@ pub mod macros {
                 layout.set_contiguous_none();
             }
             $crate::tensorspec::TensorSpecAux {
-                level: $level,
+                level: ($level).into(),
                 layout,
                 vector_size: ($vs).map(|x: u32| {
                     $crate::common::DimSize::try_from(x).unwrap()
