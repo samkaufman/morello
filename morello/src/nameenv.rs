@@ -1,4 +1,4 @@
-use crate::{opaque_symbol::OpaqueSymbol, utils::ASCII_PAIRS, views::View};
+use crate::{opaque_symbol::OpaqueSymbol, utils::ascii_name, views::View};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -15,10 +15,10 @@ impl NameEnv {
 impl NameEnv {
     pub fn name<K: View>(&mut self, view: &K) -> &str {
         let cnt = self.names.len();
-        let name = self
-            .names
-            .entry(view.identifier())
-            .or_insert_with(|| String::from_iter(ASCII_PAIRS[cnt]));
+        let name = self.names.entry(view.identifier()).or_insert_with(|| {
+            // Add 26 to skip all the single-character names
+            ascii_name(26 + cnt)
+        });
         name
     }
 

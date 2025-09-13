@@ -27,7 +27,7 @@ use crate::target::{
     },
     CpuKernel, CpuMemoryLevel, CpuTarget, Kernel, Target,
 };
-use crate::utils::{indent, LinePrefixWrite, ASCII_CHARS};
+use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
 
 const STACK_CUTOFF: u32 = 256;
@@ -411,8 +411,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let shape_str = tensor.shape().iter().map(ToString::to_string).join("x");
         writeln!(out, "{}printf(\"{}\\n\");", indent(depth), shape_str)?;
 
-        // TODO: Generate unique names. ASCII_CHARS could lead to conflicts in the future.
-        for (dim, (d, n)) in tensor.shape().iter().copied().zip(ASCII_CHARS).enumerate() {
+        for (dim, d) in tensor.shape().iter().copied().enumerate() {
+            let n = ascii_name(dim);
             writeln!(
                 out,
                 "{}for (int {n} = 0; {n} < {d}; {n}++) {{",

@@ -5,9 +5,6 @@ use std::iter;
 
 const INDENT_SIZE: usize = 2;
 
-pub const ASCII_CHARS: [char; 26] = ascii_chars();
-pub const ASCII_PAIRS: [[char; 2]; 676] = ascii_pairs();
-
 /// Wraps an [io::Write] for use as a [fmt::Write].
 pub struct ToWriteFmt<T: io::Write>(pub T);
 
@@ -82,31 +79,30 @@ impl<T: PrimInt + Send + 'static> Iterator for Diagonals<T> {
     }
 }
 
-const fn ascii_chars() -> [char; 26] {
-    let mut chars = ['\0'; 26];
-    let mut c: u8 = b'a';
-    while c <= b'z' {
-        chars[(c - b'a') as usize] = c as char;
-        c += 1;
+/// Generate a lowercase ASCII name from an index.
+///
+/// # Examples
+/// ```
+/// # use morello::utils::ascii_name_from_index;
+/// assert_eq!(ascii_name_from_index(0), "a");
+/// assert_eq!(ascii_name_from_index(25), "z");
+/// assert_eq!(ascii_name_from_index(26), "aa");
+/// assert_eq!(ascii_name_from_index(27), "ab");
+/// assert_eq!(ascii_name_from_index(26*26 + 26), "aaa");
+/// ```
+pub fn ascii_name(idx: usize) -> String {
+    let mut n = idx
+        .checked_add(1)
+        .expect("index too large for bijective base-26");
+    let mut characters: Vec<u8> = Vec::with_capacity(3);
+    while n > 0 {
+        let q = (n - 1) / 26;
+        let r = ((n - 1) % 26) as u8;
+        characters.push(b'a' + r);
+        n = q;
     }
-    chars
-}
-
-const fn ascii_pairs() -> [[char; 2]; 676] {
-    let mut result = [['a', 'a']; 676];
-    let mut idx = 0;
-
-    let mut c1: u8 = b'a';
-    while c1 <= b'z' {
-        let mut c2: u8 = b'a';
-        while c2 <= b'z' {
-            result[idx] = [c1 as char, c2 as char];
-            idx += 1;
-            c2 += 1;
-        }
-        c1 += 1;
-    }
-    result
+    characters.reverse();
+    String::from_utf8(characters).expect("generated only ASCII")
 }
 
 pub const fn bit_length(n: u64) -> u32 {
