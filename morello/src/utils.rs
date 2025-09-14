@@ -83,12 +83,12 @@ impl<T: PrimInt + Send + 'static> Iterator for Diagonals<T> {
 ///
 /// # Examples
 /// ```
-/// # use morello::utils::ascii_name_from_index;
-/// assert_eq!(ascii_name_from_index(0), "a");
-/// assert_eq!(ascii_name_from_index(25), "z");
-/// assert_eq!(ascii_name_from_index(26), "aa");
-/// assert_eq!(ascii_name_from_index(27), "ab");
-/// assert_eq!(ascii_name_from_index(26*26 + 26), "aaa");
+/// # use morello::utils::ascii_name;
+/// assert_eq!(ascii_name(0), "a");
+/// assert_eq!(ascii_name(25), "z");
+/// assert_eq!(ascii_name(26), "aa");
+/// assert_eq!(ascii_name(27), "ab");
+/// assert_eq!(ascii_name(26*26 + 26), "aaa");
 /// ```
 pub fn ascii_name(idx: usize) -> String {
     let mut n = idx
