@@ -17,7 +17,7 @@ use morello::layout::{col_major, row_major};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::smallvec::smallvec;
 use morello::target::{
-    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel::GL, CpuTarget, Target, TargetId,
+    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel::GL, CpuTarget, TargetId,
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
