@@ -6,7 +6,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::layout;
 use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
-use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
+use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::broadcast_first::BroadcastFirst;
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
@@ -49,6 +49,7 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
         + From<CpuMemoryLevel>
         + Into<CpuMemoryLevel>
         + PartialEq<CpuMemoryLevel>;
+    fn max_mem() -> MemoryLimits;
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType];
 }
@@ -155,10 +156,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn max_mem() -> MemoryLimits {
-        MemoryLimits::Standard(MemVec::new_mixed(
-            [16, 16, 32_768, 1_073_741_824],
-            [true, true, false, false],
-        ))
+        <Self as CpuTarget>::max_mem()
     }
 
     fn processors() -> u8 {
@@ -1906,6 +1904,7 @@ mod tests {
         common::{DimSize, Dtype},
         layout::{row_major, Layout},
         lspec,
+        memorylimits::MemVec,
         scheduling::{moves::Move, Action, ActionT, ApplyError, NotApplicableReason},
         shape, spec,
         spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},

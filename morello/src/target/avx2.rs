@@ -1,7 +1,7 @@
 use super::{cpu::CpuTarget, CpuKernel, Kernel, TargetId};
 use crate::common::Dtype;
 use crate::cost::MainCost;
-use crate::memorylimits::MemoryAllocation;
+use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::spec::LogicalSpec;
 use crate::target::CpuMemoryLevel;
 use crate::{codegen::c_utils::VecType, views::View};
@@ -28,6 +28,13 @@ impl CpuTarget for Avx2Target {
 
     fn vec_types() -> &'static [VecType] {
         &X86_AVX2_VEC_TYPES
+    }
+
+    fn max_mem() -> MemoryLimits {
+        MemoryLimits::Standard(MemVec::new_mixed(
+            [16, 16, 32_768, 1_073_741_824],
+            [true, true, false, false],
+        ))
     }
 }
 
