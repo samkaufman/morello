@@ -97,7 +97,6 @@ crate::target::x86::define_x86_vec_types!(
     },
 );
 
-/// An AVX-512 target. Specifically, a Zen 5 (Turin) CPU target.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Default, Debug, Serialize)]
 pub struct Avx512Target;
 
@@ -123,7 +122,7 @@ impl CpuTarget for Avx512Target {
 
     fn max_mem() -> MemoryLimits {
         MemoryLimits::Standard(MemVec::new_mixed(
-            [16, 32, 49_152, 1_073_741_824],
+            [16, 32, 32_768, 1_073_741_824],
             [true, true, false, false],
         ))
     }
