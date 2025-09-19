@@ -74,9 +74,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
 
         // TODO: Move assertions into solver() as well.
         if parallel && logical_spec.serial_only() {
-            return Err(ApplyError::NotApplicable(
-                NotApplicableReason::ParallelPrevented,
-            ));
+            return Err(ApplyError::NotApplicable(NotApplicableReason::SerialOnly));
         }
         assert_eq!(
             output_shape.len(),

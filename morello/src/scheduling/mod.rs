@@ -139,7 +139,7 @@ pub enum NotApplicableReason {
     TileShapeMatchesOriginal,
     TileShapeIsLarger,
     TileShapeInvalid,
-    ParallelPrevented,
+    SerialOnly,
     LayoutIncompatible,
     SelfMove,
     VectorSizeInvalid,
@@ -361,7 +361,7 @@ impl Display for NotApplicableReason {
             NotApplicableReason::TileShapeInvalid => {
                 write!(f, "Invalid tile shape")
             }
-            NotApplicableReason::ParallelPrevented => {
+            NotApplicableReason::SerialOnly => {
                 write!(f, "Cannot implement serial-only Spec with parallel tile")
             }
             NotApplicableReason::LayoutIncompatible => {
