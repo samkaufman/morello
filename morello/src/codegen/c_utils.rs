@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::{fmt, ops::Rem};
 
 use crate::{
@@ -128,8 +129,17 @@ impl CBuffer {
                 } else {
                     ""
                 };
+                let mut groups: HashMap<&'static VecType, Vec<&String>> = HashMap::new();
                 for (name, vec_type) in inner_vecs {
-                    writeln!(w, "{}{} {}{};", indent(depth), vec_type.name, name, epi)?;
+                    groups.entry(*vec_type).or_default().push(name);
+                }
+                for (vec_type, names) in groups {
+                    write!(w, "{}{}", indent(depth), vec_type.name)?;
+                    for (i, name) in names.iter().enumerate() {
+                        let prefix = if i == 0 { " " } else { ", " };
+                        write!(w, "{}{}{}", prefix, name, epi)?;
+                    }
+                    writeln!(w, ";")?;
                 }
                 Ok(())
             }
