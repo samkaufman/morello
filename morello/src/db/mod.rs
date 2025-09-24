@@ -865,7 +865,7 @@ fn analyze_visit_dir<Tgt>(
         }
 
         // Choose with 1/sample probability to skip this file.
-        if sample > 1 && rand::random::<usize>() % sample != 0 {
+        if sample > 1 && !rand::random::<usize>().is_multiple_of(sample) {
             continue;
         }
 

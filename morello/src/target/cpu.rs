@@ -213,7 +213,7 @@ impl<T: CpuTarget> Target for T {
                 .filter_map(|(packing_dim, &packing_size)| {
                     debug_assert_ne!(packing_size.get(), 1);
                     if packing_dim == usize::from(dims.last().unwrap().0)
-                        || shape[packing_dim].get() % packing_size.get() != 0
+                        || !shape[packing_dim].get().is_multiple_of(packing_size.get())
                     {
                         return None;
                     }
@@ -237,7 +237,7 @@ impl<T: CpuTarget> Target for T {
                 .cartesian_product(&all_oddeven_sizes)
                 .filter_map(|(packing_dim, &packing_size)| {
                     debug_assert_ne!(packing_size.get(), 1);
-                    if shape[packing_dim].get() % packing_size.get() != 0 {
+                    if !shape[packing_dim].get().is_multiple_of(packing_size.get()) {
                         return None;
                     }
                     Some(Layout::new(
@@ -926,7 +926,7 @@ impl CpuKernel {
                     if shape[..dim_us].iter().any(|d| d.get() != 1) {
                         return false;
                     }
-                    if shape[dim_us].get() % 8 != 0 {
+                    if !shape[dim_us].get().is_multiple_of(8) {
                         return false;
                     }
                     if shape[(dim_us + 1)..].iter().any(|d| d.get() != 1) {
@@ -982,7 +982,11 @@ impl CpuKernel {
                         return false;
                     }
                 }
-                if operands[0].volume().get() % operands[0].vector_size().unwrap().get() != 0 {
+                if !operands[0]
+                    .volume()
+                    .get()
+                    .is_multiple_of(operands[0].vector_size().unwrap().get())
+                {
                     return false;
                 }
                 true
@@ -1026,7 +1030,11 @@ impl CpuKernel {
                 if operands[1].dtype() != Dtype::Float32 {
                     return false;
                 }
-                if operands[0].volume().get() % operands[0].vector_size().unwrap().get() != 0 {
+                if !operands[0]
+                    .volume()
+                    .get()
+                    .is_multiple_of(operands[0].vector_size().unwrap().get())
+                {
                     return false;
                 }
                 // 256-bit VRF
@@ -1082,7 +1090,7 @@ impl CpuKernel {
                 let Some(vs) = operands[1].vector_size() else {
                     return false;
                 };
-                if dest_shape[usize::from(dim)].get() % vs.get() != 0 {
+                if !dest_shape[usize::from(dim)].get().is_multiple_of(vs.get()) {
                     return false;
                 }
 
@@ -1800,8 +1808,9 @@ fn pack_sizes_for_dim(
     dtype: Dtype,
     all_target_vector_bytes: &[u32],
 ) -> impl Iterator<Item = DimSize> + '_ {
-    pack_sizes_all(dtype, all_target_vector_bytes)
-        .filter(move |&pack_size| pack_size < dim_size && dim_size.get() % pack_size.get() == 0)
+    pack_sizes_all(dtype, all_target_vector_bytes).filter(move |&pack_size| {
+        pack_size < dim_size && dim_size.get().is_multiple_of(pack_size.get())
+    })
 }
 
 fn oddeven_layouts_for_standard_layout<'a>(
@@ -1839,8 +1848,9 @@ fn oddeven_sizes_for_dim(
     dtype: Dtype,
     all_target_vector_bytes: &[u32],
 ) -> impl Iterator<Item = DimSize> + '_ {
-    oddeven_sizes_all(dtype, all_target_vector_bytes)
-        .filter(move |&pack_size| pack_size <= dim_size && dim_size.get() % pack_size.get() == 0)
+    oddeven_sizes_all(dtype, all_target_vector_bytes).filter(move |&pack_size| {
+        pack_size <= dim_size && dim_size.get().is_multiple_of(pack_size.get())
+    })
 }
 
 /// Implements logic common to [packed_layouts_for_standard_layout] and

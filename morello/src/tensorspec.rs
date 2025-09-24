@@ -651,10 +651,10 @@ pub(crate) fn check_tensor_vector_size<Tgt: Target>(
     let volume = DimSize::new(shape.iter().map(|d| d.get()).product()).unwrap();
     let bytes = volume.get() * u32::from(dtype.size());
 
-    if !vector_bytes.iter().any(|&vb| bytes % vb == 0) {
+    if !vector_bytes.iter().any(|&vb| bytes.is_multiple_of(vb)) {
         return Err(CanonicalizeError::VectorSizeInvalid);
     }
-    if volume.get() % vector_size.get() != 0 {
+    if !volume.get().is_multiple_of(vector_size.get()) {
         return Err(CanonicalizeError::VectorSizeVolumeIncompatible);
     }
     Ok(())

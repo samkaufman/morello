@@ -788,7 +788,7 @@ mod tests {
                 .arr
                 .iter()
                 .zip(&space_max.arr)
-                .map(|(l, h)| (*l..=*h))
+                .map(|(l, h)| *l..=*h)
                 .multi_cartesian_product();
             for pt in pts_iter {
                 let pt = RTreePt::<3> {

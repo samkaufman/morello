@@ -648,7 +648,7 @@ fn create_tile_out_boundary_regions<Tgt: Target>(
         .filter_map(|(dim_idx, &tile_size)| {
             // Check if this dimension has a remainder when tiled
             let original_size = original_shape[dim_idx].get();
-            if original_size % tile_size.get() != 0 {
+            if !original_size.is_multiple_of(tile_size.get()) {
                 let actual_axis = output_tile.axes[dim_idx];
                 assert!(
                     (actual_axis as u32) < usize::BITS,

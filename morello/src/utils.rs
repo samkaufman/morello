@@ -189,7 +189,7 @@ pub fn factors(x: usize) -> Vec<usize> {
     let mut result = Vec::new();
     let mut i = 1;
     while i * i <= x {
-        if x % i == 0 {
+        if x.is_multiple_of(i) {
             result.push(i);
             if x / i != i {
                 result.push(x / i);
