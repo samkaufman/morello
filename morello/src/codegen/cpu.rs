@@ -464,18 +464,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                 let vector_size = vector_size.get();
                 debug_assert_eq!(size % vector_size, 0);
-                let name = self.namer.fresh_name();
-                if size == vector_size {
-                    CBuffer::SingleVecVar { name, vec_type }
-                } else {
-                    let inner_vecs = (0..(size / vector_size))
-                        .map(|_| CBuffer::SingleVecVar {
-                            name: self.namer.fresh_name(),
-                            vec_type,
-                        })
-                        .collect::<Vec<_>>();
-
-                    CBuffer::VecVars { inner_vecs }
+                CBuffer::VecVars {
+                    inner_vecs: (0..(size / vector_size))
+                        .map(|_| (self.namer.fresh_name(), vec_type))
+                        .collect(),
                 }
             }
             CpuMemoryLevel::RF => {
@@ -605,11 +597,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 CBuffer::HeapArray { name, .. }
                                 | CBuffer::StackArray { name, .. }
                                 | CBuffer::Ptr { name, .. } => format!("{name}[_]"),
-                                CBuffer::ValueVar { name, .. }
-                                | CBuffer::SingleVecVar { name, .. } => name.clone(),
-                                CBuffer::VecVars { inner_vecs, .. } => {
-                                    inner_vecs[0].name().unwrap_or("_").to_owned()
-                                }
+                                CBuffer::ValueVar { name, .. } => name.clone(),
+                                CBuffer::VecVars { inner_vecs, .. } => inner_vecs[0].0.clone(),
                             }
                         })
                         .join(", ");
@@ -2057,26 +2046,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 Some(_) => unimplemented!(),
                 None => name.clone(),
             },
-            CBuffer::SingleVecVar { name, .. } => {
-                if let Some(reinterpret) = reinterpret {
-                    debug_assert_eq!(*expr, 0);
-                    format!("*({reinterpret} *)(&{name})")
-                } else {
-                    format!(
-                        "{}[{}]",
-                        name,
-                        expr_to_c(&self.sub_expr_bindings(expr.clone()))
-                    )
-                }
-            }
             CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
-                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
+                let (name, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
-
-                let CBuffer::SingleVecVar { name, vec_type: _ } = inner_vec_buffer else {
-                    unreachable!();
-                };
                 if let Some(reinterpret) = reinterpret {
                     debug_assert_eq!(vec_offset, 0);
                     format!("*({reinterpret} *)(&{name})")
@@ -2103,23 +2076,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             | CBuffer::Ptr { .. } => {
                 unimplemented!()
             }
-            CBuffer::SingleVecVar { name, .. } => {
-                if *expr != 0 {
-                    panic!("expr must be 0, but was: {expr:?}");
-                }
-                if reinterpret.is_some() {
-                    unimplemented!();
-                }
-                name.clone()
-            }
             CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
-                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
+                let (name, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
-
-                let CBuffer::SingleVecVar { name, vec_type: _ } = inner_vec_buffer else {
-                    unreachable!();
-                };
                 if vec_offset != 0 {
                     panic!("vec_offset must be 0, but was: {vec_offset:?}");
                 }
@@ -2162,24 +2122,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }
                 ptr_str
             }
-            CBuffer::SingleVecVar { name, .. } => {
-                if reinterpret.is_some() {
-                    unimplemented!();
-                };
-                if *expr == 0 {
-                    format!("&{name}")
-                } else {
-                    format!("&{}", self.c_index(buffer, expr, None))
-                }
-            }
             CBuffer::VecVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
-                let (inner_vec_buffer, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
+                let (name, vec_offset) = buffer.inner_vec_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
-
-                let CBuffer::SingleVecVar { name, vec_type: _ } = inner_vec_buffer else {
-                    unreachable!();
-                };
                 if reinterpret.is_some() {
                     unimplemented!();
                 };

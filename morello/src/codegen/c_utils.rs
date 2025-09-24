@@ -22,12 +22,8 @@ pub enum CBuffer {
         name: String,
         dtype: Dtype,
     },
-    SingleVecVar {
-        name: String,
-        vec_type: &'static VecType,
-    },
     VecVars {
-        inner_vecs: Vec<CBuffer>,
+        inner_vecs: Vec<(String, &'static VecType)>,
     },
     Ptr {
         name: String,
@@ -63,7 +59,6 @@ impl CBuffer {
             CBuffer::HeapArray { name, .. }
             | CBuffer::StackArray { name, .. }
             | CBuffer::ValueVar { name, .. }
-            | CBuffer::SingleVecVar { name, .. }
             | CBuffer::Ptr { name, .. } => Some(name),
             CBuffer::VecVars { .. } => None,
         }
@@ -127,17 +122,14 @@ impl CBuffer {
                 }
                 Ok(())
             }
-            CBuffer::SingleVecVar { name, vec_type } => {
+            CBuffer::VecVars { inner_vecs, .. } => {
                 let epi = if init_type == InitType::Zero {
                     " = {0}"
                 } else {
                     ""
                 };
-                writeln!(w, "{}{} {}{};", indent(depth), vec_type.name, name, epi)
-            }
-            CBuffer::VecVars { inner_vecs, .. } => {
-                for inner_vec in inner_vecs {
-                    inner_vec.emit(w, init_type, depth)?;
+                for (name, vec_type) in inner_vecs {
+                    writeln!(w, "{}{} {}{};", indent(depth), vec_type.name, name, epi)?;
                 }
                 Ok(())
             }
@@ -192,27 +184,21 @@ impl CBuffer {
                 writeln!(w, "{}free({name});", indent(depth))?;
                 Ok(())
             }
-            CBuffer::StackArray { .. }
-            | CBuffer::ValueVar { .. }
-            | CBuffer::SingleVecVar { .. } => Ok(()),
-            CBuffer::VecVars { inner_vecs, .. } => {
-                for inner_vec in inner_vecs {
-                    inner_vec.emit_free(w, depth)?;
-                }
+            CBuffer::StackArray { .. } | CBuffer::ValueVar { .. } | CBuffer::VecVars { .. } => {
                 Ok(())
             }
             CBuffer::Ptr { .. } => unimplemented!(),
         }
     }
 
-    /// Returns a specific [CBuffer::SingleVecVar] and its internal offset.
+    /// Returns a specific vector register name and its internal offset.
     ///
     /// This checks the upper and lower bounds of the given expression. If they both fall inside the
     /// same single vector, this returns that vector. Otherwise, it panics.
     pub(super) fn inner_vec_from_expr<T>(
         &self,
         expr: &NonAffineExpr<T>,
-    ) -> (&CBuffer, NonAffineExpr<T>)
+    ) -> (String, NonAffineExpr<T>)
     where
         T: Bounds + Clone + fmt::Debug,
         NonAffineExpr<T>: Rem<i32, Output = NonAffineExpr<T>>,
@@ -220,9 +206,7 @@ impl CBuffer {
         let CBuffer::VecVars { inner_vecs, .. } = self else {
             unreachable!();
         };
-        let CBuffer::SingleVecVar { name: _, vec_type } = inner_vecs[0] else {
-            unreachable!();
-        };
+        let (_, vec_type) = inner_vecs[0];
 
         let AffineForm(linear_terms, _) = expr;
         assert!(
@@ -241,10 +225,8 @@ impl CBuffer {
             "expr spans multiple vectors: {expr:?}"
         );
 
-        (
-            &inner_vecs[usize::try_from(min_vec_idx).unwrap()],
-            expr.clone() % vector_size,
-        )
+        let (iv_name, _) = &inner_vecs[usize::try_from(min_vec_idx).unwrap()];
+        (iv_name.clone(), expr.clone() % vector_size)
     }
 }
 
