@@ -210,13 +210,8 @@ impl Layout {
         self.contig = self.contiguous_none();
     }
 
-    pub fn estimate_cache_lines<Tgt: Target>(
-        &self,
-        shape: &[DimSize],
-        dtype: Dtype,
-        contig: Contig,
-    ) -> u32 {
-        let Layout { dims, contig: _ } = self;
+    pub fn estimate_cache_lines<Tgt: Target>(&self, shape: &[DimSize], dtype: Dtype) -> u32 {
+        let Layout { ref dims, contig } = *self;
 
         assert!(
             usize::from(contig) <= dims.len(),

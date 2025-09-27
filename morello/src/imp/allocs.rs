@@ -156,16 +156,14 @@ pub(crate) fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tg
     let src_hit_cost = src.level().cache_hit_cost();
     let dest_hit_cost = dest.level().cache_hit_cost();
 
-    let src_cache_lines = MainCost::from(src.layout().estimate_cache_lines::<Tgt>(
-        src.shape(),
-        src.dtype(),
-        src.contiguous_abs(),
-    ));
-    let dest_cache_lines = MainCost::from(dest.layout().estimate_cache_lines::<Tgt>(
-        dest.shape(),
-        dest.dtype(),
-        dest.contiguous_abs(),
-    ));
+    let src_cache_lines = MainCost::from(
+        src.layout()
+            .estimate_cache_lines::<Tgt>(src.shape(), src.dtype()),
+    );
+    let dest_cache_lines = MainCost::from(
+        dest.layout()
+            .estimate_cache_lines::<Tgt>(dest.shape(), dest.dtype()),
+    );
 
     let src_cost = src_hit_cost * src_cache_lines;
     let dest_cost = dest_hit_cost * dest_cache_lines;
