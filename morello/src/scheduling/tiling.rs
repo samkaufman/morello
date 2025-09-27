@@ -1639,4 +1639,83 @@ mod tests {
             spec_app.1[2]
         );
     }
+
+    #[test]
+    fn test_nonmultiple_tiling_shapes() {
+        let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
+            [1, 2048, 128, 2048],
+            (f32, GL, row_major),
+            (f32, GL, row_major),
+            (f32, GL, row_major),
+            serial
+        ));
+        spec.canonicalize().unwrap();
+
+        let action = Action::TileOut(TileOut::MultiLoop {
+            output_shape: shape![1, 6, 16],
+            parallel: false,
+        });
+        let implementation = action.apply(&spec).unwrap();
+
+        let ImplNode::Loop(loop_node) = implementation else {
+            panic!("Expected Loop from TileOut");
+        };
+
+        assert_eq!(
+            loop_node.bodies.len(),
+            2,
+            "Should have main body and tail body"
+        );
+
+        for (i, body) in loop_node.bodies.iter().enumerate() {
+            if let ImplNode::SpecApp(spec_app) = body {
+                let shapes = spec_app.0 .0.parameter_shapes();
+                let lhs_shape = &shapes[0];
+                let rhs_shape = &shapes[1];
+                let output_shape = &shapes[2];
+
+                if i == 0 {
+                    // Main body
+                    assert_eq!(
+                        &lhs_shape[..],
+                        &[nz!(1u32), nz!(6u32), nz!(128u32)],
+                        "Main body LHS should be [1,6,128], got {:?}",
+                        lhs_shape
+                    );
+                    assert_eq!(
+                        &rhs_shape[..],
+                        &[nz!(1u32), nz!(128u32), nz!(16u32)],
+                        "RHS should be [1,128,16], got {:?}",
+                        rhs_shape
+                    );
+                    assert_eq!(
+                        &output_shape[..],
+                        &[nz!(1u32), nz!(6u32), nz!(16u32)],
+                        "Main body output should be [1,6,16], got {:?}",
+                        output_shape
+                    );
+                } else {
+                    // Tail body
+                    assert_eq!(
+                        &lhs_shape[..],
+                        &[nz!(1u32), nz!(2u32), nz!(128u32)],
+                        "Tail body LHS should be [1,2,128], got {:?}",
+                        lhs_shape
+                    );
+                    assert_eq!(
+                        &rhs_shape[..],
+                        &[nz!(1u32), nz!(128u32), nz!(2048u32)],
+                        "RHS should be [1,128,2048], got {:?}",
+                        rhs_shape
+                    );
+                    assert_eq!(
+                        &output_shape[..],
+                        &[nz!(1u32), nz!(2u32), nz!(2048u32)],
+                        "Tail body output should be [1,2,2048], got {:?}",
+                        output_shape
+                    );
+                }
+            }
+        }
+    }
 }
