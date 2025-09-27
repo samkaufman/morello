@@ -326,10 +326,12 @@ impl MemVec {
         MemVec([0; LEVEL_COUNT])
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

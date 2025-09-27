@@ -125,10 +125,12 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         TensorSpec { shape, dtype, aux }
     }
 
+    #[inline]
     pub fn layout(&self) -> &Layout {
         &self.aux.layout
     }
 
+    #[inline]
     pub fn set_layout(&mut self, new_layout: Layout) {
         self.aux.layout = new_layout;
     }
@@ -170,6 +172,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         }
     }
 
+    #[inline]
     pub fn shape(&self) -> &[DimSize] {
         &self.shape
     }
@@ -178,24 +181,29 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         DimSize::new(self.shape.iter().map(|d| d.get()).product()).unwrap()
     }
 
+    #[inline]
     pub fn dtype(&self) -> Dtype {
         self.dtype
     }
 
     // TODO: Remove. Should not be public.
+    #[inline]
     pub(crate) fn contiguous_abs(&self) -> Contig {
         self.aux.layout.contig()
     }
 
     // TODO: Remove. This is just sugar for Layout's is_fully_contiguous().
+    #[inline]
     pub fn is_contiguous(&self) -> bool {
         self.aux.layout.is_fully_contiguous()
     }
 
+    #[inline]
     pub const fn level(&self) -> <Tgt as Target>::Level {
         self.aux.level
     }
 
+    #[inline]
     pub fn vector_size(&self) -> Option<DimSize> {
         self.aux.vector_size
     }

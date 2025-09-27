@@ -826,10 +826,12 @@ impl<V: View> Tile<V> {
         })
     }
 
+    #[inline]
     pub fn shape(&self) -> &[DimSize] {
         &self.shape
     }
 
+    #[inline]
     pub fn step_sizes(&self) -> &[DimSize] {
         &self.step_sizes
     }
@@ -1072,10 +1074,12 @@ impl<V: View> BoundaryTile<V> {
         })
     }
 
+    #[inline]
     pub fn shape(&self) -> &[DimSize] {
         &self.shape
     }
 
+    #[inline]
     pub fn offsets(&self) -> &[u32] {
         &self.offsets
     }

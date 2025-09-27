@@ -1184,6 +1184,7 @@ impl PrimitiveSpecType {
         }
     }
 
+    #[inline]
     pub fn operand_count(&self) -> usize {
         self.operand_directions().len()
     }

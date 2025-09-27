@@ -274,10 +274,12 @@ impl BuiltArtifact {
         }
     }
 
+    #[inline]
     pub fn binary_path(&self) -> &Path {
         &self.binary_path
     }
 
+    #[inline]
     pub fn parameter_dtypes(&self) -> &[Dtype] {
         &self.parameter_dtypes
     }

@@ -373,6 +373,7 @@ impl FilesDatabase {
         }
     }
 
+    #[inline]
     pub fn max_k(&self) -> Option<usize> {
         Some(self.k.into())
     }

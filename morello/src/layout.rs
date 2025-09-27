@@ -182,6 +182,7 @@ impl Layout {
         self.dims.len().try_into().unwrap()
     }
 
+    #[inline]
     pub fn contiguous_none(&self) -> Contig {
         0
     }
@@ -190,14 +191,17 @@ impl Layout {
         0..=self.contiguous_full()
     }
 
+    #[inline]
     pub fn is_valid_contiguous_abs(&self, contig: Contig) -> bool {
         contig <= self.contiguous_full()
     }
 
+    #[inline]
     pub(crate) fn contig(&self) -> Contig {
         self.contig
     }
 
+    #[inline]
     pub fn is_fully_contiguous(&self) -> bool {
         self.contig == self.contiguous_full()
     }
@@ -208,10 +212,12 @@ impl Layout {
         self.contig = contig;
     }
 
+    #[inline]
     pub fn set_contiguous_full(&mut self) {
         self.contig = self.contiguous_full();
     }
 
+    #[inline]
     pub fn set_contiguous_none(&mut self) {
         self.contig = self.contiguous_none();
     }

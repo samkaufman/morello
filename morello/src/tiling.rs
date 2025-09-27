@@ -45,10 +45,12 @@ impl Tiling {
             .all(|(s, t)| *s == *t)
     }
 
+    #[inline]
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
+    #[inline]
     pub fn step_sizes(&self) -> &[DimSize] {
         &self.step_sizes
     }
