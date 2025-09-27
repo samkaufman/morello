@@ -1320,25 +1320,25 @@ mod tests {
             // for matmul_final's parameter 1
             TensorSpecAux {
                 level: CpuMemoryLevel::GL,
-                layout: row_major(3),
+                layout: row_major(&matmul_final.parameter_shape(1)),
                 vector_size: None,
             },
             // for matmul_initial's parameter 0
             TensorSpecAux {
                 level: CpuMemoryLevel::GL,
-                layout: row_major(3),
+                layout: row_major(&matmul_initial.parameter_shape(0)),
                 vector_size: None,
             },
             // for matmul_initial's parameter 1
             TensorSpecAux {
                 level: CpuMemoryLevel::GL,
-                layout: row_major(3),
+                layout: row_major(&matmul_initial.parameter_shape(1)),
                 vector_size: None,
             },
-            // for matmul_initial's parameter 2 (final output)
+            // for matmul_final's parameter 2 (final output)
             TensorSpecAux {
                 level: CpuMemoryLevel::GL,
-                layout: row_major(3),
+                layout: row_major(&matmul_final.parameter_shape(2)),
                 vector_size: None,
             },
         ];
