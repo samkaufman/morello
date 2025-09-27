@@ -1304,6 +1304,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_compose_non_multiple_tiling() {
+        let matmul_final = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![2, 2048, 2048, 32],
+            dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
+        };
+        let matmul_initial = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![2, 2048, 256, 2048],
+            dtypes: vec![Dtype::Float32, Dtype::Float32, Dtype::Float32],
+        };
+        let operand_auxes: Vec<TensorSpecAux<Avx2Target>> = vec![
+            // for matmul_final's parameter 1
+            TensorSpecAux {
+                level: CpuMemoryLevel::GL,
+                layout: row_major(3),
+                vector_size: None,
+            },
+            // for matmul_initial's parameter 0
+            TensorSpecAux {
+                level: CpuMemoryLevel::GL,
+                layout: row_major(3),
+                vector_size: None,
+            },
+            // for matmul_initial's parameter 1
+            TensorSpecAux {
+                level: CpuMemoryLevel::GL,
+                layout: row_major(3),
+                vector_size: None,
+            },
+            // for matmul_initial's parameter 2 (final output)
+            TensorSpecAux {
+                level: CpuMemoryLevel::GL,
+                layout: row_major(3),
+                vector_size: None,
+            },
+        ];
+        let mut compose_spec = Spec(
+            LogicalSpec::Compose {
+                components: vec![matmul_final, matmul_initial],
+                operand_auxes,
+                serial_only: false,
+            },
+            Avx2Target::max_mem(),
+        );
+        compose_spec.canonicalize().unwrap();
+
+        let tile_action = Action::TileOut(TileOut::MultiLoop {
+            output_shape: shape![1, 6, 16],
+            parallel: false,
+        });
+        let impl_node = tile_action.apply(&compose_spec).unwrap();
+        let ImplNode::Loop(loop_impl) = impl_node else {
+            panic!("Expected Loop Impl");
+        };
+
+        let actual_shapes: Vec<Vec<_>> = loop_impl
+            .bodies
+            .iter()
+            .map(|body| match body {
+                ImplNode::SpecApp(spec_app) => spec_app.0 .0.parameter_shapes(),
+                o => panic!("Expected SpecApp body, got {o:?}"),
+            })
+            .collect();
+        assert_eq!(
+            actual_shapes,
+            [
+                vec![
+                    shape![1, 2048, 16],
+                    shape![1, 6, 256],
+                    shape![1, 256, 2048],
+                    shape![1, 6, 16]
+                ],
+                // boundary case below doesn't tile batch or output N dimension
+                vec![
+                    shape![2, 2048, 32],
+                    shape![2, 2, 256],
+                    shape![2, 256, 2048],
+                    shape![2, 2, 32]
+                ],
+            ]
+        );
+    }
+
     proptest! {
         /// Test that [update_aux_for_tiling] preserves auxiliary information when shapes are
         /// identical.
