@@ -1190,6 +1190,49 @@ mod tests {
     }
 
     #[test]
+    fn test_tile_out_within_packed_dimensions() {
+        let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
+            [1, 2, 64, 4],
+            (f32, CpuMemoryLevel::L1, crate::layout![2, 1, 0, 1 p(8)]),
+            (f32, CpuMemoryLevel::L1, crate::layout![2, 1, 0, 1 p(8)]),
+            (f32, CpuMemoryLevel::L1, crate::layout![2, 1, 0, 1 p(2)])
+        ));
+        spec.canonicalize().unwrap();
+
+        let tile_action = Action::TileOut(TileOut::SingleLoop {
+            dim: 2,
+            size: nz!(2u32),
+            parallel: false,
+        });
+        tile_action
+            .apply(&spec)
+            .expect("tiling within a Packed dim. should succeed");
+    }
+
+    #[test]
+    fn test_tile_out_within_vector_register_disallowed() {
+        let mut spec: Spec<Avx2Target> = spec!(Move(
+            [64, 1],
+            (f32, CpuMemoryLevel::VRF, crate::layout![0, 1, 0 p(8)], 8),
+            (f32, CpuMemoryLevel::VRF, crate::layout![0, 1, 0 p(8)], 8)
+        ));
+        spec.canonicalize().expect("spec should canonicalize");
+
+        let tile_action = Action::TileOut(TileOut::SingleLoop {
+            dim: 0,
+            size: nz!(2u32),
+            parallel: false,
+        });
+        let result = tile_action.apply(&spec);
+        assert!(matches!(
+            result,
+            Err(ApplyError::NotApplicable(
+                NotApplicableReason::TileShapeInvalid
+            ))
+        ));
+    }
+
+    #[test]
     fn test_tile_out_daufm() {
         // Create a SoftmaxDenominatorAndUnscaledFromMax Spec
         let mut spec = Spec::<Avx2Target>(

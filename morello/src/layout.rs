@@ -8,7 +8,7 @@ use crate::{
 use itertools::Itertools;
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 use std::fmt;
 use std::{collections::HashSet, fmt::Display, hash::Hash};
 
@@ -507,6 +507,9 @@ impl Layout {
         self.contig = new_contig;
     }
 
+    /// Converts Packed dims that exactly match the tile shape back to dynamic
+    /// dimensions and removes the now-redundant outer references to those logical
+    /// dimensions.
     fn drop_unneeded_packings(&mut self, tile_shape: &[DimSize]) {
         let Layout {
             ref mut dims,
@@ -514,66 +517,86 @@ impl Layout {
         } = *self;
         let first_contig_idx = dims.len() - usize::from(contig);
 
-        // Count the number of packings applied to each logical dimension.
-        // Note that `packings` is larger than strictly necessary because it includes values for
-        // size-1 logical dimensions as well, which may not have corresponding PhysDims.
-        let packings_len = usize::from(dims.iter().map(|(d, _)| *d + 1).max().unwrap_or(0));
-        let mut packings = vec![0; packings_len];
-        for (logical_dim, s) in dims.as_slice() {
-            if matches!(s, PhysDim::Packed(_)) {
-                packings[usize::from(*logical_dim)] += 1;
+        // Precompute whether there is any OUTER OddEven for the same logical dim at each index.
+        // This is used later to avoid converting Packed dimensions to Dynamic if there is an
+        // outer OddEven, even if the volume is covered.
+        let outer_oe_exists = {
+            let mut outer_oddeven_for_ld: SmallVec<[bool; 5]> = smallvec![false; tile_shape.len()];
+            let mut buf: Vec<bool> = Vec::with_capacity(dims.len());
+            for (ld, pd) in dims.iter().copied() {
+                let ld_us = usize::from(ld);
+                buf.push(outer_oddeven_for_ld[ld_us]);
+                if matches!(pd, PhysDim::OddEven(_)) {
+                    outer_oddeven_for_ld[ld_us] = true;
+                }
             }
-        }
+            buf
+        };
 
-        // Walk from physically innermost to outermost, clearing packings unique to a logical
-        // dimension. `new_contig` becomes the new contig. with previously-counted-as-contiguous
-        // dimensions removed whenever they are redundant.
-        //
-        // Cleared packings are recorded in `logical_dims_noneified` to be used in the next step.
-        // Logical dimensions are mapped to the index of the cleared packing for that dimension.
-        let mut logical_dims_noneified = vec![None; packings_len];
-        let mut new_contig = contig;
+        let mut remaining: SmallVec<[_; 5]> = tile_shape.iter().map(|d| d.get()).collect();
+        let mut logical_dims_noneified: SmallVec<[_; 5]> = smallvec![None; tile_shape.len()];
         for idx in (0..dims.len()).rev() {
             let (logical_dim, s) = dims[idx];
-            let logical_dim_usize = usize::from(logical_dim);
-            if packings[logical_dim_usize] != 1 {
-                continue;
-            }
+            let logical_dim_us = usize::from(logical_dim);
             match s {
-                PhysDim::Packed(fixed_size) if tile_shape[logical_dim_usize] == fixed_size => {
-                    dims[idx] = (logical_dim, PhysDim::Dynamic);
-                    logical_dims_noneified[logical_dim_usize] = Some(idx);
+                PhysDim::Packed(fixed_size) => {
+                    let rem = &mut remaining[logical_dim_us];
+                    if rem.is_multiple_of(fixed_size.get()) {
+                        if !outer_oe_exists[idx] && *rem == fixed_size.get() {
+                            dims[idx] = (logical_dim, PhysDim::Dynamic);
+                            if logical_dims_noneified[logical_dim_us].is_none() {
+                                logical_dims_noneified[logical_dim_us] = Some(idx);
+                            }
+                        }
+                        *rem /= fixed_size.get();
+                    } else if *rem != 0 && fixed_size.get() % *rem == 0 {
+                        if !outer_oe_exists[idx] {
+                            dims[idx] = (logical_dim, PhysDim::Dynamic);
+                            if logical_dims_noneified[logical_dim_us].is_none() {
+                                logical_dims_noneified[logical_dim_us] = Some(idx);
+                            }
+                        }
+                        *rem = 1;
+                    }
                 }
-                PhysDim::Dynamic
-                    if idx >= first_contig_idx
-                        && logical_dims_noneified[logical_dim_usize].is_some() =>
-                {
-                    // We know this will be 1 since we'll have already visited the packed dimension
-                    // with the same size as the logical dimension.
-                    new_contig -= 1;
+                PhysDim::OddEven(oe_size) => {
+                    let rem = &mut remaining[logical_dim_us];
+                    if rem.is_multiple_of(oe_size.get()) {
+                        *rem /= oe_size.get();
+                    } else if *rem != 0 && oe_size.get() % *rem == 0 {
+                        *rem = 1;
+                    }
                 }
-                _ => {}
+                PhysDim::Dynamic => {}
             }
         }
 
-        // Layouts only include a single dynamic size reference to a logical dimension. If any
-        // packings were cleared (changed to dynamic size) in the previous step, then any outer
-        // reference to that same dimension is removed. (contig. was already updated to be
-        // consistent with this removal by the previous step.)
-        let mut i = 0;
-        dims.retain(|(logical_dim, _)| {
-            let logical_dim_usize = usize::from(*logical_dim);
-            let should_retain =
-                if let Some(noneified_idx) = logical_dims_noneified[logical_dim_usize] {
-                    i >= noneified_idx
-                } else {
-                    true
-                };
-            i += 1;
-            should_retain
-        });
+        // Rebuild dims while counting drops in the contiguous suffix and collapsing
+        // adjacent Dynamics.
+        let mut drops_in_contig: usize = 0;
+        let mut merged: Vec<(u8, PhysDim)> = Vec::with_capacity(dims.len());
+        for (idx, (ld, pd)) in dims.iter().copied().enumerate() {
+            let logical_dim_us = usize::from(ld);
+            let should_skip = match (logical_dims_noneified[logical_dim_us], merged.last(), pd) {
+                (Some(nidx), _, _) if idx < nidx => true,
+                (_, Some(&(l, PhysDim::Dynamic)), PhysDim::Dynamic) if l == ld => true,
+                _ => false,
+            };
+            if !should_skip {
+                merged.push((ld, pd));
+            } else if idx >= first_contig_idx {
+                drops_in_contig += 1;
+            }
+        }
+        *dims = merged;
 
-        self.contig = new_contig;
+        // Update contiguousness: subtract each dropped dimension that was previously counted as
+        // contiguous (i.e., within the contiguous suffix). Clamp to the new number of dims.
+        self.contig = usize::from(contig)
+            .saturating_sub(drops_in_contig)
+            .min(dims.len())
+            .try_into()
+            .unwrap();
     }
 
     // TODO: Return iterator instead?
@@ -582,23 +605,32 @@ impl Layout {
         let mut physical_shape = Shape::with_capacity(dims.len());
         let mut logical_shape_remaining: SmallVec<[_; 5]> =
             logical_shape.iter().map(|x| x.get()).collect();
+        let mut tiled_packing: SmallVec<[bool; 5]> = smallvec![false; logical_shape.len()];
         for (dim, phys_dim) in dims.iter().rev() {
             let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
             debug_assert_ne!(
-                remaining_size, &0,
-                "Logical dimension {dim} with unpacked sized already seen in {dims:?}"
+                *remaining_size, 0,
+                "Dynamic dimension {dim} already seen in {dims:?}"
             );
             match phys_dim {
-                PhysDim::OddEven(s) | PhysDim::Packed(s) => {
-                    if *remaining_size % s.get() != 0 {
+                PhysDim::OddEven(pack_size) | PhysDim::Packed(pack_size) => {
+                    if *remaining_size < pack_size.get() {
+                        if tiled_packing[usize::from(*dim)] {
+                            return Err(LayoutError::InvalidShape(logical_shape.into()));
+                        }
+                        physical_shape.push((*remaining_size).try_into().unwrap());
+                        *remaining_size = 1;
+                        tiled_packing[usize::from(*dim)] = true;
+                    } else if *remaining_size % pack_size.get() != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
+                    } else {
+                        physical_shape.push(*pack_size);
+                        *remaining_size /= pack_size.get();
                     }
-                    physical_shape.push(*s);
-                    *remaining_size /= s.get();
                 }
                 PhysDim::Dynamic => {
                     physical_shape.push(DimSize::new(*remaining_size).unwrap());
-                    *remaining_size = 0; // zero is a special value for error detection
+                    *remaining_size = 0; // zero indicates we've seen Dynamic
                 }
             }
         }
@@ -645,6 +677,11 @@ impl Layout {
             );
             match fixed_size {
                 PhysDim::OddEven(s) | PhysDim::Packed(s) => {
+                    if remaining_size < s.get() {
+                        physical_shape.push((idx, remaining_size.try_into().unwrap()));
+                        remaining_size = 1;
+                        continue;
+                    }
                     if remaining_size % *s != 0 {
                         return Err(LayoutError::InvalidShape(logical_shape.into()));
                     }
@@ -942,11 +979,12 @@ mod tests {
 
     #[test]
     fn test_expand_physical_shape_3() {
+        // Layout doesn't apply to 1x64 because there is no Dynamic for dim 0.
         let layout = layout![0 p(4), 1];
-        assert!(matches!(
+        assert_eq!(
             layout.expand_physical_shape(&shape![1, 64]),
-            Err(LayoutError::InvalidShape(_))
-        ));
+            Ok(shape![1, 64])
+        );
     }
 
     #[test]
@@ -962,19 +1000,18 @@ mod tests {
     #[test]
     fn test_expand_physical_shape_5() {
         let layout = layout![0, 1, 0 p(4)];
-        assert!(matches!(
+        assert_eq!(
             layout.expand_physical_shape(&shape![2, 64]),
-            Err(LayoutError::InvalidShape(_)),
-        ));
+            Ok(shape![1, 64, 2]),
+        );
     }
 
     #[test]
     fn test_expand_physical_shape_6() {
+        // Layout only applies to one shape: [2].
         let layout = layout![0 p(2)];
-        assert!(matches!(
-            layout.expand_physical_shape(&shape![1]),
-            Err(LayoutError::InvalidShape(_)),
-        ));
+        let expanded = layout.expand_physical_shape(&shape![1]);
+        assert_eq!(expanded, Ok(shape![1]));
     }
 
     #[test]
@@ -985,6 +1022,30 @@ mod tests {
             matches!(expanded, Err(LayoutError::InvalidShape(_))),
             "Expected LayoutError::InvalidShape, but was: {expanded:?}",
         );
+    }
+
+    #[test]
+    fn test_expand_physical_shape_8() {
+        let layout = layout![1, 0, 1 p(8)];
+        let expanded = layout.expand_physical_shape(&shape![10, 4]);
+        assert_eq!(expanded, Ok(shape![1, 10, 4]));
+    }
+
+    #[test]
+    fn test_expand_physical_shape_9() {
+        let layout = layout![1, 0, 1 p(4), 0 p(2), 1 p(4)];
+        let expanded = layout.expand_physical_shape(&shape![10, 8]);
+        assert_eq!(expanded, Ok(shape![1, 5, 2, 2, 4]))
+    }
+
+    #[test]
+    fn test_expand_physical_shape_10() {
+        let layout = layout![1, 0, 1 p(4), 0 p(2), 1 p(4)];
+        let expanded = layout.expand_physical_shape(&shape![10, 6]);
+        assert!(
+            matches!(expanded, Err(LayoutError::InvalidShape(_))),
+            "Expected LayoutError::InvalidShape, but was: {expanded:?}",
+        )
     }
 
     #[test]
@@ -1123,6 +1184,59 @@ mod tests {
         assert_eq!(layout, expected);
     }
 
+    #[test]
+    fn test_drop_unneeded_packings_3() {
+        let mut layout = layout![0, 1, 0 p(4), 1, 0 p(4)];
+        let expected = layout![1, 0];
+        layout.drop_unneeded_packings(&[nz!(4u32), nz!(1024u32)]);
+        layout.merge_consecutive_dimensions(); // TODO: Remove
+        assert_eq!(layout, expected);
+    }
+
+    #[test]
+    fn test_drop_unneeded_packings_4() {
+        let mut layout = layout![0, 1, 0 p(4), 1, 0 p(4)];
+        let expected = layout![1, 0, 1, 0 p(4)];
+        layout.drop_unneeded_packings(&[nz!(16u32), nz!(1024u32)]);
+        layout.merge_consecutive_dimensions(); // TODO: Remove
+        assert_eq!(layout, expected);
+    }
+
+    #[test]
+    fn test_update_for_tiling_can_tile_packed_dimension() {
+        let layout = layout![0, 2, 1, 2 p(32)];
+        let tiled_layout = layout
+            .update_for_tiling(&shape![2, 4, 64], &shape![1, 4, 16])
+            .expect("tiling within a packed physical dimension should succeed");
+        let mut expected_layout = layout![1, 2];
+        expected_layout.contig = 1;
+        assert_eq!(tiled_layout, expected_layout);
+    }
+
+    #[test]
+    fn test_drop_unneeded_packings_oddeven_contributes_volume() {
+        let mut layout = layout![1, 0 oe(4), 0 p(2)];
+        let expected = layout![1, 0 oe(4), 0 p(2)];
+        layout.drop_unneeded_packings(&[nz!(8u32), nz!(16u32)]);
+        assert_eq!(layout, expected);
+    }
+
+    #[test]
+    fn test_drop_unneeded_packings_oddeven_innermost_drops_outer_packed() {
+        let mut layout = layout![0, 1, 0 p(2), 0 oe(4)];
+        let expected = layout![1, 0, 0 oe(4)];
+        layout.drop_unneeded_packings(&[nz!(8u32), nz!(16u32)]);
+        assert_eq!(layout, expected);
+    }
+
+    #[test]
+    fn test_drop_unneeded_packings_no_change_when_packed_not_noneified_and_oddeven_consumes() {
+        let mut layout = layout![0 oe(6), 1, 0 p(4)];
+        let expected = layout![0 oe(6), 1, 0 p(4)];
+        layout.drop_unneeded_packings(&[nz!(12u32), nz!(16u32)]);
+        assert_eq!(layout, expected);
+    }
+
     proptest! {
         #[test]
         fn test_expand_physical_shape_preserves_volume(
@@ -1146,11 +1260,10 @@ mod tests {
             let lhs = layout.expand_physical_shape(&shape);
 
             let mut rhs = Ok(Shape::with_capacity(physical_rank));
-            for i in 0..physical_rank {
+            for i in 0..u8::try_from(physical_rank).unwrap() {
                 if rhs.is_err() {
                     break;
                 }
-                let i = u8::try_from(i).unwrap();
                 match layout.physical_size(i, &shape) {
                     Ok(rhs_size) => rhs.as_mut().unwrap().push(rhs_size),
                     Err(e) => rhs = Err(e),
