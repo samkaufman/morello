@@ -1,7 +1,8 @@
 use super::c_utils::{c_type, VecType};
 use crate::target::TargetId;
 
-use std::{collections::HashSet, fmt};
+use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 
 #[derive(Default)]
 pub struct HeaderEmitter {
@@ -15,6 +16,7 @@ pub struct HeaderEmitter {
     pub emit_sum8: bool,
     pub emit_cvtbf16_fp32: bool,
     pub emit_max: bool,
+    pub benchmark_counters: BTreeMap<String, String>,
 }
 
 impl HeaderEmitter {
@@ -29,6 +31,9 @@ impl HeaderEmitter {
         }
         if self.emit_float_include {
             out.write_str("#include <float.h>\n")?;
+        }
+        if !self.benchmark_counters.is_empty() {
+            out.write_str("#include <stdatomic.h>\n")?;
         }
         match target {
             TargetId::Avx2 | TargetId::Avx512 => {
@@ -59,6 +64,13 @@ impl HeaderEmitter {
             out.write_char('\n')?;
         }
 
+        if !self.benchmark_counters.is_empty() {
+            for counter_var in self.benchmark_counters.values() {
+                out.write_str(&format!("static _Atomic long long {counter_var} = 0;\n"))?;
+            }
+            out.write_char('\n')?;
+        }
+
         for vec_type in &self.vector_type_defs {
             // Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
             // values. (vec_bytes must be a multiple of the c_type size.)
@@ -75,4 +87,43 @@ impl HeaderEmitter {
 
         Ok(())
     }
+
+    /// Return a unique C name for an Impl benchmark counter name.
+    pub fn register_benchmark_counter(&mut self, counter: &str) -> String {
+        self.emit_benchmarking = true;
+        if let Some(existing) = self.benchmark_counters.get(counter) {
+            return existing.clone();
+        }
+
+        let base_ident = sanitize_counter_identifier(counter);
+        let mut candidate = base_ident.clone();
+        let mut disambiguator = 1;
+        while self
+            .benchmark_counters
+            .values()
+            .any(|existing| existing == &candidate)
+        {
+            candidate = format!("{base_ident}_{disambiguator}");
+            disambiguator += 1;
+        }
+
+        self.benchmark_counters
+            .insert(counter.to_owned(), candidate.clone());
+        candidate
+    }
+}
+
+fn sanitize_counter_identifier(counter: &str) -> String {
+    let mut ident = String::from("benchmark_");
+    for ch in counter.chars() {
+        if ch.is_ascii_alphanumeric() {
+            ident.push(ch.to_ascii_lowercase());
+        } else {
+            ident.push('_');
+        }
+    }
+    if ident.ends_with('_') {
+        ident.push('0');
+    }
+    ident
 }

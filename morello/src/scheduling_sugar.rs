@@ -4,6 +4,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::functions::FunctionApp;
 use crate::imp::subspecs::SpecApp;
+use crate::imp::timing::TimedRegion;
 use crate::imp::{Impl, ImplNode};
 use crate::layout::LayoutBuilder;
 use crate::scheduling::broadcast_first::BroadcastFirst;
@@ -21,8 +22,9 @@ use crate::scheduling::{Action, ApplyError};
 use crate::search::top_down;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
-use crate::views::ViewE;
+use crate::views::{Param, ViewE};
 use nonzero::nonzero as nz;
+use std::convert::TryFrom;
 use std::iter;
 
 /// A trait extending [ImplNode]s and [Spec]s with methods for more conveniently applying [Action]s.
@@ -96,6 +98,7 @@ pub trait SchedulingSugar<Tgt: Target> {
         layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt>;
+    fn time<S: Into<String>>(&self, counter_name: S) -> ImplNode<Tgt>;
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt>;
     fn synthesize(&self, db: &FilesDatabase) -> ImplNode<Tgt>
@@ -356,6 +359,21 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         apply_unwrap(self, action)
     }
 
+    fn time<S: Into<String>>(&self, counter_name: S) -> ImplNode<Tgt> {
+        let args = self
+            .0
+            .parameters()
+            .into_iter()
+            .enumerate()
+            .map(|(i, spec)| {
+                let idx = u8::try_from(i).expect("parameter index overflow");
+                ViewE::Param(Param::new(idx, spec))
+            })
+            .collect::<Vec<_>>();
+        let spec_app = SpecApp::new(self.clone(), args);
+        ImplNode::TimedRegion(TimedRegion::new(counter_name.into(), spec_app.into()))
+    }
+
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
         let action = Action::Select(Select(kernel.into(), false));
         apply_unwrap(self, action)
@@ -543,6 +561,10 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         apply_to_leaf_spec(self, |spec| {
             spec.broadcast_first(level, layout, vector_size)
         })
+    }
+
+    fn time<S: Into<String>>(&self, counter_name: S) -> ImplNode<Tgt> {
+        apply_to_leaf_spec(self, move |spec| spec.time(counter_name.into()))
     }
 
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {

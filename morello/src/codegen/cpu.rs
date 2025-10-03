@@ -39,6 +39,7 @@ pub struct CpuCodeGenerator<Tgt: Target> {
     pub headers: HeaderEmitter,
     pub kernel_name: String,
     pub thread_style: CpuCodeGenThreadStyle,
+    pub benchmark: bool,
 }
 
 #[derive(Default)]
@@ -49,8 +50,11 @@ pub enum CpuCodeGenThreadStyle {
 }
 
 impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(benchmark: bool) -> Self {
+        Self {
+            benchmark,
+            ..Self::default()
+        }
     }
 
     /// Write a pretty-printed Impl as a C comment.
@@ -139,7 +143,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
         self.headers.emit(Tgt::target_id(), out)?;
         out.write_char('\n')?;
-        if bench {
+        if bench && !self.headers.emit_benchmarking {
             out.write_str(include_str!("../codegen/partials/benchmarking.c"))?;
             out.write_str("\n\n")?;
         }
@@ -201,7 +205,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         writeln!(out, "}}")
     }
 
-    pub fn emit_standard_main<W: Write>(
+    pub fn emit_main<W: Write>(
+        &mut self,
+        top_arg_tensors: &[Rc<Tensor<Tgt>>],
+        out: &mut W,
+    ) -> fmt::Result {
+        if self.benchmark {
+            self.emit_benchmarking_main(top_arg_tensors, out)
+        } else {
+            self.emit_standard_main(top_arg_tensors, out)
+        }
+    }
+
+    fn emit_standard_main<W: Write>(
         &mut self,
         top_arg_tensors: &[Rc<Tensor<Tgt>>],
         out: &mut W,
@@ -211,6 +227,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
         writeln!(main_body_str, "int main(int argc, char *argv[]) {{")?;
         depth += 1;
+
+        let counter_vars: Vec<String> = self.headers.benchmark_counters.values().cloned().collect();
+        if !counter_vars.is_empty() {
+            for counter_var in &counter_vars {
+                writeln!(
+                    main_body_str,
+                    "{}atomic_store_explicit(&{}, 0, memory_order_seq_cst);",
+                    indent(depth),
+                    counter_var
+                )?;
+            }
+            writeln!(main_body_str)?;
+        }
 
         // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
         // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
@@ -270,6 +299,34 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         self.emit_print_tensor(top_arg_tensors.last().unwrap(), depth, &mut main_body_str)?;
         writeln!(main_body_str)?;
 
+        let counter_entries: Vec<(String, String)> = self
+            .headers
+            .benchmark_counters
+            .iter()
+            .map(|(name, var)| (name.clone(), var.clone()))
+            .collect();
+        if !counter_entries.is_empty() {
+            for (idx, (counter_name, counter_var)) in counter_entries.iter().enumerate() {
+                let value_var = format!("{}_value_{idx}", counter_var);
+                let escaped_name = escape_c_string(counter_name);
+                writeln!(main_body_str, "{}{{", indent(depth))?;
+                writeln!(
+                    main_body_str,
+                    "{}long long {value_var} = atomic_load_explicit(&{}, memory_order_seq_cst);",
+                    indent(depth + 1),
+                    counter_var
+                )?;
+                writeln!(
+                    main_body_str,
+                    "{}printf(\"benchmark[%s]: %lld ns (%.6f s)\\n\", \"{}\", {value_var}, (double){value_var} / 1000000000.0);",
+                    indent(depth + 1),
+                    escaped_name
+                )?;
+                writeln!(main_body_str, "{}}}", indent(depth))?;
+            }
+            writeln!(main_body_str)?;
+        }
+
         // Free the buffers.
         for kernel_argument in top_arg_tensors {
             let buf = self.name_env.get(kernel_argument).unwrap();
@@ -282,7 +339,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         out.write_str(&main_body_str)
     }
 
-    pub fn emit_benchmarking_main<W: Write>(
+    fn emit_benchmarking_main<W: Write>(
         &mut self,
         top_arg_tensors: &[Rc<Tensor<Tgt>>],
         out: &mut W,
@@ -292,6 +349,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
         writeln!(main_body_str, "int main(int argc, char *argv[]) {{")?;
         depth += 1;
+
+        let counter_vars: Vec<String> = self.headers.benchmark_counters.values().cloned().collect();
+        if !counter_vars.is_empty() {
+            for counter_var in &counter_vars {
+                writeln!(
+                    main_body_str,
+                    "{}atomic_store_explicit(&{}, 0, memory_order_seq_cst);",
+                    indent(depth),
+                    counter_var
+                )?;
+            }
+            writeln!(main_body_str)?;
+        }
 
         // Allocate a buffer for each Impl parameter and re-bind to a CBuffer corresponding to the
         // local-scope buffer. It will have been previously bound by emit_kernel to a CBuffer::Ptr.
@@ -309,6 +379,34 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let kernel_call_str = self.make_kernel_call(top_arg_tensors)?;
         self.emit_benchmarking(&kernel_call_str, depth, &mut main_body_str)?;
         writeln!(main_body_str)?;
+
+        let counter_entries: Vec<(String, String)> = self
+            .headers
+            .benchmark_counters
+            .iter()
+            .map(|(name, var)| (name.clone(), var.clone()))
+            .collect();
+        if !counter_entries.is_empty() {
+            for (idx, (counter_name, counter_var)) in counter_entries.iter().enumerate() {
+                let value_var = format!("{}_value_{idx}", counter_var);
+                let escaped_name = escape_c_string(counter_name);
+                writeln!(main_body_str, "{}{{", indent(depth))?;
+                writeln!(
+                    main_body_str,
+                    "{}long long {value_var} = atomic_load_explicit(&{}, memory_order_seq_cst);",
+                    indent(depth + 1),
+                    counter_var
+                )?;
+                writeln!(
+                    main_body_str,
+                    "{}printf(\"benchmark[%s]: %lld ns (%.6f s)\\n\", \"{}\", {value_var}, (double){value_var} / 1000000000.0);",
+                    indent(depth + 1),
+                    escaped_name
+                )?;
+                writeln!(main_body_str, "{}}}", indent(depth))?;
+            }
+            writeln!(main_body_str)?;
+        }
 
         // Free the buffers.
         for kernel_argument in top_arg_tensors {
@@ -577,6 +675,52 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                 }
                 Ok(())
+            }
+            ImplNode::TimedRegion(region) => {
+                if self.benchmark {
+                    // TODO: Would be nice for register_benchmark_counter to return &str instead.
+                    let counter_var = self
+                        .headers
+                        .register_benchmark_counter(region.counter_name());
+                    let start_var = self.namer.fresh_name();
+                    let end_var = self.namer.fresh_name();
+                    let delta_var = self.namer.fresh_name();
+                    let nanos_var = self.namer.fresh_name();
+
+                    writeln!(
+                        w,
+                        "{}struct timespec {start_var}, {end_var};",
+                        indent(depth)
+                    )?;
+                    writeln!(
+                        w,
+                        "{}clock_gettime(CLOCK_MONOTONIC, &{start_var});",
+                        indent(depth)
+                    )?;
+                    self.emit(w, region.child(), depth)?;
+                    writeln!(
+                        w,
+                        "{}clock_gettime(CLOCK_MONOTONIC, &{end_var});",
+                        indent(depth)
+                    )?;
+                    writeln!(
+                        w,
+                        "{}struct timespec {delta_var} = ts_diff({start_var}, {end_var});",
+                        indent(depth)
+                    )?;
+                    writeln!(
+                        w,
+                        "{}long long {nanos_var} = {delta_var}.tv_sec * 1000000000LL + {delta_var}.tv_nsec;",
+                        indent(depth)
+                    )?;
+                    writeln!(
+                        w,
+                        "{}atomic_fetch_add_explicit(&{counter_var}, {nanos_var}, memory_order_relaxed);",
+                        indent(depth)
+                    )
+                } else {
+                    self.emit(w, region.child(), depth)
+                }
             }
             ImplNode::SpecApp(p) => {
                 self.headers.emit_stdbool_and_assert_includes = true;
@@ -2177,6 +2321,7 @@ impl<Tgt: Target> Default for CpuCodeGenerator<Tgt> {
             headers: Default::default(),
             kernel_name: String::from("kernel"),
             thread_style: Default::default(),
+            benchmark: false,
         }
     }
 }
@@ -2234,6 +2379,22 @@ fn get_vector(
         .unwrap_or_else(|| {
             panic!("Vectors of type {dtype} and size {vector_size} are not supported")
         })
+}
+
+fn escape_c_string(input: &str) -> String {
+    let mut escaped = String::new();
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_ascii_graphic() || c == ' ' => escaped.push(c),
+            c => escaped.push_str(&format!("\\x{:02x}", c as u32)),
+        }
+    }
+    escaped
 }
 
 fn expr_to_c(e: &AffineForm<NonAffine<CName>>) -> String {

@@ -2,7 +2,7 @@ use crate::{
     cost::MainCost,
     imp::{
         allocs::Alloc, blocks::Block, functions::FunctionApp, kernels::KernelApp, loops::Loop,
-        pipeline::Pipeline, subspecs::SpecApp,
+        pipeline::Pipeline, subspecs::SpecApp, timing::TimedRegion,
     },
     memorylimits::MemoryAllocation,
     nameenv::NameEnv,
@@ -21,6 +21,7 @@ pub mod kernels;
 pub mod loops;
 pub mod pipeline;
 pub mod subspecs;
+pub mod timing;
 
 #[enum_dispatch]
 pub trait Impl<Tgt: Target> {
@@ -70,6 +71,7 @@ crate::impl_impl_for_enum!(
     Alloc => Alloc<Tgt>,
     Block => Block<Tgt>,
     Pipeline => Pipeline<Tgt>,
+    TimedRegion => TimedRegion<Tgt>,
     Kernel => KernelApp<ViewE<Tgt>>,
     FunctionApp => FunctionApp<Tgt>,
     SpecApp => SpecApp<ViewE<Tgt>>,

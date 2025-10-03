@@ -175,7 +175,7 @@ where
             .into_iter()
             .map(|parameter| Rc::new(Tensor::new(parameter)))
             .collect::<Vec<_>>();
-        let mut generator = CpuCodeGenerator::<Tgt>::new();
+        let mut generator = CpuCodeGenerator::<Tgt>::new(benchmark);
         generator.thread_style = thread_style;
         if let Some(impl_style) = include_impl {
             generator.emit_impl_comment(&bound, impl_style, out)?;
@@ -183,13 +183,11 @@ where
         }
         generator.emit_kernel(&bound, &top_arg_tensors, benchmark, out)?;
         out.write_char('\n')?;
-        if benchmark {
-            generator.emit_benchmarking_main(&top_arg_tensors, out)?;
-        } else {
+        if !benchmark {
             generator.emit_load_inputs(&top_arg_tensors, out)?;
             out.write_char('\n')?;
-            generator.emit_standard_main(&top_arg_tensors, out)?;
         }
+        generator.emit_main(&top_arg_tensors, out)?;
         Ok(())
     }
 
