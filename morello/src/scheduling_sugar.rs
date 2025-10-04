@@ -111,6 +111,14 @@ pub trait SchedulingSugar<Tgt: Target> {
         Tgt: Target,
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>;
+
+    /// Apply a function to a leaf Spec by traversing the Impl, following default children.
+    ///
+    /// Panics if a node with multiple children has no default child (use `subschedule`
+    /// in that case).
+    fn apply_to_default_leaf<F>(&self, f: F) -> ImplNode<Tgt>
+    where
+        F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt>;
 }
 
 pub trait Subschedule<Tgt: Target> {
@@ -405,19 +413,26 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     {
         self.synthesize(db)
     }
+
+    fn apply_to_default_leaf<F>(&self, f: F) -> ImplNode<Tgt>
+    where
+        F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt>,
+    {
+        f(self)
+    }
 }
 
 impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     fn tile_out(&self, output_shape: &[u32]) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.tile_out(output_shape))
+        self.apply_to_default_leaf(|spec| spec.tile_out(output_shape))
     }
 
     fn tile_out_parallel(&self, output_shape: &[u32]) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.tile_out_parallel(output_shape))
+        self.apply_to_default_leaf(|spec| spec.tile_out_parallel(output_shape))
     }
 
     fn split(&self, k: u32) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.split(k))
+        self.apply_to_default_leaf(|spec| spec.split(k))
     }
 
     fn move_param(
@@ -425,7 +440,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         source_idx: u8,
         destination_level: impl Into<Tgt::Level>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.move_param(source_idx, destination_level))
+        self.apply_to_default_leaf(|spec| spec.move_param(source_idx, destination_level))
     }
 
     fn move_vrf(
@@ -434,7 +449,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         destination_level: impl Into<Tgt::Level>,
         destination_vector_size: DimSize,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
+        self.apply_to_default_leaf(|spec| {
             spec.move_vrf(source_idx, destination_level, destination_vector_size)
         })
     }
@@ -446,7 +461,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
+        self.apply_to_default_leaf(|spec| {
             spec.move_relayout(
                 source_idx,
                 destination_level,
@@ -464,7 +479,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         destination_layout: impl LayoutBuilder,
         destination_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
+        self.apply_to_default_leaf(|spec| {
             spec.cast(
                 source_idx,
                 destination_dtype,
@@ -476,7 +491,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     }
 
     fn to_accum(&self) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.to_accum())
+        self.apply_to_default_leaf(|spec| spec.to_accum())
     }
 
     fn to_softmax_parts(
@@ -488,7 +503,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         exps_layout: impl LayoutBuilder,
         exps_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
+        self.apply_to_default_leaf(|spec| {
             spec.to_softmax_parts(
                 max_level,
                 max_layout,
@@ -509,7 +524,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
+        self.apply_to_default_leaf(|spec| {
             spec.to_softmax_parts_recompute(
                 max_level,
                 max_layout,
@@ -522,7 +537,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
     }
 
     fn to_max_and_denominator(&self) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.to_max_and_denominator())
+        self.apply_to_default_leaf(|spec| spec.to_max_and_denominator())
     }
 
     fn to_max_and_unscaled(
@@ -531,7 +546,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         max_layout: impl LayoutBuilder,
         max_vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
+        self.apply_to_default_leaf(|spec| {
             spec.to_max_and_unscaled(max_level, max_layout, max_vector_size)
         })
     }
@@ -543,13 +558,11 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
-            spec.bufferize(index, level, layout, vector_size)
-        })
+        self.apply_to_default_leaf(|spec| spec.bufferize(index, level, layout, vector_size))
     }
 
     fn spatial_split(&self) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.spatial_split())
+        self.apply_to_default_leaf(|spec| spec.spatial_split())
     }
 
     fn broadcast_first(
@@ -558,21 +571,19 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         layout: impl LayoutBuilder,
         vector_size: Option<DimSize>,
     ) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| {
-            spec.broadcast_first(level, layout, vector_size)
-        })
+        self.apply_to_default_leaf(|spec| spec.broadcast_first(level, layout, vector_size))
     }
 
     fn time<S: Into<String>>(&self, counter_name: S) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, move |spec| spec.time(counter_name.into()))
+        self.apply_to_default_leaf(move |spec| spec.time(counter_name.into()))
     }
 
     fn select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.select(kernel))
+        self.apply_to_default_leaf(|spec| spec.select(kernel))
     }
 
     fn force_select<T: Into<Tgt::Kernel>>(&self, kernel: T) -> ImplNode<Tgt> {
-        apply_to_leaf_spec(self, |spec| spec.force_select(kernel))
+        self.apply_to_default_leaf(|spec| spec.force_select(kernel))
     }
 
     fn synthesize(&self, db: &FilesDatabase) -> ImplNode<Tgt>
@@ -581,7 +592,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        apply_to_leaf_spec(self, |spec| spec.synthesize(db))
+        self.apply_to_default_leaf(|spec| spec.synthesize(db))
     }
 
     fn synthesize_all(&self, db: &FilesDatabase) -> ImplNode<Tgt>
@@ -591,6 +602,33 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         apply_to_leaves(self, &|spec| spec.synthesize(db))
+    }
+
+    fn apply_to_default_leaf<F>(&self, f: F) -> ImplNode<Tgt>
+    where
+        F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt>,
+    {
+        match self {
+            ImplNode::SpecApp(app) => specapp_apply(app, f).into(),
+            _ => match &self.children() {
+                [] => panic!("Not a Spec application and no children."),
+                [child] => self.replace_children(iter::once(child.apply_to_default_leaf(f))),
+                children => {
+                    if let Some(default_child_idx) = self.default_child() {
+                        let replaced_child = children[default_child_idx].apply_to_default_leaf(f);
+                        self.replace_children(
+                            children[..default_child_idx]
+                                .iter()
+                                .chain(iter::once(&replaced_child))
+                                .chain(&children[(default_child_idx + 1)..])
+                                .cloned(),
+                        )
+                    } else {
+                        panic!("Ambiguous choice of child. Use `subschedule`.")
+                    }
+                }
+            },
+        }
     }
 }
 
@@ -648,34 +686,6 @@ where
                 .iter()
                 .map(|child| apply_to_leaves(child, f)),
         ),
-    }
-}
-
-fn apply_to_leaf_spec<Tgt, F>(node: &ImplNode<Tgt>, f: F) -> ImplNode<Tgt>
-where
-    Tgt: Target,
-    F: FnOnce(&Spec<Tgt>) -> ImplNode<Tgt>,
-{
-    match node {
-        ImplNode::SpecApp(app) => specapp_apply(app, f).into(),
-        _ => match &node.children() {
-            [] => panic!("Not a Spec application and no children."),
-            [child] => node.replace_children(iter::once(apply_to_leaf_spec(child, f))),
-            children => {
-                if let Some(default_child_idx) = node.default_child() {
-                    let replaced_child = apply_to_leaf_spec(&children[default_child_idx], f);
-                    node.replace_children(
-                        children[..default_child_idx]
-                            .iter()
-                            .chain(iter::once(&replaced_child))
-                            .chain(&children[(default_child_idx + 1)..])
-                            .cloned(),
-                    )
-                } else {
-                    panic!("Ambiguous choice of child. Use `subschedule`.")
-                }
-            }
-        },
     }
 }
 
