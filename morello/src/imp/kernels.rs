@@ -38,10 +38,7 @@ impl<A: View> Impl<A::Tgt> for KernelApp<A> {
         I: Iterator<Item = ImplNode<A::Tgt>>,
     {
         let mut new_children = f(vec![]);
-        assert!(
-            new_children.next().is_none(),
-            "KernelApp has no children"
-        );
+        assert!(new_children.next().is_none(), "KernelApp has no children");
         self
     }
 

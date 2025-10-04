@@ -86,10 +86,7 @@ impl<A: View> Impl<A::Tgt> for SpecApp<A> {
         I: Iterator<Item = ImplNode<A::Tgt>>,
     {
         let mut new_children = f(vec![]);
-        assert!(
-            new_children.next().is_none(),
-            "SpecApp has no children"
-        );
+        assert!(new_children.next().is_none(), "SpecApp has no children");
         self
     }
 
