@@ -56,15 +56,18 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
             .expect("Pipeline should be given at least one child cost")
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        // TODO: This method could use some more precondition checks, esp. re: parameters.
-        let new_impl = Pipeline {
-            stages: new_children.collect(),
-            wirings: self.wirings.clone(),
-            spec: self.spec.clone(),
-        };
-        assert_eq!(new_impl.stages.len(), self.stages.len());
-        new_impl
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<Tgt>>,
+    {
+        let old_len = self.stages.len();
+        let new_stages = f(self.stages).collect::<Vec<_>>();
+        assert_eq!(new_stages.len(), old_len);
+        Pipeline {
+            stages: new_stages,
+            ..self
+        }
     }
 
     fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {

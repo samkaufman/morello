@@ -93,17 +93,17 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
         child_costs.iter().fold(cost, |a, &b| a.saturating_add(b))
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        let new_children = new_children.collect::<Vec<_>>();
-        debug_assert_eq!(self.children.len(), new_children.len());
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<Tgt>>,
+    {
+        let child_count = self.children.len();
+        let new_children = f(self.children).collect::<Vec<_>>();
+        assert_eq!(child_count, new_children.len());
         Self {
-            parameter_idx: self.parameter_idx,
-            source_spec: self.source_spec.clone(),
-            introduced: self.introduced.clone(),
-            has_prologue: self.has_prologue,
-            has_epilogue: self.has_epilogue,
             children: new_children,
-            spec: self.spec.clone(),
+            ..self
         }
     }
 

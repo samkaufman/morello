@@ -83,14 +83,17 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
         compute_loop_main_cost::<Tgt>(&all_dims, self.parallel, child_costs)
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        let bodies: Vec<_> = new_children.collect();
-        assert_eq!(bodies.len(), self.bodies.len());
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<Tgt>>,
+    {
+        let body_count = self.bodies.len();
+        let new_bodies = f(self.bodies).collect::<Vec<_>>();
+        assert_eq!(new_bodies.len(), body_count);
         Loop {
-            tiles: self.tiles.clone(),
-            bodies,
-            parallel: self.parallel,
-            spec: self.spec.clone(),
+            bodies: new_bodies,
+            ..self
         }
     }
 

@@ -43,7 +43,23 @@ pub trait Impl<Tgt: Target> {
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost;
 
     #[must_use]
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self;
+    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self
+    where
+        Self: Clone,
+    {
+        self.clone().map_children(|_| new_children)
+    }
+
+    /// Map over children, consuming self and giving the transformer ownership of the children.
+    ///
+    /// The function receives a Vec of the current children and must return an iterator
+    /// yielding the same number of new children. This allows transformations that need
+    /// ownership of children to avoid cloning.
+    #[must_use]
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<Tgt>>;
 
     // Replaces [Param] references within this Impl with concrete [ViewE] instances from
     // the provided getter function, recursively transforming the entire subtree to
@@ -113,6 +129,38 @@ impl<Tgt: Target> ImplNode<Tgt> {
             }
             true
         }
+    }
+
+    /// Map a function over all leaf nodes (nodes without children).
+    ///
+    /// This recursively traverses the tree and applies `f` to each leaf node,
+    /// replacing it with the result.
+    #[must_use]
+    pub fn map_leaves<F>(self, f: &F) -> Self
+    where
+        F: Fn(ImplNode<Tgt>) -> ImplNode<Tgt>,
+    {
+        let children = self.children();
+        if children.is_empty() {
+            f(self)
+        } else {
+            self.map_children(|children| children.into_iter().map(|child| child.map_leaves(f)))
+        }
+    }
+
+    /// Map a function over all [SpecApp] leaf nodes.
+    ///
+    /// This recursively traverses the tree and applies `f` to each [SpecApp] leaf node,
+    /// replacing it with the result. Other leaves are unchanged.
+    #[must_use]
+    pub fn map_spec_leaves<F>(self, f: &F) -> Self
+    where
+        F: Fn(SpecApp<ViewE<Tgt>>) -> ImplNode<Tgt>,
+    {
+        self.map_leaves(&|node| match node {
+            ImplNode::SpecApp(spec_app) => f(spec_app),
+            _ => node,
+        })
     }
 }
 
@@ -188,6 +236,16 @@ pub mod macros {
                 fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
                     match self {
                         $(Self::$variant(inner) => Self::$variant(inner.replace_children(new_children)),)*
+                    }
+                }
+
+                fn map_children<F, I>(self, f: F) -> Self
+                where
+                    F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+                    I: Iterator<Item = ImplNode<Tgt>>,
+                {
+                    match self {
+                        $(Self::$variant(inner) => Self::$variant(inner.map_children(f)),)*
                     }
                 }
 

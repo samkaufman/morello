@@ -54,7 +54,12 @@ impl<Tgt: Target> Impl<Tgt> for TimedRegion<Tgt> {
         child_costs[0]
     }
 
-    fn replace_children(&self, mut new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<Tgt>>,
+    {
+        let mut new_children = f(vec![*self.child]);
         let new_child = new_children
             .next()
             .expect("TimedRegion requires a single child");
@@ -64,7 +69,7 @@ impl<Tgt: Target> Impl<Tgt> for TimedRegion<Tgt> {
         );
         let spec = new_child.spec().cloned();
         Self {
-            counter_name: self.counter_name.clone(),
+            counter_name: self.counter_name,
             child: Box::new(new_child),
             spec,
         }

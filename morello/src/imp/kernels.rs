@@ -32,9 +32,17 @@ impl<A: View> Impl<A::Tgt> for KernelApp<A> {
         self.kernel_type.main_cost(&self.arguments)
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<A::Tgt>>) -> Self {
-        debug_assert_eq!(new_children.count(), 0);
-        self.clone()
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<A::Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<A::Tgt>>,
+    {
+        let mut new_children = f(vec![]);
+        assert!(
+            new_children.next().is_none(),
+            "KernelApp has no children"
+        );
+        self
     }
 
     fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<A::Tgt>>) -> Self::BindOut {

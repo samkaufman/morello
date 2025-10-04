@@ -33,14 +33,21 @@ impl<Tgt: Target> Impl<Tgt> for FunctionApp<Tgt> {
         child_costs[0]
     }
 
-    fn replace_children(&self, mut new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        let new_function = FunctionApp {
-            body: Box::new(new_children.next().unwrap()),
-            parameters: self.parameters.clone(),
-            spec: self.spec.clone(),
-        };
-        debug_assert!(new_children.next().is_none());
-        new_function
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<Tgt>>,
+    {
+        let mut new_children = f(vec![*self.body]);
+        let new_body = new_children.next().expect("FunctionApp has one child");
+        assert!(
+            new_children.next().is_none(),
+            "FunctionApp has only one child"
+        );
+        Self {
+            body: Box::new(new_body),
+            ..self
+        }
     }
 
     fn bind(self, get_argument: &mut dyn FnMut(u8) -> Option<ViewE<Tgt>>) -> Self::BindOut {

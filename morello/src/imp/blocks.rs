@@ -37,14 +37,17 @@ impl<Tgt: Target> Impl<Tgt> for Block<Tgt> {
             .expect("Block should be given at least one child cost")
     }
 
-    fn replace_children(&self, new_children: impl Iterator<Item = ImplNode<Tgt>>) -> Self {
-        // TODO: Check that parameters are unchanged after children are replaced.
-        // TODO: Flatten nested Blocks as well.
-        let stages = new_children.collect::<Vec<_>>();
-        debug_assert_eq!(stages.len(), self.stages.len());
+    fn map_children<F, I>(self, f: F) -> Self
+    where
+        F: FnOnce(Vec<ImplNode<Tgt>>) -> I,
+        I: Iterator<Item = ImplNode<Tgt>>,
+    {
+        let old_len = self.stages.len();
+        let new_stages = f(self.stages).collect::<Vec<_>>();
+        assert_eq!(new_stages.len(), old_len);
         Self {
-            stages,
-            spec: self.spec.clone(),
+            stages: new_stages,
+            spec: self.spec,
             default_child: self.default_child,
         }
     }
