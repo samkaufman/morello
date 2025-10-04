@@ -1114,6 +1114,10 @@ fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::row_major;
+    use crate::scheduling_sugar::SchedulingSugar;
+    use crate::spec;
+    use crate::target::CpuMemoryLevel::L1;
     use crate::{
         imp::ImplNode,
         memorylimits::{MemVec, MemoryLimits},
@@ -1165,6 +1169,27 @@ mod tests {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "{} := {:?}", self.spec, self.actions_costs)
         }
+    }
+
+    #[test]
+    fn test_get_impl_after_reopen() {
+        let db_path = tempfile::tempdir().unwrap();
+
+        let mut spec: Spec<Avx2Target> =
+            spec!(Move([2, 2], (f32, L1, row_major), (f32, L1, row_major)));
+        spec.canonicalize().unwrap();
+
+        {
+            let db = FilesDatabase::new(Some(db_path.path()), true, 1, 2, 1);
+            let _ = spec.synthesize(&db);
+        }
+
+        let db = FilesDatabase::new(Some(db_path.path()), true, 1, 2, 1);
+        let result = db.get_impl(&spec);
+        assert!(
+            result.is_some(),
+            "Database should have the spec after reopening"
+        );
     }
 
     proptest! {
