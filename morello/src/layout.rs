@@ -794,9 +794,7 @@ impl Display for Layout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Layout { dims, contig } = self;
 
-        if self.is_row_major() {
-            write!(f, "RM")?;
-        } else if dims[..]
+        if dims[..]
             == [
                 (0, PhysDim::Dynamic),
                 (2, PhysDim::Dynamic),
