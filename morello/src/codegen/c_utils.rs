@@ -140,7 +140,7 @@ impl CBuffer {
                     write!(w, "{}{}", indent(depth), type_name)?;
                     for (i, name) in names.iter().enumerate() {
                         let prefix = if i == 0 { " " } else { ", " };
-                        write!(w, "{}{}{}", prefix, name, epi)?;
+                        write!(w, "{prefix}{name}{epi}")?;
                     }
                     writeln!(w, ";")?;
                 }

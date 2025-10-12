@@ -2119,8 +2119,7 @@ mod tests {
         let expect = layout![2, 2 oe(16)];
         assert!(
             layouts.contains(&expect),
-            "{:?} did not contain {expect:?}",
-            layouts
+            "{layouts:?} did not contain {expect:?}"
         );
     }
 

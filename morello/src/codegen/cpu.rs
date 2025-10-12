@@ -307,7 +307,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             .collect();
         if !counter_entries.is_empty() {
             for (idx, (counter_name, counter_var)) in counter_entries.iter().enumerate() {
-                let value_var = format!("{}_value_{idx}", counter_var);
+                let value_var = format!("{counter_var}_value_{idx}");
                 let escaped_name = escape_c_string(counter_name);
                 writeln!(main_body_str, "{}{{", indent(depth))?;
                 writeln!(
@@ -388,7 +388,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             .collect();
         if !counter_entries.is_empty() {
             for (idx, (counter_name, counter_var)) in counter_entries.iter().enumerate() {
-                let value_var = format!("{}_value_{idx}", counter_var);
+                let value_var = format!("{counter_var}_value_{idx}");
                 let escaped_name = escape_c_string(counter_name);
                 writeln!(main_body_str, "{}{{", indent(depth))?;
                 writeln!(

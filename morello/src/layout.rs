@@ -672,8 +672,7 @@ impl Layout {
             }
             debug_assert_ne!(
                 remaining_size, 0,
-                "Logical dimension {} with unpacked size already seen in {:?}",
-                dim, dims
+                "Logical dimension {dim} with unpacked size already seen in {dims:?}"
             );
             match fixed_size {
                 PhysDim::OddEven(s) | PhysDim::Packed(s) => {

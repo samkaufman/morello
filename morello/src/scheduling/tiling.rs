@@ -1797,40 +1797,34 @@ mod tests {
                     assert_eq!(
                         &lhs_shape[..],
                         &[nz!(1u32), nz!(6u32), nz!(128u32)],
-                        "Main body LHS should be [1,6,128], got {:?}",
-                        lhs_shape
+                        "Main body LHS should be [1,6,128], got {lhs_shape:?}"
                     );
                     assert_eq!(
                         &rhs_shape[..],
                         &[nz!(1u32), nz!(128u32), nz!(16u32)],
-                        "RHS should be [1,128,16], got {:?}",
-                        rhs_shape
+                        "RHS should be [1,128,16], got {rhs_shape:?}",
                     );
                     assert_eq!(
                         &output_shape[..],
                         &[nz!(1u32), nz!(6u32), nz!(16u32)],
-                        "Main body output should be [1,6,16], got {:?}",
-                        output_shape
+                        "Main body output should be [1,6,16], got {output_shape:?}",
                     );
                 } else {
                     // Tail body
                     assert_eq!(
                         &lhs_shape[..],
                         &[nz!(1u32), nz!(2u32), nz!(128u32)],
-                        "Tail body LHS should be [1,2,128], got {:?}",
-                        lhs_shape
+                        "Tail body LHS should be [1,2,128], got {lhs_shape:?}",
                     );
                     assert_eq!(
                         &rhs_shape[..],
                         &[nz!(1u32), nz!(128u32), nz!(2048u32)],
-                        "RHS should be [1,128,2048], got {:?}",
-                        rhs_shape
+                        "RHS should be [1,128,2048], got {rhs_shape:?}",
                     );
                     assert_eq!(
                         &output_shape[..],
                         &[nz!(1u32), nz!(2u32), nz!(2048u32)],
-                        "Tail body output should be [1,2,2048], got {:?}",
-                        output_shape
+                        "Tail body output should be [1,2,2048], got {output_shape:?}",
                     );
                 }
             }
