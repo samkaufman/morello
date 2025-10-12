@@ -3216,6 +3216,10 @@ pub mod macros {
     /// Usage:
     ///   spec!(Move([m,n], (u32,GL,row_major), (u32,GL,row_major)));
     ///   spec!(Move([m,n], (u32,GL,row_major), (u32,GL,row_major)), [lim0, lim1, ...]);
+    ///
+    /// When providing limits, register file limits are given as register counts, and
+    /// the remaining limits are given as bytes. Bytes must be multiples of the target's
+    /// cache line size.
     #[macro_export]
     macro_rules! spec {
         // Literal limits array: build a Standard MemoryLimits
@@ -3242,14 +3246,27 @@ pub mod macros {
 pub mod __private {
     use super::{LogicalSpec, Spec};
     use crate::memorylimits::{MemVec, MemoryLimits};
-    use crate::target::{Target, LEVEL_COUNT};
+    use crate::target::{MemoryLevel, Target, LEVEL_COUNT};
 
     /// A helper constructor for the `spec!` macro. This exists so that the inferred `Tgt` can be
     /// given to [MemVec::new_for_target].
     pub fn new_with_standard_memory<Tgt: Target>(
         logical_spec: LogicalSpec<Tgt>,
-        limits_arr: [u64; LEVEL_COUNT],
+        mut limits_arr: [u64; LEVEL_COUNT],
     ) -> Spec<Tgt> {
+        // Since `spec!` takes bytes for non-register-file levels, convert those
+        // to cache lines.
+        let line_size = u64::from(Tgt::line_size());
+        debug_assert!(line_size > 0);
+        for (idx, level) in Tgt::levels().iter().enumerate() {
+            if !level.counts_registers() {
+                let bytes = limits_arr[idx];
+                if !bytes.is_multiple_of(line_size) {
+                    panic!("Bytes ({bytes}) must be a multiple of line size ({line_size})");
+                }
+                limits_arr[idx] = bytes / line_size;
+            }
+        }
         Spec(
             logical_spec,
             MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(limits_arr)),
@@ -3329,10 +3346,7 @@ mod tests {
         assert_eq!(s.0, expected_ls);
         assert_eq!(
             s.1,
-            MemoryLimits::Standard(MemVec::new_mixed(
-                [8, 8, 256, 128],
-                [true, true, false, false]
-            ))
+            MemoryLimits::Standard(MemVec::new_mixed([8, 8, 8, 4], [true, true, false, false]))
         );
     }
 
