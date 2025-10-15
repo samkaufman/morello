@@ -26,7 +26,13 @@ pub enum PageContents {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RTreePageContents(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
+pub struct RTreePageContents {
+    // TODO: Can do better than using a whole byte (at least!) for the Option
+    cost_intensity: RTreeDyn<Option<CostIntensity>>,
+    peaks: RTreeDyn<MemVec>,
+    depth: RTreeDyn<u8>,
+    action_num: RTreeDyn<ActionNum>,
+}
 
 impl PageContents {
     pub fn get_with_preference<Tgt>(
@@ -62,12 +68,18 @@ impl PageContents {
 
 impl RTreePageContents {
     pub fn empty(rank: usize) -> Self {
-        RTreePageContents(RTreeDyn::empty(rank))
+        RTreePageContents {
+            cost_intensity: RTreeDyn::empty(rank),
+            peaks: RTreeDyn::empty(rank),
+            depth: RTreeDyn::empty(rank),
+            action_num: RTreeDyn::empty(rank),
+        }
     }
 
+    /// Returns the total number of rectangles stored across all R*-Trees.
     #[cfg(feature = "db-stats")]
     pub fn rect_count(&self) -> usize {
-        self.0.size()
+        self.cost_intensity.size() + self.peaks.size() + self.depth.size() + self.action_num.size()
     }
 
     pub fn get(&self, inner_pt: &[u8], spec_volume: NonZeroU64) -> Option<ActionCostVec> {
@@ -75,9 +87,21 @@ impl RTreePageContents {
         let arr = inner_pt.iter().map(|v| (*v).into()).collect::<Vec<_>>();
 
         // TODO: Return (and test!) k > 1. (The above point may be in a space without k dim.)
-        let value = self.0.locate_at_point(&arr)?;
-        Some(ActionCostVec(match &value {
-            Some((cost_intensity, peaks, depth, action_num)) => {
+        let cost_intensity = self.cost_intensity.locate_at_point(&arr)?;
+        Some(ActionCostVec(match cost_intensity {
+            Some(cost_intensity) => {
+                let peaks = self
+                    .peaks
+                    .locate_at_point(&arr)
+                    .expect("peaks missing entry");
+                let depth = self
+                    .depth
+                    .locate_at_point(&arr)
+                    .expect("depth missing entry");
+                let action_num = self
+                    .action_num
+                    .locate_at_point(&arr)
+                    .expect("action_num missing entry");
                 let cost = Cost {
                     main: cost_intensity.into_main_cost_for_volume(spec_volume),
                     peaks: peaks.clone(),
@@ -98,6 +122,7 @@ impl RTreePageContents {
         if k != 1 {
             todo!("Support k > 1");
         }
+
         let mut bottom = Vec::with_capacity(dim_ranges.len());
         let mut top = Vec::with_capacity(dim_ranges.len());
         for rng in dim_ranges {
@@ -106,17 +131,17 @@ impl RTreePageContents {
             top.push((rng.end - 1).into());
         }
 
-        let value = normalized_action_costs
-            .0
-            .first()
-            .map(|(action_num, normalized_cost)| {
-                (
-                    normalized_cost.intensity,
-                    normalized_cost.peaks.clone(),
-                    normalized_cost.depth,
-                    *action_num,
-                )
-            });
-        self.0.merge_insert(&bottom, &top, value, true);
+        if let Some((action_num, normalized_cost)) = normalized_action_costs.0.first() {
+            self.cost_intensity
+                .merge_insert(&bottom, &top, Some(normalized_cost.intensity), true);
+            self.peaks
+                .merge_insert(&bottom, &top, normalized_cost.peaks.clone(), true);
+            self.depth
+                .merge_insert(&bottom, &top, normalized_cost.depth, true);
+            self.action_num
+                .merge_insert(&bottom, &top, *action_num, true);
+        } else {
+            self.cost_intensity.merge_insert(&bottom, &top, None, true);
+        }
     }
 }
