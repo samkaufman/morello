@@ -156,16 +156,10 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         u64::from(self.dtype.size()) * u64::from(self.volume().get())
     }
 
-    /// Returns the number of cache lines needed to store this tensor's bytes.
-    pub fn lines_used(&self) -> u64 {
-        let bytes = self.bytes_used();
-        bytes.div_ceil(Tgt::line_size().into())
-    }
-
     /// Returns the memory units consumed by this tensor based on its level's memory model.
     ///
     /// For register-counting levels, returns register counts, possibly divided by vector size.
-    /// For other levels, returns cache lines.
+    /// For other levels, returns an estimate of cache lines used.
     pub fn memory_units(&self) -> u64 {
         if self.level().counts_registers() {
             if let Some(vector_size) = self.vector_size() {
@@ -174,7 +168,9 @@ impl<Tgt: Target> TensorSpec<Tgt> {
                 u64::from(self.volume().get())
             }
         } else {
-            self.lines_used()
+            self.layout()
+                .estimate_cache_lines::<Tgt>(self.shape(), self.dtype())
+                .into()
         }
     }
 
