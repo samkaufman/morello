@@ -925,6 +925,7 @@ mod tests {
         expr::{AffineForm, Bounds, NonAffine, NonAffineExpr, Substitute, Term},
         opaque_symbol::OpaqueSymbol,
         shape,
+        target::Avx2Target,
     };
     use itertools::Itertools;
     use proptest::{
@@ -1636,5 +1637,63 @@ mod tests {
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
         })
+    }
+
+    #[test]
+    fn test_estimate_cache_lines_single_f32() {
+        let layout = row_major(&shape![1, 1, 1]);
+        let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![1, 1, 1], Dtype::Float32);
+        assert_eq!(lines, 1);
+    }
+
+    #[test]
+    fn test_estimate_cache_lines_row_major_f32() {
+        let layout = row_major(&shape![128, 16]);
+        let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![128, 16], Dtype::Float32);
+        assert_eq!(lines, 256);
+    }
+
+    #[test]
+    fn test_estimate_cache_lines_row_major_u8() {
+        let layout = row_major(&shape![64, 64]);
+        let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![64, 64], Dtype::Uint8);
+        assert_eq!(lines, 128);
+    }
+
+    #[test]
+    fn test_estimate_cache_lines_non_contiguous() {
+        let mut layout = row_major(&shape![6, 128]);
+        layout.set_contig(1);
+        let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![6, 128], Dtype::Float32);
+        assert_eq!(
+            lines, 96,
+            "6x128 f32 w/ contig=1 is 96 lines (6 * 128 * 4 = 3072 bytes / 32 = 96)"
+        );
+    }
+
+    #[test]
+    fn test_estimate_cache_lines_packed_layout() {
+        let layout = layout![2, 1, 2 p(16)];
+        let lines =
+            layout.estimate_cache_lines::<Avx2Target>(&shape![1, 128, 2048], Dtype::Float32);
+        assert_eq!(lines, 32_768);
+    }
+
+    #[test]
+    fn test_estimate_cache_lines_partial_line() {
+        let layout = row_major(&shape![3, 3]);
+        let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![3, 3], Dtype::Float32);
+        assert_eq!(lines, 2);
+    }
+
+    #[test]
+    fn test_estimate_cache_lines_partial_line_non_contiguous() {
+        let mut layout = row_major(&shape![3, 3]);
+        layout.set_contig(1);
+        let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![3, 3], Dtype::Float32);
+        assert_eq!(
+            lines, 3,
+            "3x3 f32 should be 3 cache lines (one for each 3-strip)"
+        );
     }
 }
