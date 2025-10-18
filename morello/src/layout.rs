@@ -237,8 +237,7 @@ impl Layout {
         let mut lines = physical_shape[..first_contig_idx]
             .iter()
             .map(|d| d.get())
-            .product::<u32>()
-            * u32::from(dtype.size());
+            .product::<u32>();
         lines *= divrem::DivCeil::div_ceil(
             physical_shape[first_contig_idx..]
                 .iter()
