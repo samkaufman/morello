@@ -122,7 +122,7 @@ impl CpuTarget for Avx512Target {
 
     fn max_mem() -> MemoryLimits {
         MemoryLimits::Standard(MemVec::new_mixed(
-            [16, 32, 32_768, 1_073_741_824],
+            [16, 32, 1_024, 33_554_432],
             [true, true, false, false],
         ))
     }

@@ -14,18 +14,19 @@ use std::fmt::{self, Display, Formatter};
 use std::{iter, ops::Sub};
 
 // If true, schedules will be saved as if they had memory limits, for all banks,
-// that are the next highest power of 2. This discretizes the cache a bit.
+// that are the next highest power of 2. This discretizes cache line counts.
 const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
 
 /// MemoryLimits are bounds on available memory for each level of a target.
 ///
-/// There are two variants. `MemoryLimits::Standard` simply counts the number of bytes
-/// remaining at each level, and no Spec satisfying the MemoryLimits should have a peak
-/// exceeding those. `MemoryLimits::Pipeline` counts separately the memory used by
-/// intermediate tensors just before or after a stage. This expands the set of
-/// `ImplNode::Pipeline`s which might satisfy a Spec, because it is valid for
-/// that `Pipeline` to assume that those bytes have been freed after its own
-/// first and last stages complete.
+/// There are two variants. `MemoryLimits::Standard` counts the number of registers for
+/// register-counting levels and the number of cache lines (with size
+/// [Target::line_size]) for all other levels. No Spec satisfying the MemoryLimits
+/// should have a peak exceeding those. `MemoryLimits::Pipeline` counts separately the
+/// memory used by intermediate tensors just before or after a stage. This expands the
+/// set of `ImplNode::Pipeline`s which might satisfy a Spec, because it is valid for
+/// that `Pipeline` to assume that those bytes have been freed after its own first and
+/// last stages complete.
 ///
 /// By convention, MemoryLimits are always discretized to powers of two. It is
 /// responsibility of the constructor to call `discretize`.
@@ -396,7 +397,7 @@ impl MemVec {
         self.0[idx] = Self::encode_raw(value);
     }
 
-    /// Encodes a u64 value as raw bytes (leading bit 1).
+    /// Encodes a u64 value as raw lines (leading bit 1).
     ///
     /// Panics if `value > 127`.
     fn encode_raw(value: u64) -> u8 {

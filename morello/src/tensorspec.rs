@@ -159,7 +159,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// Returns the memory units consumed by this tensor based on its level's memory model.
     ///
     /// For register-counting levels, returns register counts, possibly divided by vector size.
-    /// For other levels, returns bytes.
+    /// For other levels, returns an estimate of cache lines used.
     pub fn memory_units(&self) -> u64 {
         if self.level().counts_registers() {
             if let Some(vector_size) = self.vector_size() {
@@ -168,7 +168,9 @@ impl<Tgt: Target> TensorSpec<Tgt> {
                 u64::from(self.volume().get())
             }
         } else {
-            self.bytes_used()
+            self.layout()
+                .estimate_cache_lines::<Tgt>(self.shape(), self.dtype())
+                .into()
         }
     }
 
