@@ -89,7 +89,8 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        let cost = move_cost(&self.source_spec, self.introduced.spec());
+        let mut cost = move_cost(&self.source_spec);
+        cost += move_cost(self.introduced.spec());
         child_costs.iter().fold(cost, |a, &b| a.saturating_add(b))
     }
 
@@ -152,38 +153,20 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
     }
 }
 
-pub(crate) fn move_cost<Tgt: Target>(src: &TensorSpec<Tgt>, dest: &TensorSpec<Tgt>) -> MainCost {
-    let src_hit_cost = src.level().cache_hit_cost();
-    let dest_hit_cost = dest.level().cache_hit_cost();
-
-    let mut src_cost = 0;
-    let mut dest_cost = 0;
-
-    if src.level().has_layout() {
+pub(crate) fn move_cost<Tgt: Target>(accessed: &TensorSpec<Tgt>) -> MainCost {
+    let hit_cost = accessed.level().cache_hit_cost();
+    let mut cost = 0;
+    if accessed.level().has_layout() {
         let src_cache_lines = MainCost::from(
-            src.layout()
-                .estimate_cache_lines::<Tgt>(src.shape(), src.dtype()),
+            accessed
+                .layout()
+                .estimate_cache_lines::<Tgt>(accessed.shape(), accessed.dtype()),
         );
-        src_cost = src_hit_cost * src_cache_lines;
+        cost = hit_cost * src_cache_lines;
     } else {
-        assert_eq!(src_hit_cost, 0);
+        assert_eq!(hit_cost, 0);
     }
-
-    if dest.level().has_layout() {
-        let dest_cache_lines = MainCost::from(
-            dest.layout()
-                .estimate_cache_lines::<Tgt>(dest.shape(), dest.dtype()),
-        );
-        dest_cost = dest_hit_cost * dest_cache_lines;
-    } else {
-        assert_eq!(dest_hit_cost, 0);
-    }
-
-    let mut cost: MainCost = src_cost + dest_cost;
-    if !src.is_contiguous() {
-        cost *= 2;
-    }
-    if !dest.is_contiguous() {
+    if !accessed.is_contiguous() {
         cost *= 2;
     }
     cost
