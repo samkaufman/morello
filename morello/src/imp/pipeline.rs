@@ -1,4 +1,5 @@
 use crate::cost::MainCost;
+use crate::imp::allocs::move_cost;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
@@ -49,11 +50,17 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        child_costs
-            .iter()
-            .copied()
-            .reduce(|a, b| a.saturating_add(b))
-            .expect("Pipeline should be given at least one child cost")
+        debug_assert!(!child_costs.is_empty());
+        let mut cost: MainCost = 0;
+        for wiring in &self.wirings {
+            for t in &wiring.intermediate_tensors {
+                cost = cost.saturating_add(move_cost(t.spec()));
+            }
+        }
+        for child_cost in child_costs {
+            cost = cost.saturating_add(*child_cost);
+        }
+        cost
     }
 
     fn map_children<F, I>(self, f: F) -> Self
