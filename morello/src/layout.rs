@@ -792,6 +792,10 @@ impl Display for Layout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Layout { dims, contig } = self;
 
+        if !self.is_fully_contiguous() {
+            write!(f, "(")?;
+        }
+
         if dims[..]
             == [
                 (0, PhysDim::Dynamic),
@@ -826,7 +830,7 @@ impl Display for Layout {
         }
 
         if !self.is_fully_contiguous() {
-            write!(f, ":c{contig}")?;
+            write!(f, ", c{contig})")?;
         }
 
         Ok(())
