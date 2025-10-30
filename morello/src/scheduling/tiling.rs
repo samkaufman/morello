@@ -944,6 +944,7 @@ fn update_aux_for_tiling<Tgt: Target>(
 /// Updates the layout and alignment the Compose's [TensorSpecAux]s for new shapes and
 /// steps. New shapes will be taken from `components`, so `components` must already be
 /// resized.
+#[allow(clippy::needless_range_loop)]
 fn update_compose_aux_for_tiling<Tgt: Target>(
     components: &[PrimitiveBasics],
     original_component_shapes: &[Vec<Shape>],
