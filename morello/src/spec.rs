@@ -2381,6 +2381,7 @@ impl BiMap for PrimitiveBasicsBimap {
             }
             PrimitiveSpecType::Broadcast { dim } => (
                 SpecKey::Broadcast {
+                    rank: spec_shape.len().try_into().unwrap(),
                     dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2390,6 +2391,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 assert_eq!(dtypes.len(), 2);
                 (
                     SpecKey::Softmax {
+                        rank: spec_shape.len().try_into().unwrap(),
                         scan_dim,
                         dtypes: dtypes.as_slice().try_into().unwrap(),
                     },
@@ -2398,6 +2400,7 @@ impl BiMap for PrimitiveBasicsBimap {
             }
             PrimitiveSpecType::SoftmaxComplete { scan_dim } => (
                 SpecKey::SoftmaxComplete {
+                    rank: spec_shape.len().try_into().unwrap(),
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2405,6 +2408,7 @@ impl BiMap for PrimitiveBasicsBimap {
             ),
             PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim } => (
                 SpecKey::SoftmaxDenominatorAndMax {
+                    rank: spec_shape.len().try_into().unwrap(),
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2412,6 +2416,7 @@ impl BiMap for PrimitiveBasicsBimap {
             ),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim, accum } => (
                 SpecKey::SoftmaxDenominatorAndUnscaled {
+                    rank: spec_shape.len().try_into().unwrap(),
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2419,6 +2424,7 @@ impl BiMap for PrimitiveBasicsBimap {
             ),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, accum } => (
                 SpecKey::SoftmaxDenominatorAndUnscaledFromMax {
+                    rank: spec_shape.len().try_into().unwrap(),
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2426,6 +2432,7 @@ impl BiMap for PrimitiveBasicsBimap {
             ),
             PrimitiveSpecType::SoftmaxDenominator { scan_dim, accum } => (
                 SpecKey::SoftmaxDenominator {
+                    rank: spec_shape.len().try_into().unwrap(),
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2433,6 +2440,7 @@ impl BiMap for PrimitiveBasicsBimap {
             ),
             PrimitiveSpecType::Max { dim, accum } => (
                 SpecKey::Max {
+                    rank: spec_shape.len().try_into().unwrap(),
                     dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2440,18 +2448,21 @@ impl BiMap for PrimitiveBasicsBimap {
             ),
             PrimitiveSpecType::OnePrefix => (
                 SpecKey::OnePrefix {
+                    rank: spec_shape.len().try_into().unwrap(),
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
                 shifted_shape.collect(),
             ),
             PrimitiveSpecType::Move => (
                 SpecKey::Move {
+                    rank: spec_shape.len().try_into().unwrap(),
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
                 shifted_shape.collect(),
             ),
             PrimitiveSpecType::Fill { value } => (
                 SpecKey::Fill {
+                    rank: spec_shape.len().try_into().unwrap(),
                     value,
                     dtype: dtypes[0],
                 },
@@ -2459,12 +2470,14 @@ impl BiMap for PrimitiveBasicsBimap {
             ),
             PrimitiveSpecType::DivideVec => (
                 SpecKey::DivideVec {
+                    rank: spec_shape.len().try_into().unwrap(),
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
                 shifted_shape.collect(),
             ),
             PrimitiveSpecType::DivideVecScalar { scan_dim } => (
                 SpecKey::DivideVecScalar {
+                    rank: spec_shape.len().try_into().unwrap(),
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
@@ -2479,18 +2492,25 @@ impl BiMap for PrimitiveBasicsBimap {
             SpecKey::Matmul { dtypes: _ }
             | SpecKey::Conv { dtypes: _ }
             | SpecKey::SoftmaxDenominatorAndUnscaled {
+                rank: _,
                 scan_dim: _,
                 dtypes: _,
             }
             | SpecKey::SoftmaxDenominator {
+                rank: _,
                 scan_dim: _,
                 dtypes: _,
             }
             | SpecKey::SoftmaxDenominatorAndUnscaledFromMax {
+                rank: _,
                 scan_dim: _,
                 dtypes: _,
             }
-            | SpecKey::Max { dim: _, dtypes: _ } => {
+            | SpecKey::Max {
+                rank: _,
+                dim: _,
+                dtypes: _,
+            } => {
                 let accum = v[0] == 0;
                 let (typ, dtypes) = match key {
                     SpecKey::Matmul { dtypes } => {
@@ -2499,30 +2519,44 @@ impl BiMap for PrimitiveBasicsBimap {
                     SpecKey::Conv { dtypes } => {
                         (PrimitiveSpecType::Conv { accum }, dtypes.to_vec())
                     }
-                    SpecKey::SoftmaxDenominatorAndUnscaled { scan_dim, dtypes } => (
+                    SpecKey::SoftmaxDenominatorAndUnscaled {
+                        rank: _,
+                        scan_dim,
+                        dtypes,
+                    } => (
                         PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
                             scan_dim: *scan_dim,
                             accum,
                         },
                         dtypes.into(),
                     ),
-                    SpecKey::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, dtypes } => (
+                    SpecKey::SoftmaxDenominatorAndUnscaledFromMax {
+                        rank: _,
+                        scan_dim,
+                        dtypes,
+                    } => (
                         PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
                             scan_dim: *scan_dim,
                             accum,
                         },
                         dtypes.into(),
                     ),
-                    SpecKey::SoftmaxDenominator { scan_dim, dtypes } => (
+                    SpecKey::SoftmaxDenominator {
+                        rank: _,
+                        scan_dim,
+                        dtypes,
+                    } => (
                         PrimitiveSpecType::SoftmaxDenominator {
                             scan_dim: *scan_dim,
                             accum,
                         },
                         dtypes.into(),
                     ),
-                    SpecKey::Max { dim, dtypes } => {
-                        (PrimitiveSpecType::Max { dim: *dim, accum }, dtypes.to_vec())
-                    }
+                    SpecKey::Max {
+                        rank: _,
+                        dim,
+                        dtypes,
+                    } => (PrimitiveSpecType::Max { dim: *dim, accum }, dtypes.to_vec()),
                     _ => unreachable!(),
                 };
 
@@ -2546,31 +2580,46 @@ impl BiMap for PrimitiveBasicsBimap {
                 }
             }
             SpecKey::Softmax {
+                rank: _,
                 scan_dim: _,
                 dtypes: _,
             }
             | SpecKey::SoftmaxComplete {
+                rank: _,
                 scan_dim: _,
                 dtypes: _,
             }
             | SpecKey::SoftmaxDenominatorAndMax {
+                rank: _,
                 scan_dim: _,
                 dtypes: _,
             } => {
                 let (typ, dtypes) = match key {
-                    SpecKey::Softmax { scan_dim, dtypes } => (
+                    SpecKey::Softmax {
+                        rank: _,
+                        scan_dim,
+                        dtypes,
+                    } => (
                         PrimitiveSpecType::Softmax {
                             scan_dim: *scan_dim,
                         },
                         dtypes.into(),
                     ),
-                    SpecKey::SoftmaxComplete { scan_dim, dtypes } => (
+                    SpecKey::SoftmaxComplete {
+                        rank: _,
+                        scan_dim,
+                        dtypes,
+                    } => (
                         PrimitiveSpecType::SoftmaxComplete {
                             scan_dim: *scan_dim,
                         },
                         dtypes.into(),
                     ),
-                    SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtypes } => (
+                    SpecKey::SoftmaxDenominatorAndMax {
+                        rank: _,
+                        scan_dim,
+                        dtypes,
+                    } => (
                         PrimitiveSpecType::SoftmaxDenominatorAndMax {
                             scan_dim: *scan_dim,
                         },
@@ -2598,34 +2647,46 @@ impl BiMap for PrimitiveBasicsBimap {
                     dtypes,
                 }
             }
-            SpecKey::OnePrefix { dtypes } => PrimitiveBasics {
+            SpecKey::OnePrefix { rank: _, dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::OnePrefix,
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: dtypes.into(),
             },
-            SpecKey::Move { dtypes } => PrimitiveBasics {
+            SpecKey::Move { rank: _, dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::Move,
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: dtypes.into(),
             },
-            SpecKey::Fill { value, dtype } => PrimitiveBasics {
+            SpecKey::Fill {
+                rank: _,
+                value,
+                dtype,
+            } => PrimitiveBasics {
                 typ: PrimitiveSpecType::Fill { value: *value },
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: vec![*dtype],
             },
-            SpecKey::DivideVec { dtypes } => PrimitiveBasics {
+            SpecKey::DivideVec { rank: _, dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::DivideVec,
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: dtypes.into(),
             },
-            SpecKey::DivideVecScalar { scan_dim, dtypes } => PrimitiveBasics {
+            SpecKey::DivideVecScalar {
+                rank: _,
+                scan_dim,
+                dtypes,
+            } => PrimitiveBasics {
                 typ: PrimitiveSpecType::DivideVecScalar {
                     scan_dim: *scan_dim,
                 },
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: dtypes.into(),
             },
-            SpecKey::Broadcast { dim, dtypes } => PrimitiveBasics {
+            SpecKey::Broadcast {
+                rank: _,
+                dim,
+                dtypes,
+            } => PrimitiveBasics {
                 typ: PrimitiveSpecType::Broadcast { dim: *dim },
                 spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
                 dtypes: dtypes.to_vec(),

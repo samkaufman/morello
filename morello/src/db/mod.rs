@@ -1023,8 +1023,8 @@ pub fn iter_blocks_in_single_dim_range(
 fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
     let ((spec_key, table_key_rest), block_pt) = page_key;
     let mut spec_key_dir_name = match spec_key {
-        SpecKey::OnePrefix { dtypes } => root
-            .join("OnePrefix")
+        SpecKey::OnePrefix { rank, dtypes } => root
+            .join(format!("OnePrefix{}", rank))
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::Matmul { dtypes } => root
             .join("Matmul")
@@ -1032,58 +1032,97 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
         SpecKey::Conv { dtypes } => root
             .join("Conv")
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::Broadcast { dim, dtypes } => root
-            .join("Broadcast")
+        SpecKey::Broadcast { rank, dim, dtypes } => root
+            .join(format!("Broadcast{}", rank))
             .join(dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::Softmax { scan_dim, dtypes } => root
-            .join("Softmax")
+        SpecKey::Softmax {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("Softmax{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::SoftmaxComplete { scan_dim, dtypes } => root
-            .join("SoftmaxComplete")
+        SpecKey::SoftmaxComplete {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("SoftmaxComplete{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::SoftmaxDenominatorAndMax { scan_dim, dtypes } => root
-            .join("SoftmaxDenominatorAndMax")
+        SpecKey::SoftmaxDenominatorAndMax {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("SoftmaxDenominatorAndMax{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::SoftmaxDenominatorAndUnscaled { scan_dim, dtypes } => root
-            .join("SoftmaxDenominatorAndUnscaled")
+        SpecKey::SoftmaxDenominatorAndUnscaled {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("SoftmaxDenominatorAndUnscaled{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, dtypes } => root
-            .join("SoftmaxDenominatorAndUnscaledFromMax")
+        SpecKey::SoftmaxDenominatorAndUnscaledFromMax {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("SoftmaxDenominatorAndUnscaledFromMax{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::SoftmaxDenominator { scan_dim, dtypes } => root
-            .join("SoftmaxDenominator")
+        SpecKey::SoftmaxDenominator {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("SoftmaxDenominator{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().join("_")),
-        SpecKey::DivideVec { dtypes } => root
-            .join("DivideVec")
+        SpecKey::DivideVec { rank, dtypes } => root
+            .join(format!("DivideVec{}", rank))
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::DivideVecScalar { scan_dim, dtypes } => root
-            .join("DivideVecScalar")
+        SpecKey::DivideVecScalar {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("DivideVecScalar{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
-        SpecKey::Max { dtypes, dim } => root
-            .join("Max")
+        SpecKey::Max { rank, dtypes, dim } => root
+            .join(format!("Max{}", rank))
             .join(dim.to_string())
             .join(dtypes.iter().join("_")),
-        SpecKey::Move { dtypes } => root.join("Move").join(dtypes.iter().join("_")),
+        SpecKey::Move { rank, dtypes } => root
+            .join(format!("Move{}", rank))
+            .join(dtypes.iter().join("_")),
         SpecKey::Fill {
+            rank,
             dtype,
             value: FillValue::Zero,
-        } => root.join("FillZero").join(dtype.to_string()),
+        } => root
+            .join(format!("FillZero{}", rank))
+            .join(dtype.to_string()),
         SpecKey::Fill {
+            rank,
             dtype,
             value: FillValue::NegInf,
-        } => root.join("FillNegInf").join(dtype.to_string()),
+        } => root
+            .join(format!("FillNegInf{}", rank))
+            .join(dtype.to_string()),
         SpecKey::Fill {
+            rank,
             dtype,
             value: FillValue::Min,
-        } => root.join("FillMin").join(dtype.to_string()),
+        } => root
+            .join(format!("FillMin{}", rank))
+            .join(dtype.to_string()),
         SpecKey::Compose { components } => root
             .join("Compose")
             .join(
