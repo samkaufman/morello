@@ -18,7 +18,7 @@ use std::{fs, iter, path};
 #[cfg(feature = "db-stats")]
 use std::sync::atomic::{self, AtomicU64};
 
-use morello::common::{DimSize, Dtype};
+use morello::common::{DimSize, Dtype, Shape};
 use morello::db::{ActionCostVec, FilesDatabase};
 use morello::grid::compose::Compose;
 use morello::grid::downscale::DownscaleSurMap;
@@ -466,37 +466,88 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         return phases;
     }
 
-    phases.push(vec![lspec!(Matmul(
+    let matmul_spec = lspec!(Matmul(
         [nz!(1u32), args.size, args.size, args.size],
         (u32, CpuMemoryLevel::GL, row_major),
         (u32, CpuMemoryLevel::GL, row_major),
         (u32, CpuMemoryLevel::GL, row_major),
         serial
-    ))]);
+    ));
+
+    let mut matmul_phase = vec![matmul_spec];
+    for rank in 1..=move_needed_rank {
+        let output_shape: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
+        for dim in 0..rank {
+            let mut input_shape = output_shape.clone();
+            input_shape[usize::from(dim)] = nz!(1u32);
+
+            matmul_phase.push(LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Broadcast { dim },
+                    spec_shape: output_shape.clone(),
+                    dtypes: vec![Dtype::Uint32; 2],
+                },
+                vec![taux_gl(&input_shape), taux_gl(&output_shape)],
+                true,
+            ));
+
+            matmul_phase.push(LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Max { dim, accum: false },
+                    spec_shape: output_shape.clone(),
+                    dtypes: vec![Dtype::Uint32; 2],
+                },
+                vec![taux_gl(&output_shape), taux_gl(&input_shape)],
+                true,
+            ));
+
+            matmul_phase.push(LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                        scan_dim: dim,
+                        accum: false,
+                    },
+                    spec_shape: output_shape.clone(),
+                    dtypes: vec![Dtype::Float32; 4],
+                },
+                vec![
+                    taux_gl(&output_shape),
+                    taux_gl(&input_shape),
+                    taux_gl(&input_shape),
+                    taux_gl(&output_shape),
+                ],
+                true,
+            ));
+        }
+
+        matmul_phase.push(LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::DivideVec,
+                spec_shape: output_shape.clone(),
+                dtypes: vec![Dtype::Uint32; 3],
+            },
+            vec![
+                taux_gl(&output_shape),
+                taux_gl(&output_shape),
+                taux_gl(&output_shape),
+            ],
+            true,
+        ));
+    }
+
+    phases.push(matmul_phase);
     if args.through == ThroughSpec::Matmul {
         return phases;
     }
 
-    let conv_phase: Vec<_> = args
+    let mut conv_phase: Vec<_> = args
         .filters_size
         .iter()
         .map(|&fs| {
             let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
-            let img_aux = TensorSpecAux::<Tgt> {
-                level: CpuMemoryLevel::GL.into(),
-                layout: row_major(&[args.batch, args.channels, s, s]),
-                vector_size: None,
-            };
-            let filters_aux = TensorSpecAux::<Tgt> {
-                level: CpuMemoryLevel::GL.into(),
-                layout: row_major(&[args.filters, args.channels, fs, fs]),
-                vector_size: None,
-            };
-            let output_aux = TensorSpecAux::<Tgt> {
-                level: CpuMemoryLevel::GL.into(),
-                layout: row_major(&[args.batch, args.filters, args.size, args.size]),
-                vector_size: None,
-            };
+            let img_aux = taux_gl(&[args.batch, args.channels, s, s]);
+            let filters_aux = taux_gl(&[args.filters, args.channels, fs, fs]);
+            let output_aux = taux_gl(&[args.batch, args.filters, args.size, args.size]);
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Conv { accum: false },
@@ -516,9 +567,47 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
             )
         })
         .collect();
-    if !conv_phase.is_empty() {
-        phases.push(conv_phase);
-    }
+    conv_phase.extend((1..=move_needed_rank).flat_map(|rank| {
+        let numer_shape: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
+        (0..rank).flat_map(move |scan_dim| {
+            let mut denom_shape = numer_shape.clone();
+            denom_shape[usize::from(scan_dim)] = nz!(1u32);
+
+            let softmax_spec = LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
+                        scan_dim,
+                        accum: false,
+                    },
+                    spec_shape: numer_shape.clone(),
+                    dtypes: vec![Dtype::Float32; 3],
+                },
+                vec![
+                    taux_gl(&numer_shape),
+                    taux_gl(&denom_shape),
+                    taux_gl(&numer_shape),
+                ],
+                true,
+            );
+
+            let divide_spec = LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
+                    spec_shape: numer_shape.clone(),
+                    dtypes: vec![Dtype::Uint32; 3],
+                },
+                vec![
+                    taux_gl(&numer_shape),
+                    taux_gl(&denom_shape),
+                    taux_gl(&numer_shape),
+                ],
+                true,
+            );
+
+            [softmax_spec, divide_spec].into_iter()
+        })
+    }));
+    phases.push(conv_phase);
 
     phases
 }
@@ -608,4 +697,12 @@ fn downscaler<'a>(unscaled_bound: Vec<BimapInt>) -> MaxVec<'a, DownscaleSurMap<'
         Arc::new(unscaled_bound),
         PhantomData,
     )
+}
+
+fn taux_gl<Tgt: CpuTarget>(shape: &[DimSize]) -> TensorSpecAux<Tgt> {
+    TensorSpecAux {
+        level: CpuMemoryLevel::GL.into(),
+        layout: row_major(shape),
+        vector_size: None,
+    }
 }
