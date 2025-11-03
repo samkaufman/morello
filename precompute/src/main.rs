@@ -193,9 +193,14 @@ fn main_per_db<Tgt>(
 
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
-    let bounds = goal_bounds::<Tgt>(args);
+    let phases = goal_phases::<Tgt>(args);
+    let bounds_for_progress = phases
+        .iter()
+        .flat_map(|phase| phase.iter())
+        .cloned()
+        .collect::<Vec<_>>();
 
-    let fingerprint = compute_job_fingerprint(&bounds);
+    let fingerprint = compute_job_fingerprint(&bounds_for_progress);
     let stages_completed = read_stages_to_skip(&fingerprint, db_path);
     if stages_completed != 0 {
         info!("First {stages_completed} stages already computed");
@@ -205,176 +210,178 @@ fn main_per_db<Tgt>(
     }
 
     let mut stage_idx = 0;
-    for bound_spec in &bounds {
-        let unscaled_surmap = LogicalSpecSurMap::new(
-            PrimitiveBasicsBimap {
-                binary_scale_shapes: true,
-            },
-            TensorSpecAuxSurMap::new,
-        );
-        let (key, unscaled_bound_pt) = unscaled_surmap.apply(bound_spec);
-        let surmap = Compose(
-            unscaled_surmap,
-            ApplyRhs(downscaler(unscaled_bound_pt), PhantomData),
-        );
-        let (_, bound_pt) = surmap.apply(bound_spec);
-
-        // TODO: Implement `len` for Diagonals so we don't need to collect just to get a count.
-        let stages = diagonals(&bound_pt).collect::<Vec<_>>();
-
-        let table_progress_bar = multi_opt.as_ref().map(|m| {
-            let bar = ProgressBar::new(stages.len().try_into().unwrap());
-            bar.set_style(
-                ProgressStyle::with_template(
-                    "table: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9}",
-                )
-                .unwrap(),
+    for phase in &phases {
+        for bound_spec in phase {
+            let unscaled_surmap = LogicalSpecSurMap::new(
+                PrimitiveBasicsBimap {
+                    binary_scale_shapes: true,
+                },
+                TensorSpecAuxSurMap::new,
             );
-            m.add(bar)
-        });
+            let (key, unscaled_bound_pt) = unscaled_surmap.apply(bound_spec);
+            let surmap = Compose(
+                unscaled_surmap,
+                ApplyRhs(downscaler(unscaled_bound_pt), PhantomData),
+            );
+            let (_, bound_pt) = surmap.apply(bound_spec);
 
-        for stage in stages {
-            let stage_progress_bar = multi_opt.as_ref().map(|m| {
-                let bar = ProgressBar::new(0);
+            // TODO: Implement `len` for Diagonals so we don't need to collect just to get a count.
+            let stages = diagonals(&bound_pt).collect::<Vec<_>>();
+
+            let table_progress_bar = multi_opt.as_ref().map(|m| {
+                let bar = ProgressBar::new(stages.len().try_into().unwrap());
                 bar.set_style(
                     ProgressStyle::with_template(
-                        "stage: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9} ({per_sec:.2}) {msg}",
+                        "table: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9}",
                     )
                     .unwrap(),
                 );
                 m.add(bar)
             });
 
-            if stage_idx < stages_completed {
+            for stage in stages {
+                let stage_progress_bar = multi_opt.as_ref().map(|m| {
+                    let bar = ProgressBar::new(0);
+                    bar.set_style(
+                        ProgressStyle::with_template(
+                            "stage: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9} ({per_sec:.2}) {msg}",
+                        )
+                        .unwrap(),
+                    );
+                    m.add(bar)
+                });
+
+                if stage_idx < stages_completed {
+                    stage_idx += 1;
+                    if let Some(pb) = &table_progress_bar {
+                        pb.inc(1);
+                    }
+                    continue;
+                }
+
+                // Construct the TaskIters, dropping empties. Materializing these up front simplifies
+                // parallelization, makes out following "has a peak parallelism of" log message more
+                // meaningful, and simplifies logging an example Spec.
+                let stage = stage
+                    .filter_map(|task_pt| {
+                        let specs = surmap
+                            .apply_inverse(&(key.clone(), task_pt))
+                            .filter(|l| l.is_canonical())
+                            .collect::<Vec<_>>();
+                        if specs.is_empty() {
+                            None
+                        } else {
+                            Some(specs)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                info!(
+                    "Beginning stage {stage_idx}, which has peak parallelism of {}",
+                    stage.len()
+                );
+
+                if let Some(example_spec) = stage.first().and_then(|v| v.first()) {
+                    info!("Example problem Spec: {example_spec}");
+                }
+
+                #[cfg(feature = "db-stats")]
+                let total_synthesis_ms = AtomicU64::new(0);
+
+                let stage_start = Instant::now();
+                stage.into_par_iter().for_each(|task| {
+                    let mut worklist = task
+                        .into_iter()
+                        .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
+                        .collect::<Vec<_>>();
+                    if let Some(pb) = &stage_progress_bar {
+                        pb.inc_length(worklist.len().try_into().unwrap());
+                    }
+                    let mut next_stage = HashSet::new();
+
+                    #[cfg(feature = "db-stats")]
+                    let mut synthesis_time = Duration::ZERO;
+                    while !worklist.is_empty() {
+                        validate_stage_worklist_unique(&worklist);
+
+                        #[cfg(feature = "db-stats")]
+                        let synthesis_start = Instant::now();
+
+                        let Some(stage_results) = process_worklist_chunks(
+                            &db,
+                            &worklist,
+                            deadline,
+                            &stage_progress_bar,
+                            &table_progress_bar,
+                        ) else {
+                            log::debug!("Deadline reached; thread stopping");
+                            return;
+                        };
+
+                        #[cfg(feature = "db-stats")]
+                        {
+                            synthesis_time += synthesis_start.elapsed();
+                        }
+                        compute_next_stage(&worklist, stage_results, &levels, &mut next_stage);
+                        if let Some(pb) = &stage_progress_bar {
+                            pb.inc_length(next_stage.len().try_into().unwrap());
+                        }
+                        // TODO: Just swap data structures.
+                        worklist = next_stage.drain().collect();
+                    }
+
+                    #[cfg(feature = "db-stats")]
+                    total_synthesis_ms.fetch_add(
+                        synthesis_time.as_millis().try_into().unwrap(),
+                        atomic::Ordering::Relaxed,
+                    );
+                });
+                info!(
+                    "Stage (without saving) {} took {:?}",
+                    stage_idx,
+                    stage_start.elapsed()
+                );
+
+                #[cfg(feature = "db-stats")]
+                log_db_stats(&mut db, &total_synthesis_ms);
+
+                if let Some(pb) = stage_progress_bar {
+                    pb.finish_and_clear();
+                }
+
+                let save_start = Instant::now();
+                db.save();
+                write_stages_completed(&fingerprint, db_path, stage_idx + 1);
+                info!("Saving took {:?}", save_start.elapsed());
+
+                if let Some(max_stages) = args.stages {
+                    if stage_idx >= max_stages {
+                        info!("Stopping early because --stages was passed");
+                        return;
+                    }
+                }
+
                 stage_idx += 1;
                 if let Some(pb) = &table_progress_bar {
                     pb.inc(1);
                 }
-                continue;
             }
 
-            // Construct the TaskIters, dropping empties. Materializing these up front simplifies
-            // parallelization, makes out following "has a peak parallelism of" log message more
-            // meaningful, and simplifies logging an example Spec.
-            let stage = stage
-                .filter_map(|task_pt| {
-                    let specs = surmap
-                        .apply_inverse(&(key.clone(), task_pt))
-                        .filter(|l| l.is_canonical())
-                        .collect::<Vec<_>>();
-                    if specs.is_empty() {
-                        None
-                    } else {
-                        Some(specs)
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            info!(
-                "Beginning stage {stage_idx}, which has peak parallelism of {}",
-                stage.len()
-            );
-
-            if let Some(example_spec) = stage.first().and_then(|v| v.first()) {
-                info!("Example problem Spec: {example_spec}");
-            }
-
-            #[cfg(feature = "db-stats")]
-            let total_synthesis_ms = AtomicU64::new(0);
-
-            let stage_start = Instant::now();
-            stage.into_par_iter().for_each(|task| {
-                let mut worklist = task
-                    .into_iter()
-                    .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
-                    .collect::<Vec<_>>();
-                if let Some(pb) = &stage_progress_bar {
-                    pb.inc_length(worklist.len().try_into().unwrap());
-                }
-                let mut next_stage = HashSet::new();
-
-                #[cfg(feature = "db-stats")]
-                let mut synthesis_time = Duration::ZERO;
-                while !worklist.is_empty() {
-                    validate_stage_worklist_unique(&worklist);
-
-                    #[cfg(feature = "db-stats")]
-                    let synthesis_start = Instant::now();
-
-                    let Some(stage_results) = process_worklist_chunks(
-                        &db,
-                        &worklist,
-                        deadline,
-                        &stage_progress_bar,
-                        &table_progress_bar,
-                    ) else {
-                        log::debug!("Deadline reached; thread stopping");
-                        return;
-                    };
-
-                    #[cfg(feature = "db-stats")]
-                    {
-                        synthesis_time += synthesis_start.elapsed();
-                    }
-                    compute_next_stage(&worklist, stage_results, &levels, &mut next_stage);
-                    if let Some(pb) = &stage_progress_bar {
-                        pb.inc_length(next_stage.len().try_into().unwrap());
-                    }
-                    // TODO: Just swap data structures.
-                    worklist = next_stage.drain().collect();
-                }
-
-                #[cfg(feature = "db-stats")]
-                total_synthesis_ms.fetch_add(
-                    synthesis_time.as_millis().try_into().unwrap(),
-                    atomic::Ordering::Relaxed,
-                );
-            });
-            info!(
-                "Stage (without saving) {} took {:?}",
-                stage_idx,
-                stage_start.elapsed()
-            );
-
-            #[cfg(feature = "db-stats")]
-            log_db_stats(&mut db, &total_synthesis_ms);
-
-            if let Some(pb) = stage_progress_bar {
+            if let Some(pb) = table_progress_bar {
                 pb.finish_and_clear();
             }
-
-            let save_start = Instant::now();
-            db.save();
-            write_stages_completed(&fingerprint, db_path, stage_idx + 1);
-            info!("Saving took {:?}", save_start.elapsed());
-
-            if let Some(max_stages) = args.stages {
-                if stage_idx >= max_stages {
-                    info!("Stopping early because --stages was passed");
-                    return;
-                }
-            }
-
-            stage_idx += 1;
-            if let Some(pb) = &table_progress_bar {
-                pb.inc(1);
-            }
-        }
-
-        if let Some(pb) = table_progress_bar {
-            pb.finish_and_clear();
         }
     }
 }
 
-fn compute_job_fingerprint(bounds: &[LogicalSpec<Avx2Target>]) -> JobFingerprint {
+fn compute_job_fingerprint<Tgt: Target>(bounds: &[LogicalSpec<Tgt>]) -> JobFingerprint {
     let mut progress_fingerprint_hasher = Adler32::new();
     bounds.hash(&mut progress_fingerprint_hasher);
     (DB_PROGRESS_VERSION, progress_fingerprint_hasher.finish())
 }
 
 /// Check that given [Spec]s are all unique. Panics otherwise.
-fn validate_stage_worklist_unique(worklist: &[Spec<Avx2Target>]) {
+fn validate_stage_worklist_unique<Tgt: Target>(worklist: &[Spec<Tgt>]) {
     let mut stage_set = HashSet::new();
     for spec in worklist {
         if !stage_set.insert(spec) {
@@ -383,13 +390,19 @@ fn validate_stage_worklist_unique(worklist: &[Spec<Avx2Target>]) {
     }
 }
 
-fn process_worklist_chunks(
+fn process_worklist_chunks<Tgt>(
     db: &FilesDatabase,
-    worklist: &[Spec<Avx2Target>],
+    worklist: &[Spec<Tgt>],
     deadline: Option<Instant>,
     stage_progress_bar: &Option<ProgressBar>,
     table_progress_bar: &Option<ProgressBar>,
-) -> Option<Vec<ActionCostVec>> {
+) -> Option<Vec<ActionCostVec>>
+where
+    Tgt: CpuTarget,
+    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+        morello::grid::general::BiMap<Codomain = u8>,
+{
     let mut subworklist_offset = 0;
     let mut stage_results = Vec::with_capacity(worklist.len());
 
@@ -418,11 +431,11 @@ fn process_worklist_chunks(
     Some(stage_results)
 }
 
-fn compute_next_stage(
-    worklist: &[Spec<Avx2Target>],
+fn compute_next_stage<Tgt: Target>(
+    worklist: &[Spec<Tgt>],
     stage_results: Vec<morello::db::ActionCostVec>,
-    levels: &[CpuMemoryLevel],
-    next_stage: &mut HashSet<Spec<Avx2Target>>,
+    levels: &[Tgt::Level],
+    next_stage: &mut HashSet<Spec<Tgt>>,
 ) {
     for (spec, result) in worklist.iter().zip(stage_results) {
         if let [(_, only_result_cost)] = &result.0[..] {
@@ -446,81 +459,94 @@ fn log_db_stats(db: &mut FilesDatabase, total_synthesis_ms: &AtomicU64) {
     db.reset_basic_stats();
 }
 
-fn goal_bounds<Tgt: CpuTarget>(args: &Args) -> Vec<LogicalSpec<Tgt>> {
-    let mut bounds = vec![];
+fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
+    let mut phases = vec![];
     let move_needed_rank = match args.through {
         ThroughSpec::Conv => 4,
         _ => 2,
     };
 
-    bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top::<Tgt>(args.size, rank)]));
+    let move_phase: Vec<_> = (1..=move_needed_rank)
+        .map(|rank| move_top::<Tgt>(args.size, rank))
+        .collect();
+    if !move_phase.is_empty() {
+        phases.push(move_phase);
+    }
     if args.through == ThroughSpec::Move {
-        return bounds;
+        return phases;
     }
 
-    bounds.extend((1..=move_needed_rank).map(|rank| {
-        lspec!(FillZero(
-            iter::repeat_n(args.size, rank.into()),
-            (u32, CpuMemoryLevel::GL, row_major),
-            serial
-        ))
-    }));
+    let zero_specs: Vec<_> = (1..=move_needed_rank)
+        .map(|rank| {
+            lspec!(FillZero(
+                iter::repeat_n(args.size, rank.into()),
+                (u32, CpuMemoryLevel::GL, row_major),
+                serial
+            ))
+        })
+        .collect();
+    for spec in zero_specs {
+        phases.push(vec![spec]);
+    }
     if args.through == ThroughSpec::Zero {
-        return bounds;
+        return phases;
     }
 
-    bounds.push(lspec!(Matmul(
+    phases.push(vec![lspec!(Matmul(
         [nz!(1u32), args.size, args.size, args.size],
         (u32, CpuMemoryLevel::GL, row_major),
         (u32, CpuMemoryLevel::GL, row_major),
         (u32, CpuMemoryLevel::GL, row_major),
         serial
-    )));
+    ))]);
     if args.through == ThroughSpec::Matmul {
-        return bounds;
+        return phases;
     }
 
-    bounds.extend({
-        args.filters_size
-            .iter()
-            .map(|&fs| {
-                let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
-                let img_aux = TensorSpecAux::<Tgt> {
-                    level: CpuMemoryLevel::GL.into(),
-                    layout: row_major(&[args.batch, args.channels, s, s]),
-                    vector_size: None,
-                };
-                let filters_aux = TensorSpecAux::<Tgt> {
-                    level: CpuMemoryLevel::GL.into(),
-                    layout: row_major(&[args.filters, args.channels, fs, fs]),
-                    vector_size: None,
-                };
-                let output_aux = TensorSpecAux::<Tgt> {
-                    level: CpuMemoryLevel::GL.into(),
-                    layout: row_major(&[args.batch, args.filters, args.size, args.size]),
-                    vector_size: None,
-                };
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::Conv { accum: false },
-                        spec_shape: smallvec![
-                            args.batch,
-                            args.filters,
-                            args.channels,
-                            args.size,
-                            args.size,
-                            fs,
-                            fs,
-                        ],
-                        dtypes: vec![Dtype::Uint32; 3],
-                    },
-                    vec![img_aux, filters_aux, output_aux],
-                    true,
-                )
-            })
-            .collect::<Vec<_>>()
-    });
-    bounds
+    let conv_phase: Vec<_> = args
+        .filters_size
+        .iter()
+        .map(|&fs| {
+            let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
+            let img_aux = TensorSpecAux::<Tgt> {
+                level: CpuMemoryLevel::GL.into(),
+                layout: row_major(&[args.batch, args.channels, s, s]),
+                vector_size: None,
+            };
+            let filters_aux = TensorSpecAux::<Tgt> {
+                level: CpuMemoryLevel::GL.into(),
+                layout: row_major(&[args.filters, args.channels, fs, fs]),
+                vector_size: None,
+            };
+            let output_aux = TensorSpecAux::<Tgt> {
+                level: CpuMemoryLevel::GL.into(),
+                layout: row_major(&[args.batch, args.filters, args.size, args.size]),
+                vector_size: None,
+            };
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::Conv { accum: false },
+                    spec_shape: smallvec![
+                        args.batch,
+                        args.filters,
+                        args.channels,
+                        args.size,
+                        args.size,
+                        fs,
+                        fs,
+                    ],
+                    dtypes: vec![Dtype::Uint32; 3],
+                },
+                vec![img_aux, filters_aux, output_aux],
+                true,
+            )
+        })
+        .collect();
+    if !conv_phase.is_empty() {
+        phases.push(conv_phase);
+    }
+
+    phases
 }
 
 /// Returns a logical Move Spec of given size and rank.
