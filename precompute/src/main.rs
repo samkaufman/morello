@@ -470,29 +470,46 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         matmul_phase.push(matmul_top(args.size, dtype));
     }
     for rank in 1..=move_needed_rank {
-        let output_shape: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
+        let size_cube: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
         for &dtype in &DTYPES {
             for dim in 0..rank {
-                let mut input_shape = output_shape.clone();
-                input_shape[usize::from(dim)] = nz!(1u32);
+                let mut reduced_shape = size_cube.clone();
+                reduced_shape[usize::from(dim)] = nz!(1u32);
 
                 matmul_phase.push(LogicalSpec::Primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Broadcast { dim },
-                        spec_shape: output_shape.clone(),
+                        spec_shape: size_cube.clone(),
                         dtypes: vec![dtype; 2],
                     },
-                    vec![taux_gl(&input_shape), taux_gl(&output_shape)],
+                    vec![taux_gl(&reduced_shape), taux_gl(&size_cube)],
                     true,
                 ));
 
                 matmul_phase.push(LogicalSpec::Primitive(
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::Max { dim, accum: false },
-                        spec_shape: output_shape.clone(),
+                        spec_shape: size_cube.clone(),
                         dtypes: vec![dtype; 2],
                     },
-                    vec![taux_gl(&output_shape), taux_gl(&input_shape)],
+                    vec![taux_gl(&size_cube), taux_gl(&reduced_shape)],
+                    true,
+                ));
+
+                matmul_phase.push(LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::SoftmaxDenominator {
+                            scan_dim: dim,
+                            accum: false,
+                        },
+                        spec_shape: size_cube.clone(),
+                        dtypes: vec![dtype; 3],
+                    },
+                    vec![
+                        taux_gl(&size_cube),
+                        taux_gl(&reduced_shape),
+                        taux_gl(&reduced_shape),
+                    ],
                     true,
                 ));
 
@@ -502,14 +519,14 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
                             scan_dim: dim,
                             accum: false,
                         },
-                        spec_shape: output_shape.clone(),
+                        spec_shape: size_cube.clone(),
                         dtypes: vec![dtype; 4],
                     },
                     vec![
-                        taux_gl(&output_shape),
-                        taux_gl(&input_shape),
-                        taux_gl(&input_shape),
-                        taux_gl(&output_shape),
+                        taux_gl(&size_cube),
+                        taux_gl(&reduced_shape),
+                        taux_gl(&reduced_shape),
+                        taux_gl(&size_cube),
                     ],
                     true,
                 ));
@@ -518,13 +535,13 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
             matmul_phase.push(LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::DivideVec,
-                    spec_shape: output_shape.clone(),
+                    spec_shape: size_cube.clone(),
                     dtypes: vec![dtype; 3],
                 },
                 vec![
-                    taux_gl(&output_shape),
-                    taux_gl(&output_shape),
-                    taux_gl(&output_shape),
+                    taux_gl(&size_cube),
+                    taux_gl(&size_cube),
+                    taux_gl(&size_cube),
                 ],
                 true,
             ));
