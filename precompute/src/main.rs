@@ -10,7 +10,7 @@ use log::info;
 use nonzero::nonzero as nz;
 use rayon::prelude::*;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 type JobFingerprint = (usize, u64);
 
 const META_FILENAME: &str = "PRECOMPUTE";
-const DB_PROGRESS_VERSION: usize = 1;
+const DB_PROGRESS_VERSION: usize = 2;
 const K: u8 = 1;
 const SUBWORKLIST_MAX_SIZE: usize = 5000;
 const TWOS: [u32; 32] = [2; 32];
@@ -57,8 +57,6 @@ const TWOS: [u32; 32] = [2; 32];
 struct Args {
     #[arg(short, help = "Show a progress bar.")]
     progress_bar: bool,
-    #[arg(long, help = "Maximum number of stages to run.")]
-    stages: Option<usize>,
     #[arg(long, help = "Exit after this many seconds.")]
     timeout: Option<u64>,
     #[arg(long)]
@@ -201,17 +199,17 @@ fn main_per_db<Tgt>(
         .collect::<Vec<_>>();
 
     let fingerprint = compute_job_fingerprint(&bounds_for_progress);
-    let stages_completed = read_stages_to_skip(&fingerprint, db_path);
-    if stages_completed != 0 {
-        info!("First {stages_completed} stages already computed");
+    let mut spec_progress = read_stages_to_skip(&fingerprint, db_path);
+    if !spec_progress.is_empty() {
+        info!("Stages already computed for existing jobs:");
+        for (spec, completed) in &spec_progress {
+            info!("  {completed} stages for {spec}");
+        }
     }
-    if args.stages.map(|s| s <= stages_completed) == Some(true) {
-        return;
-    }
-
-    let mut stage_idx = 0;
+    let mut stage_idx: usize = spec_progress.values().sum();
     for phase in &phases {
         for bound_spec in phase {
+            let spec_completed = spec_progress.get(bound_spec).copied().unwrap_or(0);
             let unscaled_surmap = LogicalSpecSurMap::new(
                 PrimitiveBasicsBimap {
                     binary_scale_shapes: true,
@@ -239,7 +237,7 @@ fn main_per_db<Tgt>(
                 m.add(bar)
             });
 
-            for stage in stages {
+            for (stage_number, stage) in stages.into_iter().enumerate() {
                 let stage_progress_bar = multi_opt.as_ref().map(|m| {
                     let bar = ProgressBar::new(0);
                     bar.set_style(
@@ -251,8 +249,7 @@ fn main_per_db<Tgt>(
                     m.add(bar)
                 });
 
-                if stage_idx < stages_completed {
-                    stage_idx += 1;
+                if stage_number < spec_completed {
                     if let Some(pb) = &table_progress_bar {
                         pb.inc(1);
                     }
@@ -351,15 +348,9 @@ fn main_per_db<Tgt>(
 
                 let save_start = Instant::now();
                 db.save();
-                write_stages_completed(&fingerprint, db_path, stage_idx + 1);
+                spec_progress.insert(bound_spec.clone(), stage_number + 1);
+                write_stages_completed(&fingerprint, db_path, &spec_progress);
                 info!("Saving took {:?}", save_start.elapsed());
-
-                if let Some(max_stages) = args.stages {
-                    if stage_idx >= max_stages {
-                        info!("Stopping early because --stages was passed");
-                        return;
-                    }
-                }
 
                 stage_idx += 1;
                 if let Some(pb) = &table_progress_bar {
@@ -585,33 +576,35 @@ fn next_limits<'a, L: MemoryLevel + 'a>(
 fn read_stages_to_skip(
     current_job_fingerprint: &JobFingerprint,
     db_path: Option<&path::Path>,
-) -> usize {
+) -> HashMap<LogicalSpec<Avx2Target>, usize> {
     let Some(db_path) = db_path else {
-        return 0;
+        return HashMap::new();
     };
     if !db_path.is_dir() {
-        return 0;
+        return HashMap::new();
     }
     let path = db_path.join(META_FILENAME);
-    if !path.exists() {
-        return 0;
-    }
+    let Ok(bytes) = fs::read(&path) else {
+        return HashMap::new();
+    };
 
-    let file = fs::File::open(&path).unwrap();
-    let buf_reader = std::io::BufReader::new(file);
-    let (read_fingerprint, stages_completed): (JobFingerprint, usize) =
-        bincode::deserialize_from(buf_reader).unwrap();
+    let Ok((read_fingerprint, stage_pairs)) =
+        bincode::deserialize::<(JobFingerprint, Vec<(LogicalSpec<Avx2Target>, usize)>)>(&bytes)
+    else {
+        return HashMap::new();
+    };
 
     if current_job_fingerprint != &read_fingerprint {
-        return 0;
+        return HashMap::new();
     }
-    stages_completed
+
+    stage_pairs.into_iter().collect()
 }
 
 fn write_stages_completed(
     current_job_fingerprint: &JobFingerprint,
     db_path: Option<&path::Path>,
-    stages_completed: usize,
+    progress: &HashMap<LogicalSpec<Avx2Target>, usize>,
 ) {
     let Some(db_path) = db_path else {
         return;
@@ -620,7 +613,8 @@ fn write_stages_completed(
     let path = db_path.join(META_FILENAME);
     let file = fs::File::create(path).unwrap();
     let buf_writer = std::io::BufWriter::new(file);
-    bincode::serialize_into(buf_writer, &(current_job_fingerprint, stages_completed)).unwrap();
+    let stage_pairs: Vec<_> = progress.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    bincode::serialize_into(buf_writer, &(*current_job_fingerprint, stage_pairs)).unwrap();
 }
 
 fn downscaler<'a>(unscaled_bound: Vec<BimapInt>) -> MaxVec<'a, DownscaleSurMap<'static>> {
