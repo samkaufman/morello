@@ -4,8 +4,6 @@ use tikv_jemallocator::Jemalloc;
 use adler::Adler32;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use indicatif_log_bridge::LogWrapper;
 use log::info;
 use nonzero::nonzero as nz;
 use rayon::prelude::*;
@@ -13,7 +11,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use std::{fs, iter, path};
 
@@ -55,8 +53,6 @@ const TWOS: [u32; 32] = [2; 32];
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, help = "Show a progress bar.")]
-    progress_bar: bool,
     #[arg(long, help = "Exit after this many seconds.")]
     timeout: Option<u64>,
     #[arg(long)]
@@ -154,22 +150,14 @@ where
         .timeout
         .map(|s| Instant::now() + Duration::from_secs(s));
 
-    let multi_opt = if args.progress_bar {
-        let logger = env_logger::Builder::from_env(env_logger::Env::default()).build();
-        let multi = MultiProgress::new();
-        LogWrapper::new(multi.clone(), logger).try_init().unwrap();
-        Some(multi)
-    } else {
-        env_logger::init();
-        None
-    };
+    env_logger::init();
 
     #[cfg(feature = "db-stats")]
     info!("DB statistic collection enabled");
 
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new::<Tgt>(args.db.as_deref(), true, K, args.cache_size, threads);
-    main_per_db::<Tgt>(args, db, args.db.as_deref(), multi_opt, deadline);
+    main_per_db::<Tgt>(args, db, args.db.as_deref(), deadline);
 
     Ok(())
 }
@@ -178,7 +166,6 @@ fn main_per_db<Tgt>(
     args: &Args,
     #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
     db_path: Option<&path::Path>,
-    multi_opt: Option<MultiProgress>,
     deadline: Option<Instant>,
 ) where
     Tgt: CpuTarget,
@@ -189,179 +176,184 @@ fn main_per_db<Tgt>(
     let levels = Tgt::levels();
     let MemoryLimits::Standard(top) = Tgt::max_mem();
 
-    // TODO: Most of the following details aren't used in computing the bound.
-    // It could be simplified.
     let phases = goal_phases::<Tgt>(args);
-    let bounds_for_progress = phases
-        .iter()
-        .flat_map(|phase| phase.iter())
-        .cloned()
-        .collect::<Vec<_>>();
+    let bounds: Vec<_> = phases.iter().flatten().cloned().collect();
 
-    let fingerprint = compute_job_fingerprint(&bounds_for_progress);
-    let mut spec_progress = read_stages_to_skip(&fingerprint, db_path);
-    if !spec_progress.is_empty() {
+    let fingerprint = compute_job_fingerprint(&bounds);
+    let progress_map = read_stages_to_skip(&fingerprint, db_path);
+    if !progress_map.is_empty() {
         info!("Stages already computed for existing jobs:");
-        for (spec, completed) in &spec_progress {
-            info!("  {completed} stages for {spec}");
+        let mut pairs: Vec<_> = progress_map
+            .iter()
+            .map(|(s, c)| (s.to_string(), *c))
+            .collect();
+        pairs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        for (spec_str, completed) in pairs {
+            info!("  {completed} stages for {spec_str}");
         }
     }
-    let mut stage_idx: usize = spec_progress.values().sum();
-    for phase in &phases {
-        for bound_spec in phase {
-            let spec_completed = spec_progress.get(bound_spec).copied().unwrap_or(0);
-            let unscaled_surmap = LogicalSpecSurMap::new(
-                PrimitiveBasicsBimap {
-                    binary_scale_shapes: true,
-                },
-                TensorSpecAuxSurMap::new,
-            );
-            let (key, unscaled_bound_pt) = unscaled_surmap.apply(bound_spec);
-            let surmap = Compose(
-                unscaled_surmap,
-                ApplyRhs(downscaler(unscaled_bound_pt), PhantomData),
-            );
-            let (_, bound_pt) = surmap.apply(bound_spec);
 
-            // TODO: Implement `len` for Diagonals so we don't need to collect just to get a count.
-            let stages = diagonals(&bound_pt).collect::<Vec<_>>();
-
-            let table_progress_bar = multi_opt.as_ref().map(|m| {
-                let bar = ProgressBar::new(stages.len().try_into().unwrap());
-                bar.set_style(
-                    ProgressStyle::with_template(
-                        "table: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9}",
-                    )
-                    .unwrap(),
-                );
-                m.add(bar)
-            });
-
-            for (stage_number, stage) in stages.into_iter().enumerate() {
-                let stage_progress_bar = multi_opt.as_ref().map(|m| {
-                    let bar = ProgressBar::new(0);
-                    bar.set_style(
-                        ProgressStyle::with_template(
-                            "stage: [{elapsed:>5}] {bar:20} {percent}% {pos:>9}/{len:9} ({per_sec:.2}) {msg}",
-                        )
-                        .unwrap(),
-                    );
-                    m.add(bar)
-                });
-
-                if stage_number < spec_completed {
-                    if let Some(pb) = &table_progress_bar {
-                        pb.inc(1);
-                    }
-                    continue;
-                }
-
-                // Construct the TaskIters, dropping empties. Materializing these up front simplifies
-                // parallelization, makes out following "has a peak parallelism of" log message more
-                // meaningful, and simplifies logging an example Spec.
-                let stage = stage
-                    .filter_map(|task_pt| {
-                        let specs = surmap
-                            .apply_inverse(&(key.clone(), task_pt))
-                            .filter(|l| l.is_canonical())
-                            .collect::<Vec<_>>();
-                        if specs.is_empty() {
-                            None
-                        } else {
-                            Some(specs)
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                info!(
-                    "Beginning stage {stage_idx}, which has peak parallelism of {}",
-                    stage.len()
-                );
-
-                if let Some(example_spec) = stage.first().and_then(|v| v.first()) {
-                    info!("Example problem Spec: {example_spec}");
-                }
-
-                #[cfg(feature = "db-stats")]
-                let total_synthesis_ms = AtomicU64::new(0);
-
-                let stage_start = Instant::now();
-                stage.into_par_iter().for_each(|task| {
-                    let mut worklist = task
-                        .into_iter()
-                        .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
-                        .collect::<Vec<_>>();
-                    if let Some(pb) = &stage_progress_bar {
-                        pb.inc_length(worklist.len().try_into().unwrap());
-                    }
-                    let mut next_stage = HashSet::new();
-
-                    #[cfg(feature = "db-stats")]
-                    let mut synthesis_time = Duration::ZERO;
-                    while !worklist.is_empty() {
-                        validate_stage_worklist_unique(&worklist);
-
-                        #[cfg(feature = "db-stats")]
-                        let synthesis_start = Instant::now();
-
-                        let Some(stage_results) = process_worklist_chunks(
-                            &db,
-                            &worklist,
-                            deadline,
-                            &stage_progress_bar,
-                            &table_progress_bar,
-                        ) else {
-                            log::debug!("Deadline reached; thread stopping");
-                            return;
-                        };
-
-                        #[cfg(feature = "db-stats")]
-                        {
-                            synthesis_time += synthesis_start.elapsed();
-                        }
-                        compute_next_stage(&worklist, stage_results, &levels, &mut next_stage);
-                        if let Some(pb) = &stage_progress_bar {
-                            pb.inc_length(next_stage.len().try_into().unwrap());
-                        }
-                        // TODO: Just swap data structures.
-                        worklist = next_stage.drain().collect();
-                    }
-
-                    #[cfg(feature = "db-stats")]
-                    total_synthesis_ms.fetch_add(
-                        synthesis_time.as_millis().try_into().unwrap(),
-                        atomic::Ordering::Relaxed,
-                    );
-                });
-                info!(
-                    "Stage (without saving) {} took {:?}",
-                    stage_idx,
-                    stage_start.elapsed()
-                );
-
-                #[cfg(feature = "db-stats")]
-                log_db_stats(&mut db, &total_synthesis_ms);
-
-                if let Some(pb) = stage_progress_bar {
-                    pb.finish_and_clear();
-                }
-
-                let save_start = Instant::now();
-                db.save();
-                spec_progress.insert(bound_spec.clone(), stage_number + 1);
-                write_stages_completed(&fingerprint, db_path, &spec_progress);
-                info!("Saving took {:?}", save_start.elapsed());
-
-                stage_idx += 1;
-                if let Some(pb) = &table_progress_bar {
-                    pb.inc(1);
-                }
+    // Launch thread responsible for writing updates to the PRECOMPUTE file
+    let initial_progress_map = progress_map.clone();
+    let (meta_update_tx, meta_update_rx) = mpsc::channel();
+    let db_path_buf = db_path.map(|p| p.to_path_buf());
+    let writer_handle = std::thread::spawn(move || {
+        let mut progress_map = progress_map;
+        for (spec, completed) in meta_update_rx {
+            if progress_map
+                .get(&spec)
+                .is_some_and(|prev| *prev >= completed)
+            {
+                continue;
             }
-
-            if let Some(pb) = table_progress_bar {
-                pb.finish_and_clear();
-            }
+            progress_map.insert(spec, completed);
+            write_stages_completed(&fingerprint, db_path_buf.as_deref(), &progress_map);
         }
+    });
+
+    // Run each parallel phase
+    for phase in phases {
+        let phase_annotated = phase
+            .into_iter()
+            .map(|s| {
+                let completed = initial_progress_map.get(&s).copied().unwrap_or(0);
+                (s, completed)
+            })
+            .collect::<Vec<_>>();
+        phase_annotated
+            .into_par_iter()
+            .for_each(|(bound_spec, spec_completed)| {
+                process_spec(
+                    &db,
+                    bound_spec,
+                    &levels,
+                    &top,
+                    deadline,
+                    spec_completed,
+                    meta_update_tx.clone(),
+                );
+            });
+    }
+
+    drop(meta_update_tx);
+    writer_handle.join().unwrap();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_spec<Tgt>(
+    db: &FilesDatabase,
+    bound_spec: LogicalSpec<Tgt>,
+    levels: &[Tgt::Level],
+    top: &MemVec,
+    deadline: Option<Instant>,
+    spec_completed: usize,
+    progress_sender: mpsc::Sender<(LogicalSpec<Tgt>, usize)>,
+) where
+    Tgt: CpuTarget,
+    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+        morello::grid::general::BiMap<Codomain = u8>,
+{
+    let unscaled_surmap = LogicalSpecSurMap::new(
+        PrimitiveBasicsBimap {
+            binary_scale_shapes: true,
+        },
+        TensorSpecAuxSurMap::new,
+    );
+    let (key, unscaled_bound_pt) = unscaled_surmap.apply(&bound_spec);
+    let surmap = Compose(
+        unscaled_surmap,
+        ApplyRhs(downscaler(unscaled_bound_pt), PhantomData),
+    );
+    let (_, bound_pt) = surmap.apply(&bound_spec);
+
+    let stages = diagonals(&bound_pt).collect::<Vec<_>>();
+    let total_stages = stages.len();
+
+    for (stage_number, stage) in stages.into_iter().enumerate() {
+        if stage_number < spec_completed {
+            continue;
+        }
+
+        // Construct the TaskIters, dropping empties. Materializing these up front simplifies
+        // parallelization, makes out following "has a peak parallelism of" log message more
+        // meaningful, and simplifies logging an example Spec.
+        let stage = stage
+            .filter_map(|task_pt| {
+                let specs = surmap
+                    .apply_inverse(&(key.clone(), task_pt))
+                    .filter(|l| l.is_canonical())
+                    .collect::<Vec<_>>();
+                if specs.is_empty() {
+                    None
+                } else {
+                    Some(specs)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let stage_within_spec = stage_number + 1;
+        info!(
+            "Beginning stage {} of {} for {} with peak parallelism of {}",
+            stage_within_spec,
+            total_stages,
+            bound_spec,
+            stage.len()
+        );
+
+        #[cfg(feature = "db-stats")]
+        let total_synthesis_ms = AtomicU64::new(0);
+
+        let stage_start = Instant::now();
+        stage.into_par_iter().for_each(|task| {
+            let mut worklist = task
+                .into_iter()
+                .map(|t| Spec(t, MemoryLimits::Standard(top.clone())))
+                .collect::<Vec<_>>();
+            let mut next_stage = HashSet::new();
+
+            #[cfg(feature = "db-stats")]
+            let mut synthesis_time = Duration::ZERO;
+            while !worklist.is_empty() {
+                validate_stage_worklist_unique(&worklist);
+
+                #[cfg(feature = "db-stats")]
+                let synthesis_start = Instant::now();
+
+                let Some(stage_results) = process_worklist_chunks(db, &worklist, deadline) else {
+                    log::debug!("Deadline reached; thread stopping");
+                    return;
+                };
+
+                #[cfg(feature = "db-stats")]
+                {
+                    synthesis_time += synthesis_start.elapsed();
+                }
+                compute_next_stage(&worklist, stage_results, levels, &mut next_stage);
+                worklist = next_stage.drain().collect();
+            }
+
+            #[cfg(feature = "db-stats")]
+            total_synthesis_ms.fetch_add(
+                synthesis_time.as_millis().try_into().unwrap(),
+                atomic::Ordering::Relaxed,
+            );
+        });
+        info!(
+            "Completed stage {stage_within_spec} of {total_stages} for {bound_spec} in {:?}",
+            stage_start.elapsed()
+        );
+
+        #[cfg(feature = "db-stats")]
+        log_db_stats(db, &total_synthesis_ms);
+
+        if let Err(err) = progress_sender.send((bound_spec.clone(), stage_within_spec)) {
+            log::error!("Failed to enqueue progress update for {bound_spec}: {err:?}");
+        }
+
+        let save_start = Instant::now();
+        db.save();
+        info!("Saving took {:?}", save_start.elapsed());
     }
 }
 
@@ -385,8 +377,6 @@ fn process_worklist_chunks<Tgt>(
     db: &FilesDatabase,
     worklist: &[Spec<Tgt>],
     deadline: Option<Instant>,
-    stage_progress_bar: &Option<ProgressBar>,
-    table_progress_bar: &Option<ProgressBar>,
 ) -> Option<Vec<ActionCostVec>>
 where
     Tgt: CpuTarget,
@@ -410,12 +400,6 @@ where
                 .min(subworklist_offset + SUBWORKLIST_MAX_SIZE)];
         stage_results.extend(top_down_many(db, subworklist, 1));
 
-        if let Some(pb) = stage_progress_bar {
-            pb.inc(subworklist.len().try_into().unwrap());
-        }
-        if let Some(pb) = table_progress_bar {
-            pb.tick();
-        }
         subworklist_offset += subworklist.len();
     }
 
@@ -439,7 +423,7 @@ fn compute_next_stage<Tgt: Target>(
 }
 
 #[cfg(feature = "db-stats")]
-fn log_db_stats(db: &mut FilesDatabase, total_synthesis_ms: &AtomicU64) {
+fn log_db_stats(db: &FilesDatabase, total_synthesis_ms: &AtomicU64) {
     info!("DB stats: {}", db.basic_stats());
     let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
     let btime = db.blocking_ms();
@@ -447,7 +431,6 @@ fn log_db_stats(db: &mut FilesDatabase, total_synthesis_ms: &AtomicU64) {
         "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
         100.0 * btime as f64 / stime as f64
     );
-    db.reset_basic_stats();
 }
 
 fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
@@ -573,10 +556,10 @@ fn next_limits<'a, L: MemoryLevel + 'a>(
     })
 }
 
-fn read_stages_to_skip(
+fn read_stages_to_skip<Tgt: Target>(
     current_job_fingerprint: &JobFingerprint,
     db_path: Option<&path::Path>,
-) -> HashMap<LogicalSpec<Avx2Target>, usize> {
+) -> HashMap<LogicalSpec<Tgt>, usize> {
     let Some(db_path) = db_path else {
         return HashMap::new();
     };
@@ -589,7 +572,7 @@ fn read_stages_to_skip(
     };
 
     let Ok((read_fingerprint, stage_pairs)) =
-        bincode::deserialize::<(JobFingerprint, Vec<(LogicalSpec<Avx2Target>, usize)>)>(&bytes)
+        bincode::deserialize::<(JobFingerprint, Vec<(LogicalSpec<Tgt>, usize)>)>(&bytes)
     else {
         return HashMap::new();
     };
@@ -601,10 +584,10 @@ fn read_stages_to_skip(
     stage_pairs.into_iter().collect()
 }
 
-fn write_stages_completed(
+fn write_stages_completed<Tgt: Target>(
     current_job_fingerprint: &JobFingerprint,
     db_path: Option<&path::Path>,
-    progress: &HashMap<LogicalSpec<Avx2Target>, usize>,
+    progress: &HashMap<LogicalSpec<Tgt>, usize>,
 ) {
     let Some(db_path) = db_path else {
         return;
