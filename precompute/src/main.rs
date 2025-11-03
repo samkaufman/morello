@@ -25,12 +25,12 @@ use morello::grid::downscale::DownscaleSurMap;
 use morello::grid::general::SurMap;
 use morello::grid::linear::BimapInt;
 use morello::layout::row_major;
-use morello::lspec;
 use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::search::top_down_many;
 use morello::smallvec::smallvec;
 use morello::spec::{
-    LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
+    FillValue, LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap,
+    PrimitiveSpecType, Spec,
 };
 use morello::target::{
     ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel, CpuTarget, MemoryLevel, Target, TargetId,
@@ -49,6 +49,7 @@ const DB_PROGRESS_VERSION: usize = 2;
 const K: u8 = 1;
 const SUBWORKLIST_MAX_SIZE: usize = 5000;
 const TWOS: [u32; 32] = [2; 32];
+const DTYPES: [Dtype; 2] = [Dtype::Uint32, Dtype::Float32];
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -440,9 +441,12 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         _ => 3,
     };
 
-    let move_phase: Vec<_> = (1..=move_needed_rank)
-        .map(|rank| move_top::<Tgt>(args.size, rank))
-        .collect();
+    let mut move_phase = vec![];
+    for rank in 1..=move_needed_rank {
+        for &dtype in &DTYPES {
+            move_phase.push(move_top::<Tgt>(args.size, rank, dtype));
+        }
+    }
     if !move_phase.is_empty() {
         phases.push(move_phase);
     }
@@ -450,89 +454,81 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         return phases;
     }
 
-    let zero_specs: Vec<_> = (1..=move_needed_rank)
-        .map(|rank| {
-            lspec!(FillZero(
-                iter::repeat_n(args.size, rank.into()),
-                (u32, CpuMemoryLevel::GL, row_major),
-                serial
-            ))
-        })
-        .collect();
-    for spec in zero_specs {
-        phases.push(vec![spec]);
+    for rank in 1..=move_needed_rank {
+        let mut zero_phase = Vec::with_capacity(DTYPES.len());
+        for &dtype in &DTYPES {
+            zero_phase.push(fill_zero_top(args.size, rank, dtype));
+        }
+        phases.push(zero_phase);
     }
     if args.through == ThroughSpec::Zero {
         return phases;
     }
 
-    let matmul_spec = lspec!(Matmul(
-        [nz!(1u32), args.size, args.size, args.size],
-        (u32, CpuMemoryLevel::GL, row_major),
-        (u32, CpuMemoryLevel::GL, row_major),
-        (u32, CpuMemoryLevel::GL, row_major),
-        serial
-    ));
-
-    let mut matmul_phase = vec![matmul_spec];
+    let mut matmul_phase = vec![];
+    for &dtype in &DTYPES {
+        matmul_phase.push(matmul_top(args.size, dtype));
+    }
     for rank in 1..=move_needed_rank {
         let output_shape: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
-        for dim in 0..rank {
-            let mut input_shape = output_shape.clone();
-            input_shape[usize::from(dim)] = nz!(1u32);
+        for &dtype in &DTYPES {
+            for dim in 0..rank {
+                let mut input_shape = output_shape.clone();
+                input_shape[usize::from(dim)] = nz!(1u32);
 
-            matmul_phase.push(LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Broadcast { dim },
-                    spec_shape: output_shape.clone(),
-                    dtypes: vec![Dtype::Uint32; 2],
-                },
-                vec![taux_gl(&input_shape), taux_gl(&output_shape)],
-                true,
-            ));
-
-            matmul_phase.push(LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Max { dim, accum: false },
-                    spec_shape: output_shape.clone(),
-                    dtypes: vec![Dtype::Uint32; 2],
-                },
-                vec![taux_gl(&output_shape), taux_gl(&input_shape)],
-                true,
-            ));
-
-            matmul_phase.push(LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
-                        scan_dim: dim,
-                        accum: false,
+                matmul_phase.push(LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Broadcast { dim },
+                        spec_shape: output_shape.clone(),
+                        dtypes: vec![dtype; 2],
                     },
+                    vec![taux_gl(&input_shape), taux_gl(&output_shape)],
+                    true,
+                ));
+
+                matmul_phase.push(LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Max { dim, accum: false },
+                        spec_shape: output_shape.clone(),
+                        dtypes: vec![dtype; 2],
+                    },
+                    vec![taux_gl(&output_shape), taux_gl(&input_shape)],
+                    true,
+                ));
+
+                matmul_phase.push(LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                            scan_dim: dim,
+                            accum: false,
+                        },
+                        spec_shape: output_shape.clone(),
+                        dtypes: vec![dtype; 4],
+                    },
+                    vec![
+                        taux_gl(&output_shape),
+                        taux_gl(&input_shape),
+                        taux_gl(&input_shape),
+                        taux_gl(&output_shape),
+                    ],
+                    true,
+                ));
+            }
+
+            matmul_phase.push(LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::DivideVec,
                     spec_shape: output_shape.clone(),
-                    dtypes: vec![Dtype::Float32; 4],
+                    dtypes: vec![dtype; 3],
                 },
                 vec![
                     taux_gl(&output_shape),
-                    taux_gl(&input_shape),
-                    taux_gl(&input_shape),
+                    taux_gl(&output_shape),
                     taux_gl(&output_shape),
                 ],
                 true,
             ));
         }
-
-        matmul_phase.push(LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::DivideVec,
-                spec_shape: output_shape.clone(),
-                dtypes: vec![Dtype::Uint32; 3],
-            },
-            vec![
-                taux_gl(&output_shape),
-                taux_gl(&output_shape),
-                taux_gl(&output_shape),
-            ],
-            true,
-        ));
     }
 
     phases.push(matmul_phase);
@@ -540,15 +536,14 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         return phases;
     }
 
-    let mut conv_phase: Vec<_> = args
-        .filters_size
-        .iter()
-        .map(|&fs| {
+    let mut conv_phase = vec![];
+    for &dtype in &DTYPES {
+        for &fs in &args.filters_size {
             let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
             let img_aux = taux_gl(&[args.batch, args.channels, s, s]);
             let filters_aux = taux_gl(&[args.filters, args.channels, fs, fs]);
             let output_aux = taux_gl(&[args.batch, args.filters, args.size, args.size]);
-            LogicalSpec::Primitive(
+            conv_phase.push(LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::Conv { accum: false },
                     spec_shape: smallvec![
@@ -560,66 +555,122 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
                         fs,
                         fs,
                     ],
-                    dtypes: vec![Dtype::Uint32; 3],
+                    dtypes: vec![dtype; 3],
                 },
                 vec![img_aux, filters_aux, output_aux],
                 true,
-            )
-        })
-        .collect();
-    conv_phase.extend((1..=move_needed_rank).flat_map(|rank| {
+            ));
+        }
+    }
+    for rank in 1..=move_needed_rank {
         let numer_shape: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
-        (0..rank).flat_map(move |scan_dim| {
-            let mut denom_shape = numer_shape.clone();
-            denom_shape[usize::from(scan_dim)] = nz!(1u32);
+        for &dtype in &DTYPES {
+            for scan_dim in 0..rank {
+                let mut denom_shape = numer_shape.clone();
+                denom_shape[usize::from(scan_dim)] = nz!(1u32);
 
-            let softmax_spec = LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
-                        scan_dim,
-                        accum: false,
+                conv_phase.push(LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
+                            scan_dim,
+                            accum: false,
+                        },
+                        spec_shape: numer_shape.clone(),
+                        dtypes: vec![dtype; 3],
                     },
-                    spec_shape: numer_shape.clone(),
-                    dtypes: vec![Dtype::Float32; 3],
-                },
-                vec![
-                    taux_gl(&numer_shape),
-                    taux_gl(&denom_shape),
-                    taux_gl(&numer_shape),
-                ],
-                true,
-            );
+                    vec![
+                        taux_gl(&numer_shape),
+                        taux_gl(&denom_shape),
+                        taux_gl(&numer_shape),
+                    ],
+                    true,
+                ));
 
-            let divide_spec = LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
-                    spec_shape: numer_shape.clone(),
-                    dtypes: vec![Dtype::Uint32; 3],
-                },
-                vec![
-                    taux_gl(&numer_shape),
-                    taux_gl(&denom_shape),
-                    taux_gl(&numer_shape),
-                ],
-                true,
-            );
-
-            [softmax_spec, divide_spec].into_iter()
-        })
-    }));
+                conv_phase.push(LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
+                        spec_shape: numer_shape.clone(),
+                        dtypes: vec![dtype; 3],
+                    },
+                    vec![
+                        taux_gl(&numer_shape),
+                        taux_gl(&denom_shape),
+                        taux_gl(&numer_shape),
+                    ],
+                    true,
+                ));
+            }
+        }
+    }
     phases.push(conv_phase);
 
     phases
 }
 
 /// Returns a logical Move Spec of given size and rank.
-fn move_top<Tgt: CpuTarget>(size: DimSize, rank: u8) -> LogicalSpec<Tgt> {
-    lspec!(Move(
-        iter::repeat_n(size, rank.into()),
-        (u32, CpuMemoryLevel::GL, row_major),
-        (u32, CpuMemoryLevel::GL, row_major),
-        serial
-    ))
+fn matmul_top<Tgt: CpuTarget>(size: DimSize, dtype: Dtype) -> LogicalSpec<Tgt> {
+    let spec_shape = smallvec![nz!(1u32), size, size, size];
+    let param_shapes = [
+        [nz!(1u32), size, size],
+        [nz!(1u32), size, size],
+        [nz!(1u32), size, size],
+    ];
+    let auxes = param_shapes
+        .into_iter()
+        .map(|shape| TensorSpecAux {
+            level: CpuMemoryLevel::GL.into(),
+            layout: row_major(&shape),
+            vector_size: None,
+        })
+        .collect::<Vec<_>>();
+    LogicalSpec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape,
+            dtypes: vec![dtype; 3],
+        },
+        auxes,
+        true,
+    )
+}
+
+fn move_top<Tgt: CpuTarget>(size: DimSize, rank: u8, dtype: Dtype) -> LogicalSpec<Tgt> {
+    let shape: Shape = iter::repeat_n(size, rank.into()).collect();
+    LogicalSpec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Move,
+            spec_shape: shape.clone(),
+            dtypes: vec![dtype; 2],
+        },
+        vec![
+            TensorSpecAux {
+                level: CpuMemoryLevel::GL.into(),
+                layout: row_major(&shape),
+                vector_size: None,
+            },
+            TensorSpecAux {
+                level: CpuMemoryLevel::GL.into(),
+                layout: row_major(&shape),
+                vector_size: None,
+            },
+        ],
+        true,
+    )
+}
+
+fn fill_zero_top<Tgt: CpuTarget>(size: DimSize, rank: u8, dtype: Dtype) -> LogicalSpec<Tgt> {
+    let shape: Shape = iter::repeat_n(size, rank.into()).collect();
+    LogicalSpec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Fill {
+                value: FillValue::Zero,
+            },
+            spec_shape: shape.clone(),
+            dtypes: vec![dtype],
+        },
+        vec![taux_gl::<Tgt>(&shape)],
+        true,
+    )
 }
 
 fn next_limits<'a, L: MemoryLevel + 'a>(
