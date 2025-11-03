@@ -21,7 +21,7 @@ use std::{fs, iter, path};
 use std::sync::atomic::{self, AtomicU64};
 
 use morello::common::{DimSize, Dtype};
-use morello::db::FilesDatabase;
+use morello::db::{ActionCostVec, FilesDatabase};
 use morello::grid::compose::Compose;
 use morello::grid::downscale::DownscaleSurMap;
 use morello::grid::general::SurMap;
@@ -195,11 +195,7 @@ fn main_per_db<Tgt>(
     // It could be simplified.
     let bounds = goal_bounds::<Tgt>(args);
 
-    let fingerprint: JobFingerprint = {
-        let mut progress_fingerprint_hasher = Adler32::new();
-        bounds.hash(&mut progress_fingerprint_hasher);
-        (DB_PROGRESS_VERSION, progress_fingerprint_hasher.finish())
-    };
+    let fingerprint = compute_job_fingerprint(&bounds);
     let stages_completed = read_stages_to_skip(&fingerprint, db_path);
     if stages_completed != 0 {
         info!("First {stages_completed} stages already computed");
@@ -300,59 +296,27 @@ fn main_per_db<Tgt>(
                 #[cfg(feature = "db-stats")]
                 let mut synthesis_time = Duration::ZERO;
                 while !worklist.is_empty() {
-                    // Check that stage is all unique
-                    {
-                        let mut stage_set = HashSet::new();
-                        for spec in &worklist {
-                            if !stage_set.insert(spec) {
-                                panic!("Duplicate spec in stage: {spec:?}");
-                            }
-                        }
-                    }
+                    validate_stage_worklist_unique(&worklist);
 
                     #[cfg(feature = "db-stats")]
                     let synthesis_start = Instant::now();
 
-                    let mut subworklist_offset = 0;
-                    let mut stage_results = Vec::with_capacity(worklist.len());
-                    let mut deadline_reached = false;
-                    while subworklist_offset < worklist.len() {
-                        if let Some(d) = deadline {
-                            if Instant::now() >= d {
-                                deadline_reached = true;
-                                break;
-                            }
-                        }
-                        let subworklist = &worklist[subworklist_offset
-                            ..worklist
-                                .len()
-                                .min(subworklist_offset + SUBWORKLIST_MAX_SIZE)];
-                        stage_results.extend(top_down_many(&db, subworklist, 1));
-                        if let Some(pb) = &stage_progress_bar {
-                            pb.inc(subworklist.len().try_into().unwrap());
-                        }
-                        if let Some(pb) = &table_progress_bar {
-                            pb.tick();
-                        }
-                        subworklist_offset += subworklist.len();
-                    }
-                    if deadline_reached {
+                    let Some(stage_results) = process_worklist_chunks(
+                        &db,
+                        &worklist,
+                        deadline,
+                        &stage_progress_bar,
+                        &table_progress_bar,
+                    ) else {
                         log::debug!("Deadline reached; thread stopping");
                         return;
-                    }
+                    };
 
                     #[cfg(feature = "db-stats")]
                     {
                         synthesis_time += synthesis_start.elapsed();
                     }
-                    for (spec, result) in worklist.iter().zip(stage_results) {
-                        if let [(_, only_result_cost)] = &result[..] {
-                            next_stage.extend(
-                                next_limits(&spec.1, &only_result_cost.peaks, &levels)
-                                    .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
-                            );
-                        }
-                    }
+                    compute_next_stage(&worklist, stage_results, &levels, &mut next_stage);
                     if let Some(pb) = &stage_progress_bar {
                         pb.inc_length(next_stage.len().try_into().unwrap());
                     }
@@ -373,16 +337,7 @@ fn main_per_db<Tgt>(
             );
 
             #[cfg(feature = "db-stats")]
-            {
-                info!("DB stats: {}", db.basic_stats());
-                let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
-                let btime = db.blocking_ms();
-                info!(
-                    "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
-                    100.0 * btime as f64 / stime as f64
-                );
-                db.reset_basic_stats();
-            }
+            log_db_stats(&mut db, &total_synthesis_ms);
 
             if let Some(pb) = stage_progress_bar {
                 pb.finish_and_clear();
@@ -410,6 +365,85 @@ fn main_per_db<Tgt>(
             pb.finish_and_clear();
         }
     }
+}
+
+fn compute_job_fingerprint(bounds: &[LogicalSpec<Avx2Target>]) -> JobFingerprint {
+    let mut progress_fingerprint_hasher = Adler32::new();
+    bounds.hash(&mut progress_fingerprint_hasher);
+    (DB_PROGRESS_VERSION, progress_fingerprint_hasher.finish())
+}
+
+/// Check that given [Spec]s are all unique. Panics otherwise.
+fn validate_stage_worklist_unique(worklist: &[Spec<Avx2Target>]) {
+    let mut stage_set = HashSet::new();
+    for spec in worklist {
+        if !stage_set.insert(spec) {
+            panic!("Duplicate spec in stage: {spec:?}");
+        }
+    }
+}
+
+fn process_worklist_chunks(
+    db: &FilesDatabase,
+    worklist: &[Spec<Avx2Target>],
+    deadline: Option<Instant>,
+    stage_progress_bar: &Option<ProgressBar>,
+    table_progress_bar: &Option<ProgressBar>,
+) -> Option<Vec<ActionCostVec>> {
+    let mut subworklist_offset = 0;
+    let mut stage_results = Vec::with_capacity(worklist.len());
+
+    while subworklist_offset < worklist.len() {
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return None; // Deadline reached
+            }
+        }
+
+        let subworklist = &worklist[subworklist_offset
+            ..worklist
+                .len()
+                .min(subworklist_offset + SUBWORKLIST_MAX_SIZE)];
+        stage_results.extend(top_down_many(db, subworklist, 1));
+
+        if let Some(pb) = stage_progress_bar {
+            pb.inc(subworklist.len().try_into().unwrap());
+        }
+        if let Some(pb) = table_progress_bar {
+            pb.tick();
+        }
+        subworklist_offset += subworklist.len();
+    }
+
+    Some(stage_results)
+}
+
+fn compute_next_stage(
+    worklist: &[Spec<Avx2Target>],
+    stage_results: Vec<morello::db::ActionCostVec>,
+    levels: &[CpuMemoryLevel],
+    next_stage: &mut HashSet<Spec<Avx2Target>>,
+) {
+    for (spec, result) in worklist.iter().zip(stage_results) {
+        if let [(_, only_result_cost)] = &result.0[..] {
+            next_stage.extend(
+                next_limits(&spec.1, &only_result_cost.peaks, levels)
+                    .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
+            );
+        }
+    }
+}
+
+#[cfg(feature = "db-stats")]
+fn log_db_stats(db: &mut FilesDatabase, total_synthesis_ms: &AtomicU64) {
+    info!("DB stats: {}", db.basic_stats());
+    let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
+    let btime = db.blocking_ms();
+    info!(
+        "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
+        100.0 * btime as f64 / stime as f64
+    );
+    db.reset_basic_stats();
 }
 
 fn goal_bounds<Tgt: CpuTarget>(args: &Args) -> Vec<LogicalSpec<Tgt>> {
