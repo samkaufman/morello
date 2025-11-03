@@ -454,7 +454,7 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
     let mut phases = vec![];
     let move_needed_rank = match args.through {
         ThroughSpec::Conv => 4,
-        _ => 2,
+        _ => 3,
     };
 
     let move_phase: Vec<_> = (1..=move_needed_rank)
