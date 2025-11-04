@@ -30,7 +30,7 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter::{self, once};
 
-const INST_COST: MainCost = 100;
+const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
 const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::RF,
@@ -1623,8 +1623,8 @@ impl MemoryLevel for CpuMemoryLevel {
         match &self {
             CpuMemoryLevel::RF => 0,
             CpuMemoryLevel::VRF => 0,
-            CpuMemoryLevel::L1 => 10,
-            CpuMemoryLevel::GL => 100,
+            CpuMemoryLevel::L1 => 2,
+            CpuMemoryLevel::GL => 20,
         }
     }
 
