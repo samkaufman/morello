@@ -812,7 +812,7 @@ mod tests {
         fn test_can_synthesize_any_canonical_primitive_spec(
             spec in arb_canonical_primitive_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new(None, false, 1, 2048, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2048, 1);
             top_down(&db, &spec, 1);
         }
 
@@ -846,7 +846,7 @@ mod tests {
             spec_pair in lower_and_higher_canonical_specs::<Avx2Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
-            let db = FilesDatabase::new(None, false, 1, 128, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
 
             // Solve the first, lower Spec.
             let lower_result_vec = top_down(&db, &spec, 1);
@@ -869,7 +869,7 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new(None, false, 1, 128, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
             let first_solutions = top_down(&db, &spec, 1);
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
@@ -1117,7 +1117,7 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::new([1, 1, 1, 0])),
         );
-        let db = FilesDatabase::new(None, false, 1, 128, 1);
+        let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
 
         let action_costs = top_down(&db, &spec, 1);
 
@@ -1136,7 +1136,7 @@ mod tests {
             MemoryLimits::Standard(MemVec::new([0, 16, 64, 32])),
         );
 
-        let db = FilesDatabase::new(None, false, 1, 128, 1);
+        let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
         let first_solutions = top_down(&db, &spec, 1);
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()

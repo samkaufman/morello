@@ -19,7 +19,7 @@ fn matmul_spec(size: u32) -> Spec<Avx2Target> {
 }
 
 fn synth(goal: &Spec<Avx2Target>) {
-    let db = FilesDatabase::new(None, true, 1, 128, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 128, 1);
     morello::search::top_down(&db, black_box(goal), 1);
 }
 

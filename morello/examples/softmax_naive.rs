@@ -44,7 +44,7 @@ fn main() {
     let spec = Spec::<Avx2Target>(logical_spec, Avx2Target::max_mem());
     println!("Logical Spec: {}", spec.0);
 
-    let db = FilesDatabase::new(None, true, 1, 10_000, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 10_000, 1);
 
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)

@@ -151,7 +151,8 @@ fn main() -> Result<()> {
     info!("DB statistic collection enabled");
 
     let threads = rayon::current_num_threads();
-    let db = FilesDatabase::new(args.db.as_deref(), true, K, args.cache_size, threads);
+    let db =
+        FilesDatabase::new::<Avx2Target>(args.db.as_deref(), true, K, args.cache_size, threads);
     main_per_db(&args, db, args.db.as_deref(), multi_opt, deadline);
 
     Ok(())

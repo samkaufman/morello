@@ -31,7 +31,7 @@ fn mk_specs_set() -> Vec<Spec<Avx2Target>> {
 
 #[divan::bench]
 fn db_puts_overlap(bencher: divan::Bencher) {
-    let db = FilesDatabase::new(None, true, 1, 4096, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 4096, 1);
     let specs = mk_specs_set();
     let decisions: Vec<_> = (0..specs.len())
         .map(|i| {

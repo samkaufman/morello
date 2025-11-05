@@ -99,8 +99,9 @@ pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum TargetId {
     Avx2,
     Avx512,
@@ -113,6 +114,44 @@ impl Default for TargetId {
             "x86" | "x86_64" => TargetId::Avx2,
             "arm" | "aarch64" => TargetId::Arm,
             arch => unimplemented!("Architecture {} not supported", arch),
+        }
+    }
+}
+
+impl Display for TargetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TargetId::Avx2 => write!(f, "Avx2"),
+            TargetId::Avx512 => write!(f, "Avx512"),
+            TargetId::Arm => write!(f, "Arm"),
+        }
+    }
+}
+
+impl std::str::FromStr for TargetId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Avx2" => Ok(TargetId::Avx2),
+            "Avx512" => Ok(TargetId::Avx512),
+            "Arm" => Ok(TargetId::Arm),
+            _ => Err(format!("Unknown target: {}", s)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_target_id_display_fromstr_roundtrip(target_id: TargetId) {
+            let display_str = target_id.to_string();
+            let parsed = display_str.parse::<TargetId>().unwrap();
+            prop_assert_eq!(parsed, target_id);
         }
     }
 }

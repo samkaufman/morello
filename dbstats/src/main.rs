@@ -1,5 +1,5 @@
 use clap::Parser;
-use morello::{db::FilesDatabase, target::Avx2Target};
+use morello::db::FilesDatabase;
 use std::{fs, path};
 
 #[cfg(not(target_env = "msvc"))]
@@ -32,7 +32,8 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    let db = FilesDatabase::new(Some(&args.db), true, K, args.cache_size, 1);
+    let db = FilesDatabase::open(Some(&args.db), true, K, args.cache_size, 1)
+        .expect("Failed to open database");
     fs::create_dir_all(&args.out).unwrap();
-    db.analyze::<Avx2Target>(&args.out, args.sample, args.keep_going);
+    db.analyze(&args.out, args.sample, args.keep_going);
 }

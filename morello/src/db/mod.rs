@@ -13,7 +13,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::scheduling::ActionT as _;
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
-use crate::target::{Target, LEVEL_COUNT};
+use crate::target::{Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use pagecontents::RTreePageContents;
 
@@ -136,7 +136,7 @@ struct ReadAnyFormatError {
 }
 
 impl FilesDatabase {
-    pub fn new(
+    pub fn new<Tgt: Target>(
         file_path: Option<&path::Path>,
         binary_scale_shapes: bool,
         k: u8,
@@ -152,6 +152,46 @@ impl FilesDatabase {
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
 
+        validate_target_file::<Tgt>(dir_handle.path()).expect("Target validation failed");
+
+        Self::new_with_dir_handle(dir_handle, binary_scale_shapes, k, cache_size, thread_count)
+    }
+
+    /// Open an existing database.
+    ///
+    /// Unlike [FilesDatabase::new], this does not require specifying the [Target], but
+    /// will not create the database if it does not already exist.
+    pub fn open(
+        file_path: Option<&path::Path>,
+        binary_scale_shapes: bool,
+        k: u8,
+        cache_size: usize,
+        thread_count: usize,
+    ) -> Result<Self, String> {
+        let path = file_path
+            .ok_or_else(|| "Cannot open non-existent database without a path".to_string())?;
+        if !path.exists() {
+            return Err(format!("Database path does not exist: {}", path.display()));
+        }
+        let dir_handle = Arc::new(DirPathHandle::Persisted(path.to_owned()));
+        log::info!("Opening database at: {}", dir_handle.path().display());
+        Ok(Self::new_with_dir_handle(
+            dir_handle,
+            binary_scale_shapes,
+            k,
+            cache_size,
+            thread_count,
+        ))
+    }
+
+    /// Common logic for [FilesDatabase::new] and [FilesDatabase::open].
+    fn new_with_dir_handle(
+        dir_handle: Arc<DirPathHandle>,
+        binary_scale_shapes: bool,
+        k: u8,
+        cache_size: usize,
+        thread_count: usize,
+    ) -> Self {
         #[cfg(feature = "db-stats")]
         let stats = Arc::new(FilesDatabaseStats::default());
 
@@ -161,7 +201,6 @@ impl FilesDatabase {
         let cache_per_shard_size = cache_size_per_shard
             .saturating_sub(cache_per_shard_samples)
             .max(1);
-        // TODO: Print the effective cache size
         let actual_total_cache_size =
             shard_count * (cache_per_shard_size + cache_per_shard_samples);
         if actual_total_cache_size != cache_size {
@@ -476,12 +515,7 @@ impl FilesDatabase {
     ///
     /// This may be expensive and multi-threaded.
     #[cfg(feature = "db-stats")]
-    pub fn analyze<Tgt>(&self, output_dir: &path::Path, sample: usize, skip_read_errors: bool)
-    where
-        Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
-    {
+    pub fn analyze(&self, output_dir: &path::Path, sample: usize, skip_read_errors: bool) {
         let page_csv_path = output_dir.join("pages.csv");
         let block_csv_path = output_dir.join("blocks.csv");
         let block_action_csv_path = output_dir.join("block_actions.csv");
@@ -501,7 +535,7 @@ impl FilesDatabase {
             .write_record(["page_path", "block_pt", "action"])
             .unwrap();
 
-        analyze_visit_dir::<Tgt>(
+        analyze_visit_dir(
             self.dir_handle.path(),
             self.dir_handle.path(),
             &mut writers,
@@ -841,17 +875,13 @@ fn read_any_format(file: fs::File) -> Result<Page, ReadAnyFormatError> {
 }
 
 #[cfg(feature = "db-stats")]
-fn analyze_visit_dir<Tgt>(
+fn analyze_visit_dir(
     root: &path::Path,
     path: &path::Path,
     writers: &mut AnalyzeWriters,
     sample: usize,
     skip_read_errors: bool,
-) where
-    Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
-{
+) {
     // Since we don't revisit blocks, bypass the in-mem. cache and read from disk.
     for file_entry in fs::read_dir(path).unwrap() {
         let file_entry = file_entry.unwrap();
@@ -861,7 +891,7 @@ fn analyze_visit_dir<Tgt>(
 
         let entry_path = file_entry.path();
         if entry_path.is_dir() {
-            analyze_visit_dir::<Tgt>(root, &file_entry.path(), writers, sample, skip_read_errors);
+            analyze_visit_dir(root, &file_entry.path(), writers, sample, skip_read_errors);
             continue;
         }
 
@@ -1144,6 +1174,29 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
     spec_key_dir_name.join(block_pt.iter().map(|p| p.to_string()).join("_"))
 }
 
+/// Check TARGET file in `db_path` is consistent with `Tgt`. Create if none exists.
+fn validate_target_file<Tgt: Target>(db_path: &Path) -> Result<(), String> {
+    let target_file_path = db_path.join("TARGET");
+
+    if !target_file_path.exists() {
+        fs::write(&target_file_path, Tgt::target_id().to_string())
+            .map_err(|e| format!("Failed to write TARGET file: {}", e))?;
+        return Ok(());
+    }
+
+    let stored_target_str = fs::read_to_string(&target_file_path)
+        .map_err(|e| format!("Failed to read TARGET file: {}", e))?;
+    let stored_target = stored_target_str
+        .trim()
+        .parse::<TargetId>()
+        .map_err(|e| format!("Failed to parse TARGET file: {}", e))?;
+    let expected_target = Tgt::target_id();
+    if stored_target != expected_target {
+        return Err("Database created for a different target".to_string());
+    }
+    Ok(())
+}
+
 // For some reason, [Prehashed]'s [Clone] impl requires that the value be [Copy].
 fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
     let (inner, h) = Prehashed::as_parts(value);
@@ -1156,13 +1209,12 @@ mod tests {
     use crate::layout::row_major;
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::spec;
-    use crate::target::CpuMemoryLevel::L1;
     use crate::{
         imp::ImplNode,
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
         spec::arb_canonical_spec,
-        target::{Avx2Target, MemoryLevel},
+        target::{Avx2Target, Avx512Target, CpuMemoryLevel::L1, MemoryLevel},
         utils::{bit_length, bit_length_inverse_u32},
     };
     use itertools::{izip, Itertools};
@@ -1219,16 +1271,33 @@ mod tests {
         spec.canonicalize().unwrap();
 
         {
-            let db = FilesDatabase::new(Some(db_path.path()), true, 1, 2, 1);
+            let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
             let _ = spec.synthesize(&db);
         }
 
-        let db = FilesDatabase::new(Some(db_path.path()), true, 1, 2, 1);
+        let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
         let result = db.get_impl(&spec);
         assert!(
             result.is_some(),
             "Database should have the spec after reopening"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "Database created for a different target")]
+    fn test_opening_database_with_wrong_target_panics() {
+        let db_path = tempfile::tempdir().unwrap();
+
+        // Save an AVX2 database
+        {
+            let mut spec_avx2: Spec<Avx2Target> =
+                spec!(Move([2, 2], (f32, L1, row_major), (f32, L1, row_major)));
+            spec_avx2.canonicalize().unwrap();
+            let _db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+        }
+
+        // Read as an AVX-512 database
+        let _db = FilesDatabase::new::<Avx512Target>(Some(db_path.path()), true, 1, 2, 1);
     }
 
     proptest! {
@@ -1267,7 +1336,7 @@ mod tests {
         ) {
             let top_spec = decision.spec.clone();
             let top_actions_costs = decision.actions_costs.clone();
-            let db = FilesDatabase::new(None, false, 1, 2, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2, 1);
             for (spec, actions_costs) in decision.consume_decisions() {
                 db.put(spec, actions_costs);
             }
@@ -1282,7 +1351,7 @@ mod tests {
             decision in arb_spec_and_decision::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new(None, false, 1, 128, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
 
             let top_logical_spec = decision.spec.0.clone();
             let top_actions_costs = decision.actions_costs.clone();

@@ -152,7 +152,7 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     use morello::db::FilesDatabase;
     use morello::target::CpuMemoryLevel::{GL, L1, RF, VRF};
 
-    let db = FilesDatabase::new(None, true, 1, 10_000, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 10_000, 1);
 
     spec.tile_out(&[1, 1, 2048])
         .to_softmax_parts(GL, row_major, None, GL, row_major, None)

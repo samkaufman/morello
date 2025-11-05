@@ -142,27 +142,27 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
     color::set_color_mode(args.color);
+    match &args.target {
+        TargetId::Avx2 => main_per_db::<Avx2Target>(&args),
+        TargetId::Avx512 => main_per_db::<Avx512Target>(&args),
+        TargetId::Arm => main_per_db::<ArmTarget>(&args),
+    }
+}
+
+fn main_per_db<Tgt>(args: &Args) -> Result<()>
+where
+    Tgt: CpuTarget,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
     let threads = rayon::current_num_threads();
-    let db = FilesDatabase::new(
+    let db = FilesDatabase::new::<Tgt>(
         args.db.as_deref(),
         BINARY_SCALE_SHAPES,
         K,
         args.cache_size,
         threads,
     );
-    match &args.target {
-        TargetId::Avx2 => main_per_db::<Avx2Target>(&args, &db),
-        TargetId::Avx512 => main_per_db::<Avx512Target>(&args, &db),
-        TargetId::Arm => main_per_db::<ArmTarget>(&args, &db),
-    }
-}
-
-fn main_per_db<Tgt>(args: &Args, db: &FilesDatabase) -> Result<()>
-where
-    Tgt: CpuTarget,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
     let subcmd = &args.subcmd;
     let query_spec = match subcmd {
         Subcommand::Emit(query_spec) => query_spec,
@@ -249,7 +249,7 @@ where
 
     let start_time = std::time::Instant::now();
 
-    morello::search::top_down(db, &spec, K.into());
+    morello::search::top_down(&db, &spec, K.into());
     info!("top_down took {:?}", start_time.elapsed());
 
     let Some(results) = db.get_impl(&spec) else {
