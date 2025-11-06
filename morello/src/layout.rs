@@ -6,7 +6,6 @@ use crate::{
     target::Target,
 };
 use itertools::Itertools;
-use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
@@ -698,7 +697,7 @@ impl Layout {
             for (_, size) in &self.dims {
                 debug_assert_ne!(
                     size,
-                    &PhysDim::Packed(nz!(1u32)),
+                    &PhysDim::Packed(nonzero::nonzero!(1u32)),
                     "Size-1 packings are disallowed"
                 );
             }
@@ -924,6 +923,7 @@ mod tests {
         target::Avx2Target,
     };
     use itertools::Itertools;
+    use nonzero::nonzero as nz;
     use proptest::{
         arbitrary::{any, any_with},
         prelude::prop,
