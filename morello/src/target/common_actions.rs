@@ -193,6 +193,7 @@ pub fn bufferize_actions<Tgt: Target>(
 
 pub fn move_actions<Tgt: Target>(
     spec: &LogicalSpec<Tgt>,
+    allow_higher_precision_dtypes: bool,
 ) -> impl Iterator<Item = Action<Tgt>> + '_ {
     // TODO: Don't accumulate. Return an iterator.
     let mut results = Vec::with_capacity(MOVE_RESULTS_CAPACITY);
@@ -211,9 +212,14 @@ pub fn move_actions<Tgt: Target>(
                 contains_source_layout = true;
             }
             for level in Tgt::possible_destination_levels(operand.level()) {
-                for &destination_dtype in
-                    iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
-                {
+                let destination_dtypes = if allow_higher_precision_dtypes {
+                    Either::Left(
+                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types()),
+                    )
+                } else {
+                    Either::Right(iter::once(&operand_dtype))
+                };
+                for &destination_dtype in destination_dtypes {
                     results.extend(
                         gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
                             |vector_size| {
@@ -242,9 +248,15 @@ pub fn move_actions<Tgt: Target>(
             for level in Tgt::possible_destination_levels(operand.level()) {
                 if !level.is_addressed() {
                     // This is a cache level, generate a move with the original layout
-                    for &destination_dtype in
-                        iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
-                    {
+                    let destination_dtypes = if allow_higher_precision_dtypes {
+                        Either::Left(
+                            iter::once(&operand_dtype)
+                                .chain(operand_dtype.higher_precision_types()),
+                        )
+                    } else {
+                        Either::Right(iter::once(&operand_dtype))
+                    };
+                    for &destination_dtype in destination_dtypes {
                         results.extend(
                             gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
                                 |vector_size| {
@@ -465,7 +477,7 @@ mod tests {
         fn test_move_actions_never_returns_duplicates(
             spec in arb_canonical_logical_spec::<Avx2Target>(None)
         ) {
-            let actions = move_actions::<Avx2Target>(&spec).collect::<Vec<_>>();
+            let actions = move_actions::<Avx2Target>(&spec, true).collect::<Vec<_>>();
             let mut seen_moves = HashSet::new();
             let mut duplicate_count = 0;
             for action in &actions {
@@ -499,7 +511,7 @@ mod tests {
         fn test_move_actions_preserves_layout_for_cache_destinations(
             spec in arb_canonical_logical_spec::<Avx2Target>(None)
         ) {
-            let actions = move_actions::<Avx2Target>(&spec).collect::<Vec<_>>();
+            let actions = move_actions::<Avx2Target>(&spec, true).collect::<Vec<_>>();
             let operands = spec.parameters();
 
             let mut cache_moves_by_operand = vec![HashSet::new(); operands.len()];

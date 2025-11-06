@@ -32,6 +32,9 @@ use std::iter::{self, once};
 
 const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
+const EXPLORE_ODDEVEN_LAYOUTS: bool = false;
+const EXPLORE_HIGHER_PRECISION_MOVE_DTYPES: bool = false;
+
 const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::RF,
     CpuMemoryLevel::VRF,
@@ -300,14 +303,16 @@ impl<T: CpuTarget> Target for T {
                 &all_target_vector_bytes,
             )
         }));
-        result.extend(base.iter().flat_map(|original_layout| {
-            oddeven_layouts_for_standard_layout(
-                original_layout,
-                shape,
-                dtype,
-                &all_target_vector_bytes,
-            )
-        }));
+        if EXPLORE_ODDEVEN_LAYOUTS {
+            result.extend(base.iter().flat_map(|original_layout| {
+                oddeven_layouts_for_standard_layout(
+                    original_layout,
+                    shape,
+                    dtype,
+                    &all_target_vector_bytes,
+                )
+            }));
+        }
 
         debug_assert!(
             result.iter().all(|r| r.applies_to_shape(shape)),
@@ -322,7 +327,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn actions(spec: &LogicalSpec<Self>) -> Self::ActionsIter<'_> {
-        let iter = move_actions(spec);
+        let iter = move_actions(spec, EXPLORE_HIGHER_PRECISION_MOVE_DTYPES);
         let iter = iter.chain(tile_out_actions(spec));
 
         // OnePrefix is an unfortunate special case. The only viable action is applying
