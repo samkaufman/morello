@@ -34,6 +34,7 @@ const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
 const EXPLORE_ODDEVEN_LAYOUTS: bool = false;
 const EXPLORE_HIGHER_PRECISION_MOVE_DTYPES: bool = false;
+const EXPLORE_ALL_VECTOR_SIZES: bool = false;
 
 const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::RF,
@@ -187,10 +188,15 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
-        let all_target_vector_bytes = Self::levels()
-            .into_iter()
-            .flat_map(|lvl| lvl.vector_bytes().iter().copied())
-            .collect::<Vec<_>>();
+        let mut all_target_vector_bytes = Vec::new();
+        for lvl in Self::levels() {
+            let vector_bytes = lvl.vector_bytes();
+            if EXPLORE_ALL_VECTOR_SIZES {
+                all_target_vector_bytes.extend(vector_bytes);
+            } else if let Some(&max_bytes) = vector_bytes.iter().max() {
+                all_target_vector_bytes.push(max_bytes);
+            }
+        }
 
         // The following could be faster. It keeps two copies of the non-packed layouts
         // (`base` and the first few values in `result`) and it doesn't compute the size
@@ -269,10 +275,15 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
-        let all_target_vector_bytes = Self::levels()
-            .into_iter()
-            .flat_map(|lvl| lvl.vector_bytes().iter().copied())
-            .collect::<Vec<_>>();
+        let mut all_target_vector_bytes = Vec::new();
+        for lvl in Self::levels() {
+            let vector_bytes = lvl.vector_bytes();
+            if EXPLORE_ALL_VECTOR_SIZES {
+                all_target_vector_bytes.extend(vector_bytes);
+            } else if let Some(&max_bytes) = vector_bytes.iter().max() {
+                all_target_vector_bytes.push(max_bytes);
+            }
+        }
 
         // The following could be faster. It keeps two copies of the non-packed layouts
         // (`base` and the first few values in `result`) and it doesn't compute the size
