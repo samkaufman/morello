@@ -34,7 +34,9 @@ use morello::smallvec::smallvec;
 use morello::spec::{
     LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap, PrimitiveSpecType, Spec,
 };
-use morello::target::{Avx2Target, CpuMemoryLevel, MemoryLevel, Target};
+use morello::target::{
+    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel, CpuTarget, MemoryLevel, Target, TargetId,
+};
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::{bit_length, diagonals};
 
@@ -63,6 +65,9 @@ struct Args {
     db: Option<path::PathBuf>,
     #[arg(long, default_value = "32", help = "Cache size in database pages.")]
     cache_size: usize,
+    /// Target architecture
+    #[arg(long, value_enum, hide_default_value = true, default_value_t = TargetId::default())]
+    target: TargetId,
     #[arg(long, default_value = "matmul")]
     through: ThroughSpec,
     #[arg(long, short, default_value = "1")]
@@ -133,6 +138,20 @@ where
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    match &args.target {
+        TargetId::Avx2 => main_with_target::<Avx2Target>(&args),
+        TargetId::Avx512 => main_with_target::<Avx512Target>(&args),
+        TargetId::Arm => main_with_target::<ArmTarget>(&args),
+    }
+}
+
+fn main_with_target<Tgt>(args: &Args) -> Result<()>
+where
+    Tgt: CpuTarget,
+    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+        morello::grid::general::BiMap<Codomain = u8>,
+{
     let deadline = args
         .timeout
         .map(|s| Instant::now() + Duration::from_secs(s));
@@ -151,26 +170,30 @@ fn main() -> Result<()> {
     info!("DB statistic collection enabled");
 
     let threads = rayon::current_num_threads();
-    let db =
-        FilesDatabase::new::<Avx2Target>(args.db.as_deref(), true, K, args.cache_size, threads);
-    main_per_db(&args, db, args.db.as_deref(), multi_opt, deadline);
+    let db = FilesDatabase::new::<Tgt>(args.db.as_deref(), true, K, args.cache_size, threads);
+    main_per_db::<Tgt>(args, db, args.db.as_deref(), multi_opt, deadline);
 
     Ok(())
 }
 
-fn main_per_db(
+fn main_per_db<Tgt>(
     args: &Args,
     #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
     db_path: Option<&path::Path>,
     multi_opt: Option<MultiProgress>,
     deadline: Option<Instant>,
-) {
-    let levels = Avx2Target::levels();
-    let MemoryLimits::Standard(top) = Avx2Target::max_mem();
+) where
+    Tgt: CpuTarget,
+    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+        morello::grid::general::BiMap<Codomain = u8>,
+{
+    let levels = Tgt::levels();
+    let MemoryLimits::Standard(top) = Tgt::max_mem();
 
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
-    let bounds = goal_bounds(args);
+    let bounds = goal_bounds::<Tgt>(args);
 
     let fingerprint: JobFingerprint = {
         let mut progress_fingerprint_hasher = Adler32::new();
@@ -237,14 +260,17 @@ fn main_per_db(
             // Construct the TaskIters, dropping empties. Materializing these up front simplifies
             // parallelization, makes out following "has a peak parallelism of" log message more
             // meaningful, and simplifies logging an example Spec.
-            let mut stage = stage
+            let stage = stage
                 .filter_map(|task_pt| {
-                    let mut p = surmap
+                    let specs = surmap
                         .apply_inverse(&(key.clone(), task_pt))
                         .filter(|l| l.is_canonical())
-                        .peekable();
-                    p.peek()?;
-                    Some(p)
+                        .collect::<Vec<_>>();
+                    if specs.is_empty() {
+                        None
+                    } else {
+                        Some(specs)
+                    }
                 })
                 .collect::<Vec<_>>();
 
@@ -253,7 +279,7 @@ fn main_per_db(
                 stage.len()
             );
 
-            if let Some(example_spec) = stage.first_mut().and_then(|v| v.peek()) {
+            if let Some(example_spec) = stage.first().and_then(|v| v.first()) {
                 info!("Example problem Spec: {example_spec}");
             }
 
@@ -386,14 +412,14 @@ fn main_per_db(
     }
 }
 
-fn goal_bounds(args: &Args) -> Vec<LogicalSpec<Avx2Target>> {
+fn goal_bounds<Tgt: CpuTarget>(args: &Args) -> Vec<LogicalSpec<Tgt>> {
     let mut bounds = vec![];
     let move_needed_rank = match args.through {
         ThroughSpec::Conv => 4,
         _ => 2,
     };
 
-    bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top(args.size, rank)]));
+    bounds.extend((1..=move_needed_rank).flat_map(|rank| [move_top::<Tgt>(args.size, rank)]));
     if args.through == ThroughSpec::Move {
         return bounds;
     }
@@ -425,18 +451,18 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<Avx2Target>> {
             .iter()
             .map(|&fs| {
                 let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
-                let img_aux = TensorSpecAux {
-                    level: CpuMemoryLevel::GL,
+                let img_aux = TensorSpecAux::<Tgt> {
+                    level: CpuMemoryLevel::GL.into(),
                     layout: row_major(&[args.batch, args.channels, s, s]),
                     vector_size: None,
                 };
-                let filters_aux = TensorSpecAux {
-                    level: CpuMemoryLevel::GL,
+                let filters_aux = TensorSpecAux::<Tgt> {
+                    level: CpuMemoryLevel::GL.into(),
                     layout: row_major(&[args.filters, args.channels, fs, fs]),
                     vector_size: None,
                 };
-                let output_aux = TensorSpecAux {
-                    level: CpuMemoryLevel::GL,
+                let output_aux = TensorSpecAux::<Tgt> {
+                    level: CpuMemoryLevel::GL.into(),
                     layout: row_major(&[args.batch, args.filters, args.size, args.size]),
                     vector_size: None,
                 };
@@ -464,7 +490,7 @@ fn goal_bounds(args: &Args) -> Vec<LogicalSpec<Avx2Target>> {
 }
 
 /// Returns a logical Move Spec of given size and rank.
-fn move_top(size: DimSize, rank: u8) -> LogicalSpec<Avx2Target> {
+fn move_top<Tgt: CpuTarget>(size: DimSize, rank: u8) -> LogicalSpec<Tgt> {
     lspec!(Move(
         iter::repeat_n(size, rank.into()),
         (u32, CpuMemoryLevel::GL, row_major),
@@ -473,10 +499,10 @@ fn move_top(size: DimSize, rank: u8) -> LogicalSpec<Avx2Target> {
     ))
 }
 
-fn next_limits<'a>(
+fn next_limits<'a, L: MemoryLevel + 'a>(
     result_limits: &'a MemoryLimits,
     result_peak: &'a MemVec,
-    levels: &'a [CpuMemoryLevel],
+    levels: &'a [L],
 ) -> impl Iterator<Item = MemVec> + 'a {
     let MemoryLimits::Standard(limits_vec) = result_limits;
     debug_assert!(limits_vec

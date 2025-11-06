@@ -3,7 +3,7 @@ name: Rust
 on:
   push:
     branches-ignore:
-      - 'dependabot/**'
+      - "dependabot/**"
   pull_request:
 
 env:
@@ -36,7 +36,7 @@ jobs:
         run: cargo nextest run --all-features --run-ignored=all --profile ci
       - name: Run documentation tests
         run: cargo test --doc --all-features
-  
+
   smoke-test-example:
     strategy:
       matrix:
@@ -62,7 +62,7 @@ jobs:
       - run: cargo run --example ${{ matrix.example }}
         env:
           SKIP_BF16_EXECUTION: 1
-  
+
   smoke-test-frontend:
     strategy:
       matrix:
@@ -88,12 +88,20 @@ jobs:
         run: cargo run -- run matmul 1
 
   smoke-test-precompute:
+    strategy:
+      matrix:
+        target:
+          - avx2
+          - avx512
+          - arm
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run -p precompute -- --stages 2 2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo run -p precompute -- --target ${{ matrix.target }} --stages 2 2
 
   clippy-and-format:
     runs-on: ubuntu-24.04
