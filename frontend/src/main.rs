@@ -1,7 +1,7 @@
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use clap::{Parser, ValueEnum};
 use log::info;
 
@@ -14,10 +14,11 @@ use morello::db::FilesDatabase;
 use morello::grid::canon::CanonicalBimap;
 use morello::grid::general::BiMap;
 use morello::layout::{col_major, row_major};
+use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::smallvec::smallvec;
 use morello::target::{
-    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel::GL, CpuTarget, TargetId,
+    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel::GL, CpuTarget, TargetId, LEVEL_COUNT,
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -61,6 +62,10 @@ struct Args {
     /// Target architecture
     #[arg(long, value_enum, hide_default_value = true, default_value_t = TargetId::default())]
     target: TargetId,
+
+    /// Override memory limits per level (comma-separated integers)
+    #[arg(long, value_name = "RF,VRF,...")]
+    memory: Option<String>,
 
     /// Disable verification
     #[cfg(feature = "verification")]
@@ -260,7 +265,30 @@ where
         }
     };
 
-    let mut spec = Spec(logical_spec, Tgt::max_mem());
+    let memory_limits = if let Some(mem_override) = &args.memory {
+        let parsed = mem_override
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                entry
+                    .parse::<u64>()
+                    .with_context(|| format!("Failed to parse memory limit value `{entry}`"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            parsed.len() == LEVEL_COUNT,
+            "Expected {LEVEL_COUNT} memory levels but parsed {} from `{}`",
+            parsed.len(),
+            mem_override
+        );
+        let values: [u64; LEVEL_COUNT] = parsed.try_into().unwrap();
+        MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(values))
+    } else {
+        Tgt::max_mem()
+    };
+
+    let mut spec = Spec(logical_spec, memory_limits);
     spec.canonicalize().unwrap();
     info!("Synthesizing {spec}");
 
