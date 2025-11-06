@@ -99,6 +99,13 @@ enum QuerySpec {
     Matmul {
         size: DimSize,
     },
+    #[command(
+        name = "matmulaccum",
+        about = "Synthesize an accumulating matrix multiplication"
+    )]
+    MatmulAccum {
+        size: DimSize,
+    },
     MatmulU8S8S16 {
         size: DimSize,
     },
@@ -189,6 +196,16 @@ where
                 (dt_a, GL, row_major),
                 (dt_b, GL, row_major),
                 (dt_c, GL, row_major),
+                serial
+            ))
+        }
+        QuerySpec::MatmulAccum { size } => {
+            let dt = Dtype::Uint32;
+            lspec!(MatmulAccum(
+                [DimSize::new(1).unwrap(), *size, *size, *size],
+                (dt, GL, row_major),
+                (dt, GL, row_major),
+                (dt, GL, row_major),
                 serial
             ))
         }
