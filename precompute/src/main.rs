@@ -453,13 +453,15 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         return phases;
     }
 
-    for rank in 1..=move_needed_rank {
+    phases.push({
         let mut zero_phase = Vec::with_capacity(DTYPES.len());
-        for &dtype in &DTYPES {
-            zero_phase.push(fill_zero_top(args.size, rank, dtype));
+        for rank in 1..=move_needed_rank {
+            for &dtype in &DTYPES {
+                zero_phase.push(fill_zero_top(args.size, rank, dtype));
+            }
         }
-        phases.push(zero_phase);
-    }
+        zero_phase
+    });
 
     let mut matmul_phase = vec![];
     for &dtype in &DTYPES {
