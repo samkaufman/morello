@@ -440,15 +440,16 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         _ => 3,
     };
 
-    let mut move_phase = vec![];
-    for rank in 1..=move_needed_rank {
-        for &dtype in &DTYPES {
-            move_phase.push(move_top::<Tgt>(args.size, rank, dtype));
+    phases.push({
+        let mut move_phase = vec![];
+        for rank in 1..=move_needed_rank {
+            for &dtype in &DTYPES {
+                move_phase.push(move_top::<Tgt>(args.size, rank, dtype));
+            }
         }
-    }
-    if !move_phase.is_empty() {
-        phases.push(move_phase);
-    }
+        assert!(!move_phase.is_empty());
+        move_phase
+    });
     if args.through == ThroughSpec::Move {
         return phases;
     }
@@ -463,162 +464,164 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
         zero_phase
     });
 
-    let mut matmul_phase = vec![];
-    for &dtype in &DTYPES {
-        matmul_phase.push(matmul_top(args.size, dtype));
-    }
-    for rank in 1..=move_needed_rank {
-        let size_cube: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
+    phases.push({
+        let mut matmul_phase = vec![];
         for &dtype in &DTYPES {
-            for dim in 0..rank {
-                let mut reduced_shape = size_cube.clone();
-                reduced_shape[usize::from(dim)] = nz!(1u32);
+            matmul_phase.push(matmul_top(args.size, dtype));
+        }
+        for rank in 1..=move_needed_rank {
+            let size_cube: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
+            for &dtype in &DTYPES {
+                for dim in 0..rank {
+                    let mut reduced_shape = size_cube.clone();
+                    reduced_shape[usize::from(dim)] = nz!(1u32);
 
-                matmul_phase.push(LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::Broadcast { dim },
-                        spec_shape: size_cube.clone(),
-                        dtypes: vec![dtype; 2],
-                    },
-                    vec![taux_gl(&reduced_shape), taux_gl(&size_cube)],
-                    true,
-                ));
-
-                matmul_phase.push(LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::Max { dim, accum: false },
-                        spec_shape: size_cube.clone(),
-                        dtypes: vec![dtype; 2],
-                    },
-                    vec![taux_gl(&size_cube), taux_gl(&reduced_shape)],
-                    true,
-                ));
-
-                matmul_phase.push(LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::SoftmaxDenominator {
-                            scan_dim: dim,
-                            accum: false,
+                    matmul_phase.push(LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::Broadcast { dim },
+                            spec_shape: size_cube.clone(),
+                            dtypes: vec![dtype; 2],
                         },
+                        vec![taux_gl(&reduced_shape), taux_gl(&size_cube)],
+                        true,
+                    ));
+
+                    matmul_phase.push(LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::Max { dim, accum: false },
+                            spec_shape: size_cube.clone(),
+                            dtypes: vec![dtype; 2],
+                        },
+                        vec![taux_gl(&size_cube), taux_gl(&reduced_shape)],
+                        true,
+                    ));
+
+                    matmul_phase.push(LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::SoftmaxDenominator {
+                                scan_dim: dim,
+                                accum: false,
+                            },
+                            spec_shape: size_cube.clone(),
+                            dtypes: vec![dtype; 3],
+                        },
+                        vec![
+                            taux_gl(&size_cube),
+                            taux_gl(&reduced_shape),
+                            taux_gl(&reduced_shape),
+                        ],
+                        true,
+                    ));
+
+                    matmul_phase.push(LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                                scan_dim: dim,
+                                accum: false,
+                            },
+                            spec_shape: size_cube.clone(),
+                            dtypes: vec![dtype; 4],
+                        },
+                        vec![
+                            taux_gl(&size_cube),
+                            taux_gl(&reduced_shape),
+                            taux_gl(&reduced_shape),
+                            taux_gl(&size_cube),
+                        ],
+                        true,
+                    ));
+                }
+
+                matmul_phase.push(LogicalSpec::Primitive(
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::DivideVec,
                         spec_shape: size_cube.clone(),
                         dtypes: vec![dtype; 3],
                     },
                     vec![
                         taux_gl(&size_cube),
-                        taux_gl(&reduced_shape),
-                        taux_gl(&reduced_shape),
-                    ],
-                    true,
-                ));
-
-                matmul_phase.push(LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
-                            scan_dim: dim,
-                            accum: false,
-                        },
-                        spec_shape: size_cube.clone(),
-                        dtypes: vec![dtype; 4],
-                    },
-                    vec![
                         taux_gl(&size_cube),
-                        taux_gl(&reduced_shape),
-                        taux_gl(&reduced_shape),
                         taux_gl(&size_cube),
                     ],
                     true,
                 ));
             }
-
-            matmul_phase.push(LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::DivideVec,
-                    spec_shape: size_cube.clone(),
-                    dtypes: vec![dtype; 3],
-                },
-                vec![
-                    taux_gl(&size_cube),
-                    taux_gl(&size_cube),
-                    taux_gl(&size_cube),
-                ],
-                true,
-            ));
         }
-    }
-
-    phases.push(matmul_phase);
+        matmul_phase
+    });
     if args.through == ThroughSpec::Matmul {
         return phases;
     }
 
-    let mut conv_phase = vec![];
-    for &dtype in &DTYPES {
-        for &fs in &args.filters_size {
-            let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
-            let img_aux = taux_gl(&[args.batch, args.channels, s, s]);
-            let filters_aux = taux_gl(&[args.filters, args.channels, fs, fs]);
-            let output_aux = taux_gl(&[args.batch, args.filters, args.size, args.size]);
-            conv_phase.push(LogicalSpec::Primitive(
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Conv { accum: false },
-                    spec_shape: smallvec![
-                        args.batch,
-                        args.filters,
-                        args.channels,
-                        args.size,
-                        args.size,
-                        fs,
-                        fs,
-                    ],
-                    dtypes: vec![dtype; 3],
-                },
-                vec![img_aux, filters_aux, output_aux],
-                true,
-            ));
-        }
-    }
-    for rank in 1..=move_needed_rank {
-        let numer_shape: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
+    phases.push({
+        let mut conv_phase = vec![];
         for &dtype in &DTYPES {
-            for scan_dim in 0..rank {
-                let mut denom_shape = numer_shape.clone();
-                denom_shape[usize::from(scan_dim)] = nz!(1u32);
-
+            for &fs in &args.filters_size {
+                let s = DimSize::new(args.size.get() - 1 + fs.get()).unwrap();
+                let img_aux = taux_gl(&[args.batch, args.channels, s, s]);
+                let filters_aux = taux_gl(&[args.filters, args.channels, fs, fs]);
+                let output_aux = taux_gl(&[args.batch, args.filters, args.size, args.size]);
                 conv_phase.push(LogicalSpec::Primitive(
                     PrimitiveBasics {
-                        typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
-                            scan_dim,
-                            accum: false,
-                        },
-                        spec_shape: numer_shape.clone(),
+                        typ: PrimitiveSpecType::Conv { accum: false },
+                        spec_shape: smallvec![
+                            args.batch,
+                            args.filters,
+                            args.channels,
+                            args.size,
+                            args.size,
+                            fs,
+                            fs,
+                        ],
                         dtypes: vec![dtype; 3],
                     },
-                    vec![
-                        taux_gl(&numer_shape),
-                        taux_gl(&denom_shape),
-                        taux_gl(&numer_shape),
-                    ],
-                    true,
-                ));
-
-                conv_phase.push(LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
-                        spec_shape: numer_shape.clone(),
-                        dtypes: vec![dtype; 3],
-                    },
-                    vec![
-                        taux_gl(&numer_shape),
-                        taux_gl(&denom_shape),
-                        taux_gl(&numer_shape),
-                    ],
+                    vec![img_aux, filters_aux, output_aux],
                     true,
                 ));
             }
         }
-    }
-    phases.push(conv_phase);
+        for rank in 1..=move_needed_rank {
+            let numer_shape: Shape = iter::repeat_n(args.size, usize::from(rank)).collect();
+            for &dtype in &DTYPES {
+                for scan_dim in 0..rank {
+                    let mut denom_shape = numer_shape.clone();
+                    denom_shape[usize::from(scan_dim)] = nz!(1u32);
 
+                    conv_phase.push(LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
+                                scan_dim,
+                                accum: false,
+                            },
+                            spec_shape: numer_shape.clone(),
+                            dtypes: vec![dtype; 3],
+                        },
+                        vec![
+                            taux_gl(&numer_shape),
+                            taux_gl(&denom_shape),
+                            taux_gl(&numer_shape),
+                        ],
+                        true,
+                    ));
+
+                    conv_phase.push(LogicalSpec::Primitive(
+                        PrimitiveBasics {
+                            typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
+                            spec_shape: numer_shape.clone(),
+                            dtypes: vec![dtype; 3],
+                        },
+                        vec![
+                            taux_gl(&numer_shape),
+                            taux_gl(&denom_shape),
+                            taux_gl(&numer_shape),
+                        ],
+                        true,
+                    ));
+                }
+            }
+        }
+        conv_phase
+    });
     phases
 }
 
