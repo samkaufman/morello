@@ -79,7 +79,6 @@ struct Args {
 #[derive(ValueEnum, Debug, Clone, PartialEq, Eq)]
 enum ThroughSpec {
     Move,
-    Zero,
     Matmul,
     Conv,
 }
@@ -460,9 +459,6 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
             zero_phase.push(fill_zero_top(args.size, rank, dtype));
         }
         phases.push(zero_phase);
-    }
-    if args.through == ThroughSpec::Zero {
-        return phases;
     }
 
     let mut matmul_phase = vec![];
