@@ -54,8 +54,6 @@ const DTYPES: [Dtype; 2] = [Dtype::Uint32, Dtype::Float32];
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(long, help = "Exit after this many seconds.")]
-    timeout: Option<u64>,
     #[arg(long)]
     db: Option<path::PathBuf>,
     #[arg(long, default_value = "2000", help = "Cache size in database pages.")]
@@ -146,10 +144,6 @@ where
     <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
         morello::grid::general::BiMap<Codomain = u8>,
 {
-    let deadline = args
-        .timeout
-        .map(|s| Instant::now() + Duration::from_secs(s));
-
     env_logger::init();
 
     #[cfg(feature = "db-stats")]
@@ -157,7 +151,7 @@ where
 
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new::<Tgt>(args.db.as_deref(), true, K, args.cache_size, threads);
-    main_per_db::<Tgt>(args, db, args.db.as_deref(), deadline);
+    main_per_db::<Tgt>(args, db, args.db.as_deref());
 
     Ok(())
 }
@@ -166,7 +160,6 @@ fn main_per_db<Tgt>(
     args: &Args,
     #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
     db_path: Option<&path::Path>,
-    deadline: Option<Instant>,
 ) where
     Tgt: CpuTarget,
     Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
@@ -228,7 +221,6 @@ fn main_per_db<Tgt>(
                     bound_spec,
                     &levels,
                     &top,
-                    deadline,
                     spec_completed,
                     meta_update_tx.clone(),
                 );
@@ -245,7 +237,6 @@ fn process_spec<Tgt>(
     bound_spec: LogicalSpec<Tgt>,
     levels: &[Tgt::Level],
     top: &MemVec,
-    deadline: Option<Instant>,
     spec_completed: usize,
     progress_sender: mpsc::Sender<(LogicalSpec<Tgt>, usize)>,
 ) where
@@ -320,10 +311,7 @@ fn process_spec<Tgt>(
                 #[cfg(feature = "db-stats")]
                 let synthesis_start = Instant::now();
 
-                let Some(stage_results) = process_worklist_chunks(db, &worklist, deadline) else {
-                    log::debug!("Deadline reached; thread stopping");
-                    return;
-                };
+                let stage_results = process_worklist_chunks(db, &worklist);
 
                 #[cfg(feature = "db-stats")]
                 {
@@ -373,11 +361,7 @@ fn validate_stage_worklist_unique<Tgt: Target>(worklist: &[Spec<Tgt>]) {
     }
 }
 
-fn process_worklist_chunks<Tgt>(
-    db: &FilesDatabase,
-    worklist: &[Spec<Tgt>],
-    deadline: Option<Instant>,
-) -> Option<Vec<ActionCostVec>>
+fn process_worklist_chunks<Tgt>(db: &FilesDatabase, worklist: &[Spec<Tgt>]) -> Vec<ActionCostVec>
 where
     Tgt: CpuTarget,
     Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
@@ -388,12 +372,6 @@ where
     let mut stage_results = Vec::with_capacity(worklist.len());
 
     while subworklist_offset < worklist.len() {
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                return None; // Deadline reached
-            }
-        }
-
         let subworklist = &worklist[subworklist_offset
             ..worklist
                 .len()
@@ -403,7 +381,7 @@ where
         subworklist_offset += subworklist.len();
     }
 
-    Some(stage_results)
+    stage_results
 }
 
 fn compute_next_stage<Tgt: Target>(
