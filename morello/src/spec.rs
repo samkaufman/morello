@@ -3206,9 +3206,7 @@ pub mod macros {
                 layout = $crate::layout::Layout::empty();
             } else {
                 layout = $crate::layout::LayoutBuilder::build($layout, $shp);
-                if $c {
-                    layout.set_contiguous_full();
-                } else {
+                if !($c) {
                     layout.set_contiguous_none();
                 }
             }
