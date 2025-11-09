@@ -12,11 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::{fs, iter, path};
 
 #[cfg(feature = "db-stats")]
 use std::sync::atomic::{self, AtomicU64};
+#[cfg(feature = "db-stats")]
+use std::time::Duration;
 
 use morello::common::{DimSize, Dtype, Shape};
 use morello::db::{ActionCostVec, FilesDatabase};
