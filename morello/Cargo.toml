@@ -44,6 +44,7 @@ strum = { version = "0.26.2", features = ["derive"] }
 zstd = "0.13.1"
 serde_with = "3.8.3"
 wide = "0.7"
+atomic-write-file = "0.3.0"
 
 [dev-dependencies]
 iai-callgrind = "0.12.3"

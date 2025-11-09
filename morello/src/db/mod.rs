@@ -17,6 +17,7 @@ use crate::target::{Target, TargetId, LEVEL_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use pagecontents::RTreePageContents;
 
+use atomic_write_file::AtomicWriteFile;
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
@@ -653,19 +654,7 @@ impl Shard {
                                 log::debug!("Evicting page");
                             }
 
-                            if let Some(parent) = path.parent() {
-                                fs::create_dir_all(parent).unwrap();
-                            }
-                            let file = fs::File::create(&path).unwrap();
-                            if COMPRESS_PAGES {
-                                let mut zstd_writer = zstd::Encoder::new(file, 0).unwrap();
-                                bincode::serialize_into(&mut zstd_writer, &value).unwrap();
-                                zstd_writer.finish().unwrap();
-                            } else {
-                                let mut buf_writer = BufWriter::new(file);
-                                bincode::serialize_into(&mut buf_writer, &value).unwrap();
-                                buf_writer.flush().unwrap();
-                            }
+                            write_page_atomic(&path, &value);
 
                             #[cfg(feature = "db-stats")]
                             {
@@ -1172,6 +1161,26 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
         spec_key_dir_name = spec_key_dir_name.join(l.to_string());
     }
     spec_key_dir_name.join(block_pt.iter().map(|p| p.to_string()).join("_"))
+}
+
+fn write_page_atomic(path: &Path, contents: &PageContents) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+
+    let mut file = AtomicWriteFile::options().open(path).unwrap();
+
+    if COMPRESS_PAGES {
+        let mut zstd_writer = zstd::Encoder::new(&mut file, 0).unwrap();
+        bincode::serialize_into(&mut zstd_writer, contents).unwrap();
+        zstd_writer.finish().unwrap();
+    } else {
+        let mut buf_writer = BufWriter::new(&mut file);
+        bincode::serialize_into(&mut buf_writer, contents).unwrap();
+        buf_writer.flush().unwrap();
+    }
+
+    file.commit().unwrap();
 }
 
 /// Check TARGET file in `db_path` is consistent with `Tgt`. Create if none exists.
