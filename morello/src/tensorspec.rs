@@ -610,7 +610,7 @@ pub(crate) fn check_tensor_vector_size<Tgt: Target>(
         debug_assert!(vector_size.is_none());
         return Ok(());
     }
-    let vector_size = vector_size.unwrap();
+    let vector_size = vector_size.expect("vector_size must be Some for vector level");
     let volume = DimSize::new(shape.iter().map(|d| d.get()).product()).unwrap();
     let bytes = volume.get() * u32::from(dtype.size());
 

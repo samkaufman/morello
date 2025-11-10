@@ -3,7 +3,7 @@ use crate::common::{DimSize, Shape};
 use crate::imp::loops::{Loop, LoopTile};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::layout::Layout;
+use crate::layout::{row_major, Layout};
 use crate::scheduling::{
     check_tile_out_applies, tile_to_apply_err, ActionT, ApplyError, NotApplicableReason,
 };
@@ -440,22 +440,73 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                     "Split only applies to Matmul, Max, and SoftmaxDenominator",
                 )))),
             },
-            LogicalSpec::Compose {
-                components,
-                operand_auxes: _,
-                serial_only: _,
-            } if matches!(
-                components[0],
-                PrimitiveBasics {
-                    typ: PrimitiveSpecType::Matmul { accum: true },
-                    ..
-                }
-            ) =>
+            LogicalSpec::Compose { components, .. }
+                if matches!(
+                    components[0],
+                    PrimitiveBasics {
+                        typ: PrimitiveSpecType::Matmul { accum: true },
+                        ..
+                    }
+                ) =>
             {
-                // TODO: Implement Split for Compose(MatmulAccum, ..)
-                Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                    "Split with Compose unimplemented",
-                ))))
+                if components.len() < 2 {
+                    panic!("Compose did not have two or more components");
+                }
+
+                // Pop the head Matmul off the given Compose
+                let (head_spec, tail_spec) = split_head_matmul_specs(spec)?;
+
+                // Split the head Matmul
+                let split_impl = Split { k: self.k }.apply_unchecked_canon(&head_spec)?;
+                let ImplNode::Loop(Loop {
+                    tiles: head_tiles,
+                    bodies: mut head_bodies,
+                    ..
+                }) = split_impl
+                else {
+                    unreachable!();
+                };
+                if head_bodies.len() != 1 {
+                    // TODO: Implement!
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                        "Non-multiple splitting of Compose not yet supported",
+                    ))));
+                }
+                let ImplNode::SpecApp(head_body_specapp) = head_bodies.swap_remove(0) else {
+                    unreachable!();
+                };
+
+                // Tile the output of the tail Compose (or Primitive, if one component)
+                let tail_impl = TileOut::SingleLoop {
+                    dim: 2,
+                    size: self.k,
+                    parallel: false,
+                }
+                .apply(&tail_spec)?;
+                let ImplNode::Loop(Loop {
+                    tiles: tail_tiles,
+                    bodies: mut tail_bodies,
+                    ..
+                }) = tail_impl
+                else {
+                    unreachable!();
+                };
+                debug_assert_eq!(tail_bodies.len(), 1); // would have failed earlier
+                let tail_body_node = tail_bodies.swap_remove(0);
+                let ImplNode::SpecApp(tail_body_specapp) = tail_body_node else {
+                    unreachable!();
+                };
+
+                // Merge the now-split and -tiled halves of the Compose back into a split Compose
+                let mut final_loop = fuse_matmul_compose(
+                    head_tiles,
+                    head_body_specapp,
+                    tail_tiles,
+                    tail_body_specapp,
+                )?;
+                debug_assert_eq!(final_loop.spec, None);
+                final_loop.spec = Some(spec.clone());
+                Ok(final_loop.into())
             }
             LogicalSpec::Compose { .. } => todo!(),
         }
@@ -1020,6 +1071,179 @@ fn convert_tile_to_boundarytile<V: View>(
     BoundaryTile::new(Shape::from_slice(tile.shape()), offsets, tile.view).unwrap()
 }
 
+/// Splits a Compose spec into head (first Matmul) and tail (remaining components) specs.
+///
+/// If the Compose has only two components, the tail spec will be a Primitive spec.
+fn split_head_matmul_specs<Tgt: Target>(
+    spec: &Spec<Tgt>,
+) -> Result<(Spec<Tgt>, Spec<Tgt>), ApplyError> {
+    let (components, operand_auxes, serial_only) = match &spec.0 {
+        LogicalSpec::Compose {
+            components,
+            operand_auxes,
+            serial_only,
+        } => (components.clone(), operand_auxes.clone(), *serial_only),
+        _ => unreachable!("Caller ensures the LogicalSpec is a Compose"),
+    };
+
+    let mut tail_components = components.clone();
+    let head_component = tail_components
+        .first()
+        .expect("Compose should have at least one component")
+        .clone();
+    tail_components.remove(0);
+
+    let mut tail_operand_auxes = operand_auxes.clone();
+    let rhs_aux = tail_operand_auxes.remove(0);
+    let output_aux = tail_operand_auxes
+        .pop()
+        .expect("Compose operand auxes should include an output aux");
+
+    let lhs_shape = head_component.parameter_shape(0);
+    let lhs_aux = TensorSpecAux {
+        level: output_aux.level,
+        layout: row_major(&lhs_shape),
+        vector_size: output_aux.vector_size,
+    };
+
+    tail_operand_auxes.push(lhs_aux.clone());
+
+    let mut head_spec = Spec(
+        LogicalSpec::Primitive(
+            head_component.clone(),
+            vec![lhs_aux.clone(), rhs_aux.clone(), output_aux.clone()],
+            serial_only,
+        ),
+        spec.1.clone(),
+    );
+    head_spec
+        .canonicalize()
+        .map_err(spec_canonicalize_to_apply_err)?;
+
+    let tail_logical = match tail_components.len() {
+        0 => {
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "Compose tail must contain at least one component",
+            ))));
+        }
+        1 => LogicalSpec::Primitive(
+            tail_components[0].clone(),
+            tail_operand_auxes.clone(),
+            serial_only,
+        ),
+        _ => LogicalSpec::Compose {
+            components: tail_components.clone(),
+            operand_auxes: tail_operand_auxes.clone(),
+            serial_only,
+        },
+    };
+    let mut tail_spec = Spec(tail_logical, spec.1.clone());
+    tail_spec
+        .canonicalize()
+        .map_err(spec_canonicalize_to_apply_err)?;
+
+    Ok((head_spec, tail_spec))
+}
+
+/// Fuses a split head Matmul with a tiled tail into a Loop.
+fn fuse_matmul_compose<Tgt: Target>(
+    head_tiles: Vec<LoopTile<Tgt>>,
+    head_body_specapp: SpecApp<ViewE<Tgt>>,
+    tail_tiles: Vec<LoopTile<Tgt>>,
+    tail_body_specapp: SpecApp<ViewE<Tgt>>,
+) -> Result<Loop<Tgt>, ApplyError> {
+    debug_assert_eq!(
+        head_body_specapp.0 .0.serial_only(),
+        tail_body_specapp.0 .0.serial_only()
+    );
+
+    let mut final_tiles = Vec::with_capacity(tail_tiles.len() + 1);
+    final_tiles.push({
+        let mut rhs_tile = head_tiles
+            .into_iter()
+            .find(|tile| tile.parameter_index == 1)
+            .ok_or(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "Expected a tile for the head Matmul RHS parameter",
+            ))))?;
+        rhs_tile.parameter_index = 0;
+        rhs_tile
+    });
+
+    let tail_output_index = tail_body_specapp.0 .0.unique_output_index().unwrap();
+    final_tiles.extend(tail_tiles.into_iter().filter_map(|mut tile| {
+        let parameter_index_usize = usize::from(tile.parameter_index);
+        if parameter_index_usize == tail_output_index {
+            None
+        } else {
+            tile.parameter_index = (parameter_index_usize + 1).try_into().unwrap();
+            Some(tile)
+        }
+    }));
+
+    // Destructure the head Matmul SpecApp
+    let SpecApp(Spec(head_logical_spec, head_memory_limits), mut head_args) = head_body_specapp;
+    let LogicalSpec::Primitive(head_component_updated, mut head_auxes, serial_only) =
+        head_logical_spec
+    else {
+        unreachable!("Head Matmul body must remain primitive");
+    };
+    let output_aux = head_auxes.swap_remove(2);
+    let rhs_aux = head_auxes.swap_remove(1);
+    drop(head_auxes); // order is messed up; dropping for safety
+
+    // Destructure the tail Compose/Primitive SpecApp
+    let SpecApp(Spec(tail_logical_spec, _), mut tail_args) = tail_body_specapp;
+    let (tail_components_updated, mut tail_operand_auxes_updated) = match tail_logical_spec {
+        LogicalSpec::Primitive(basics, auxes, _) => (vec![basics], auxes),
+        LogicalSpec::Compose {
+            components,
+            operand_auxes,
+            ..
+        } => (components, operand_auxes),
+    };
+
+    debug_assert!(!tail_components_updated.is_empty());
+
+    let mut final_components = Vec::with_capacity(tail_components_updated.len() + 1);
+    final_components.push(head_component_updated);
+    final_components.extend(tail_components_updated);
+
+    let mut final_operand_auxes = Vec::with_capacity(tail_operand_auxes_updated.len() + 2);
+    final_operand_auxes.push(rhs_aux);
+    tail_operand_auxes_updated.pop(); // drop output
+    final_operand_auxes.extend(tail_operand_auxes_updated);
+    final_operand_auxes.push(output_aux);
+
+    let output_arg = head_args.swap_remove(2);
+    let rhs_arg = head_args.swap_remove(1);
+    drop(head_args); // order is messed up; dropping for safety
+
+    tail_args.truncate(tail_output_index);
+    let final_args: Vec<_> = once(rhs_arg)
+        .chain(tail_args)
+        .chain(once(output_arg))
+        .collect();
+
+    let mut final_spec = Spec(
+        LogicalSpec::Compose {
+            components: final_components,
+            operand_auxes: final_operand_auxes,
+            serial_only,
+        },
+        head_memory_limits,
+    );
+    final_spec
+        .canonicalize()
+        .map_err(spec_canonicalize_to_apply_err)?;
+    debug_assert_eq!(final_args.len(), final_spec.0.operand_count());
+    Ok(Loop {
+        tiles: final_tiles,
+        bodies: vec![SpecApp::new(final_spec, final_args).into()],
+        parallel: false,
+        spec: None,
+    })
+}
+
 fn bitvector_combinations(bitvectors: &[usize]) -> impl Iterator<Item = usize> + '_ {
     // Generate all non-empty subsets (1 to 2^n - 1)
     (1..1_usize << bitvectors.len()).map(move |subset_mask| {
@@ -1054,10 +1278,8 @@ mod tests {
     use super::*;
     use crate::common::Dtype;
     use crate::imp::{loops::Loop, Impl, ImplNode};
-    use crate::layout::row_major;
+    use crate::layout::{row_major, PhysDim};
     use crate::scheduling::{Action, ActionT, ApplyError, NotApplicableReason};
-    use crate::shape;
-    use crate::spec;
     use crate::spec::Spec;
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{
@@ -1066,6 +1288,7 @@ mod tests {
     };
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape, TensorSpecAux};
     use crate::views::{View, ViewE};
+    use crate::{lspec, shape, spec};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
 
@@ -1471,20 +1694,18 @@ mod tests {
                             }
                         }
                         LogicalSpec::Compose { components, .. } if matches!(components.first(), Some(PrimitiveBasics { typ: PrimitiveSpecType::Matmul { accum: true }, .. })) => {
-                            let operands = spec.0.parameters();
-                            if operands.len() >= 2 && operands[0].shape().len() >= 3 {
-                                let k_dim_size = operands[0].shape()[2].get();
-                                if k_dim_size > 1 {
-                                    let k_range = 1u32..(k_dim_size.min(6));
-                                    Some(k_range
+                            // For Compose, we need to check the k dimension from the head Matmul component's spec_shape
+                            components.first()
+                                .map(|PrimitiveBasics { spec_shape, .. }| {
+                                    assert_eq!(spec_shape.len(), 4);
+                                    spec_shape[2].get()
+                                })
+                                .filter(|&k_dim_size| k_dim_size > 1)
+                                .map(|k_dim_size| {
+                                    (1u32..(k_dim_size.min(6)))
                                         .prop_map(|k| Action::Split(Split { k: NonZeroU32::new(k).unwrap() }))
-                                        .boxed())
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
+                                        .boxed()
+                                })
                         }
                         _ => None,
                     };
@@ -1552,7 +1773,103 @@ mod tests {
     }
 
     #[test]
-    fn test_split_with_compose_matmul_accum_fails_with_not_yet_implemented() {
+    fn test_split_with_compose_matmul_accum_and_matmul() {
+        // TODO: Factor out helper composing of the two Primitives for each of the two Composes
+        let initial_compose_spec = {
+            let LogicalSpec::<Avx2Target>::Primitive(basics_inner, auxes_inner, ..) =
+                lspec!(Matmul(
+                    [1, 4, 4, 8],
+                    (f32, GL, row_major),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+            let LogicalSpec::<Avx2Target>::Primitive(basics_outer, auxes_outer, ..) =
+                lspec!(MatmulAccum(
+                    [1, 4, 8, 4],
+                    (f32, GL, row_major),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+
+            let mut compose_spec = Spec(
+                LogicalSpec::Compose {
+                    components: vec![basics_outer.clone(), basics_inner.clone()],
+                    operand_auxes: vec![
+                        auxes_outer[1].clone(),
+                        auxes_inner[0].clone(),
+                        auxes_inner[1].clone(),
+                        auxes_outer[2].clone(),
+                    ],
+                    serial_only: false,
+                },
+                Avx2Target::max_mem(),
+            );
+            compose_spec.canonicalize().unwrap();
+            compose_spec
+        };
+
+        let expected_compose_spec = {
+            let mut rmc1 = Layout::new(vec![(1, PhysDim::Dynamic), (2, PhysDim::Dynamic)]);
+            rmc1.contig = 1;
+
+            let LogicalSpec::<Avx2Target>::Primitive(basics_inner, auxes_inner, ..) =
+                lspec!(Matmul(
+                    [1, 4, 4, 2],
+                    (f32, GL, row_major),
+                    (f32, GL, rmc1.clone()),
+                    (f32, GL, rmc1.clone())
+                ))
+            else {
+                unreachable!();
+            };
+            let LogicalSpec::<Avx2Target>::Primitive(basics_outer, auxes_outer, ..) =
+                lspec!(MatmulAccum(
+                    [1, 4, 2, 4],
+                    (f32, GL, rmc1),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+            Spec(
+                LogicalSpec::Compose {
+                    components: vec![basics_outer.clone(), basics_inner.clone()],
+                    operand_auxes: vec![
+                        auxes_outer[1].clone(),
+                        auxes_inner[0].clone(),
+                        auxes_inner[1].clone(),
+                        auxes_outer[2].clone(),
+                    ],
+                    serial_only: false,
+                },
+                Avx2Target::max_mem(),
+            )
+        };
+
+        let split_action = Action::Split(Split { k: nz!(2u32) });
+        let result = split_action
+            .apply(&initial_compose_spec)
+            .expect("Split should succeed for Compose(MatmulAccum, Matmul)");
+        let ImplNode::Loop(loop_impl) = result else {
+            panic!("Expected Loop impl node");
+        };
+        let [ImplNode::SpecApp(SpecApp(subspec, _))] = &loop_impl.bodies[..] else {
+            panic!("Expected main body to be just a SpecApp");
+        };
+        assert!(subspec.is_canonical());
+        assert_eq!(subspec, &expected_compose_spec);
+    }
+
+    /// Test that Split fails on Compose containing MatmulAccum and Move.
+    #[test]
+    fn test_split_with_compose_matmul_accum_and_move_is_rejected() {
         let matmul_accum = PrimitiveBasics {
             typ: PrimitiveSpecType::Matmul { accum: true },
             spec_shape: shape![1, 4, 8, 4], // [b, m, k, n]
@@ -1560,24 +1877,26 @@ mod tests {
         };
         let move_component = PrimitiveBasics {
             typ: PrimitiveSpecType::Move,
-            spec_shape: shape![1, 4, 4], // [b, m, n] - matches MatmulAccum output
+            spec_shape: shape![1, 4, 4],
             dtypes: vec![Dtype::Float32, Dtype::Float32],
         };
+
         let lhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            level: GL,
             layout: row_major(&shape![1, 4, 8]),
             vector_size: None,
         };
         let rhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            level: GL,
             layout: row_major(&shape![1, 8, 4]),
             vector_size: None,
         };
         let out_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            level: GL,
             layout: row_major(&shape![1, 4, 4]),
             vector_size: None,
         };
+
         let mut compose_spec = Spec(
             LogicalSpec::Compose {
                 components: vec![matmul_accum, move_component],
@@ -1591,21 +1910,136 @@ mod tests {
         let split_action = Action::Split(Split { k: nz!(4u32) });
         let result = split_action.apply(&compose_spec);
 
-        // Once we implement the feature, we can change this to assert success
         match result {
-            Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(msg)))) => {
-                assert!(
-                    msg.contains("Split with Compose unimplemented"),
-                    "Expected 'unimplemented' error, got: {msg}"
-                );
-            }
-            Ok(_) => {
-                panic!("Split with Compose unexpectedly succeeded - feature may have been implemented!");
-            }
-            Err(other_err) => {
-                panic!("Expected 'not yet implemented' error, got: {other_err:?}");
-            }
+            Ok(_) => panic!("Split should reject Compose tails that are not Matmul"),
+            Err(ApplyError::NotApplicable(NotApplicableReason::TileShapeMatchesOriginal)) => {}
+            Err(other_err) => panic!("Expected TileShapeMatchesOriginal error, got: {other_err:?}"),
         }
+    }
+
+    #[test]
+    fn test_split_head_matmul_specs_three_component_compose() {
+        // TODO: Factor out helper composing of the two Primitives for each of the two Composes
+        let initial_compose_spec = {
+            let LogicalSpec::<Avx2Target>::Primitive(basics_inner, auxes_inner, ..) =
+                lspec!(Matmul(
+                    [1, 4, 4, 8],
+                    (f32, GL, row_major),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+            let LogicalSpec::<Avx2Target>::Primitive(basics_middle, auxes_middle, ..) =
+                lspec!(Matmul(
+                    [1, 4, 8, 4],
+                    (f32, GL, row_major),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+            let LogicalSpec::<Avx2Target>::Primitive(basics_outer, auxes_outer, ..) =
+                lspec!(MatmulAccum(
+                    [1, 4, 4, 3],
+                    (f32, GL, row_major),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+
+            let mut compose_spec = Spec(
+                LogicalSpec::Compose {
+                    components: vec![
+                        basics_outer.clone(),
+                        basics_middle.clone(),
+                        basics_inner.clone(),
+                    ],
+                    operand_auxes: vec![
+                        auxes_outer[1].clone(),
+                        auxes_middle[1].clone(),
+                        auxes_inner[0].clone(),
+                        auxes_inner[1].clone(),
+                        auxes_outer[2].clone(),
+                    ],
+                    serial_only: false,
+                },
+                Avx2Target::max_mem(),
+            );
+            compose_spec.canonicalize().unwrap();
+            compose_spec
+        };
+
+        let expected_compose_spec = {
+            let mut rmc1 = Layout::new(vec![(1, PhysDim::Dynamic), (2, PhysDim::Dynamic)]);
+            rmc1.contig = 1;
+
+            let LogicalSpec::<Avx2Target>::Primitive(basics_inner, auxes_inner, ..) =
+                lspec!(Matmul(
+                    [1, 4, 4, 8],
+                    (f32, GL, row_major),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+            let LogicalSpec::<Avx2Target>::Primitive(basics_middle, auxes_middle, ..) =
+                lspec!(Matmul(
+                    [1, 4, 8, 2],
+                    (f32, GL, row_major),
+                    (f32, GL, rmc1.clone()),
+                    (f32, GL, rmc1.clone())
+                ))
+            else {
+                unreachable!();
+            };
+            let LogicalSpec::<Avx2Target>::Primitive(basics_outer, auxes_outer, ..) =
+                lspec!(MatmulAccum(
+                    [1, 4, 2, 3],
+                    (f32, GL, rmc1.clone()),
+                    (f32, GL, row_major),
+                    (f32, GL, row_major)
+                ))
+            else {
+                unreachable!();
+            };
+            Spec(
+                LogicalSpec::Compose {
+                    components: vec![
+                        basics_outer.clone(),
+                        basics_middle.clone(),
+                        basics_inner.clone(),
+                    ],
+                    operand_auxes: vec![
+                        auxes_outer[1].clone(),
+                        auxes_middle[1].clone(),
+                        auxes_inner[0].clone(),
+                        auxes_inner[1].clone(),
+                        auxes_outer[2].clone(),
+                    ],
+                    serial_only: false,
+                },
+                Avx2Target::max_mem(),
+            )
+        };
+
+        let split_action = Action::Split(Split { k: nz!(2u32) });
+        let result = split_action
+            .apply(&initial_compose_spec)
+            .expect("Split should succeed for Compose(MatmulAccum, Matmul)");
+        let ImplNode::Loop(loop_impl) = result else {
+            panic!("Expected Loop impl node");
+        };
+        let [ImplNode::SpecApp(SpecApp(subspec, _))] = &loop_impl.bodies[..] else {
+            panic!("Expected main body to be just a SpecApp");
+        };
+        assert!(subspec.is_canonical());
+        assert_eq!(subspec, &expected_compose_spec);
     }
 
     #[test]
