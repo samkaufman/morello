@@ -34,7 +34,7 @@ const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
 const EXPLORE_ODDEVEN_LAYOUTS: bool = false;
 const EXPLORE_HIGHER_PRECISION_MOVE_DTYPES: bool = false;
-const EXPLORE_ALL_VECTOR_SIZES: bool = false;
+pub(crate) const EXPLORE_ALL_VECTOR_SIZES: bool = true;
 
 const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::RF,
@@ -42,6 +42,7 @@ const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::L1,
     CpuMemoryLevel::GL,
 ];
+
 pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
 pub(crate) const DOT_PRODUCT_ACCUM_COUNT: u32 = 4;
 pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
@@ -502,19 +503,18 @@ impl<T: CpuTarget> Target for T {
                         let spec_shape = &basics.spec_shape;
                         let dtype = basics.dtypes[1];
                         for level in Self::levels() {
+                            let vb = vector_bytes_to_explore(level.vector_bytes());
                             for layout in Self::move_destination_layouts(spec_shape, dtype) {
-                                gen_vector_sizes_opt(dtype, level.vector_bytes()).for_each(
-                                    |vector_size| {
-                                        broadcast_firsts.push(
-                                            BroadcastFirst {
-                                                broadcast_level: level,
-                                                broadcast_layout: layout.clone(),
-                                                broadcast_vector_size: vector_size,
-                                            }
-                                            .into(),
-                                        );
-                                    },
-                                );
+                                gen_vector_sizes_opt(dtype, &vb).for_each(|vector_size| {
+                                    broadcast_firsts.push(
+                                        BroadcastFirst {
+                                            broadcast_level: level,
+                                            broadcast_layout: layout.clone(),
+                                            broadcast_vector_size: vector_size,
+                                        }
+                                        .into(),
+                                    );
+                                });
                             }
                         }
                     }
@@ -530,41 +530,46 @@ impl<T: CpuTarget> Target for T {
 
                         // Fully fused loops using shared alt_level for both max and exps
                         for denom_level in levels {
+                            let denom_vb = vector_bytes_to_explore(denom_level.vector_bytes());
                             for denom_layout in &layouts {
-                                gen_vector_sizes_opt(dtype, denom_level.vector_bytes()).for_each(
+                                gen_vector_sizes_opt(dtype, &denom_vb).for_each(
                                     |denominator_vector_size| {
                                         for alt_level in levels {
+                                            let alt_vb =
+                                                vector_bytes_to_explore(alt_level.vector_bytes());
                                             for alt_layout in &layouts {
-                                                gen_vector_sizes_opt(
-                                                    dtype,
-                                                    alt_level.vector_bytes(),
-                                                )
-                                                .for_each(|alt_vector_size| {
-                                                    softmax_actions.push(Action::ToSoftmaxParts(
-                                                        ToSoftmaxParts {
-                                                            denominator_level: denom_level,
-                                                            denominator_layout: denom_layout
-                                                                .clone(),
-                                                            denominator_vector_size,
-                                                            exps_level: alt_level,
-                                                            exps_layout: alt_layout.clone(),
-                                                            exps_vector_size: alt_vector_size,
-                                                        },
-                                                    ));
-                                                    softmax_actions.push(
-                                                        Action::ToSoftmaxPartsRecompute(
-                                                            ToSoftmaxPartsRecompute {
-                                                                max_level: alt_level,
-                                                                max_layout: alt_layout.clone(),
-                                                                max_vector_size: alt_vector_size,
-                                                                denominator_level: denom_level,
-                                                                denominator_layout: denom_layout
-                                                                    .clone(),
-                                                                denominator_vector_size,
-                                                            },
-                                                        ),
-                                                    );
-                                                });
+                                                gen_vector_sizes_opt(dtype, &alt_vb).for_each(
+                                                    |alt_vector_size| {
+                                                        softmax_actions.push(
+                                                            Action::ToSoftmaxParts(
+                                                                ToSoftmaxParts {
+                                                                    denominator_level: denom_level,
+                                                                    denominator_layout:
+                                                                        denom_layout.clone(),
+                                                                    denominator_vector_size,
+                                                                    exps_level: alt_level,
+                                                                    exps_layout: alt_layout.clone(),
+                                                                    exps_vector_size:
+                                                                        alt_vector_size,
+                                                                },
+                                                            ),
+                                                        );
+                                                        softmax_actions.push(
+                                                            Action::ToSoftmaxPartsRecompute(
+                                                                ToSoftmaxPartsRecompute {
+                                                                    max_level: alt_level,
+                                                                    max_layout: alt_layout.clone(),
+                                                                    max_vector_size:
+                                                                        alt_vector_size,
+                                                                    denominator_level: denom_level,
+                                                                    denominator_layout:
+                                                                        denom_layout.clone(),
+                                                                    denominator_vector_size,
+                                                                },
+                                                            ),
+                                                        );
+                                                    },
+                                                );
                                             }
                                         }
                                     },
@@ -584,18 +589,17 @@ impl<T: CpuTarget> Target for T {
                         let dtype = basics.dtypes[0];
 
                         for level in Self::levels() {
+                            let vb = vector_bytes_to_explore(level.vector_bytes());
                             for layout in Self::move_destination_layouts(spec_shape, dtype) {
-                                gen_vector_sizes_opt(dtype, level.vector_bytes()).for_each(
-                                    |vector_size| {
-                                        unscaled_actions.push(Action::ToMaxAndUnscaled(
-                                            ToMaxAndUnscaled {
-                                                max_level: level,
-                                                max_layout: layout.clone(),
-                                                max_vector_size: vector_size,
-                                            },
-                                        ));
-                                    },
-                                );
+                                gen_vector_sizes_opt(dtype, &vb).for_each(|vector_size| {
+                                    unscaled_actions.push(Action::ToMaxAndUnscaled(
+                                        ToMaxAndUnscaled {
+                                            max_level: level,
+                                            max_layout: layout.clone(),
+                                            max_vector_size: vector_size,
+                                        },
+                                    ));
+                                });
                             }
                         }
                     }
@@ -1962,6 +1966,17 @@ where
         }
         it.into_iter().flatten()
     })
+}
+
+/// Returns the vector byte sizes to explore for the given level, respecting EXPLORE_ALL_VECTOR_SIZES.
+fn vector_bytes_to_explore(vector_bytes: &[u32]) -> Vec<u32> {
+    if EXPLORE_ALL_VECTOR_SIZES {
+        vector_bytes.to_vec()
+    } else if let Some(&max_bytes) = vector_bytes.iter().max() {
+        vec![max_bytes]
+    } else {
+        vec![]
+    }
 }
 
 #[cfg(test)]

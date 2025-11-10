@@ -10,6 +10,7 @@ use crate::{
         Action,
     },
     spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType},
+    target::cpu::EXPLORE_ALL_VECTOR_SIZES,
     tensorspec::{gen_vector_sizes, gen_vector_sizes_opt},
     utils::is_power_of_two_u32,
 };
@@ -162,13 +163,13 @@ pub fn bufferize_actions<Tgt: Target>(
         let intermediate_dtype = comp.dtypes[comp_out_idx];
 
         for level in Tgt::levels() {
-            let vector_bytes = level.vector_bytes();
+            let vector_bytes = vector_bytes_to_explore(level.vector_bytes());
 
             for layout in Tgt::move_destination_layouts(&intermediate_shape, intermediate_dtype) {
                 // TODO: Need to implement `can_move_to`-style logic here.
 
                 if !vector_bytes.is_empty() {
-                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
+                    for vector_size in gen_vector_sizes(intermediate_dtype, &vector_bytes) {
                         results.push(Action::Bufferize(Bufferize {
                             index,
                             level,
@@ -220,22 +221,21 @@ pub fn move_actions<Tgt: Target>(
                     Either::Right(iter::once(&operand_dtype))
                 };
                 for &destination_dtype in destination_dtypes {
-                    results.extend(
-                        gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
-                            |vector_size| {
-                                // This may return Moves with identical source and destination
-                                // TensorSpecs (i.e., within-level copies). These will be filtered
-                                // in [apply_with_aux].
-                                Action::Move(Move {
-                                    source_idx: i,
-                                    destination_dtype,
-                                    destination_level: level,
-                                    destination_layout: layout.clone(),
-                                    destination_vector_size: vector_size,
-                                })
-                            },
-                        ),
-                    )
+                    let vector_bytes = vector_bytes_to_explore(level.vector_bytes());
+                    results.extend(gen_vector_sizes_opt(destination_dtype, &vector_bytes).map(
+                        |vector_size| {
+                            // This may return Moves with identical source and destination
+                            // TensorSpecs (i.e., within-level copies). These will be filtered
+                            // in [apply_with_aux].
+                            Action::Move(Move {
+                                source_idx: i,
+                                destination_dtype,
+                                destination_level: level,
+                                destination_layout: layout.clone(),
+                                destination_vector_size: vector_size,
+                            })
+                        },
+                    ))
                 }
             }
         }
@@ -257,19 +257,18 @@ pub fn move_actions<Tgt: Target>(
                         Either::Right(iter::once(&operand_dtype))
                     };
                     for &destination_dtype in destination_dtypes {
-                        results.extend(
-                            gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
-                                |vector_size| {
-                                    Action::Move(Move {
-                                        source_idx: i,
-                                        destination_dtype,
-                                        destination_level: level,
-                                        destination_layout: original_layout.clone(),
-                                        destination_vector_size: vector_size,
-                                    })
-                                },
-                            ),
-                        )
+                        let vector_bytes = vector_bytes_to_explore(level.vector_bytes());
+                        results.extend(gen_vector_sizes_opt(destination_dtype, &vector_bytes).map(
+                            |vector_size| {
+                                Action::Move(Move {
+                                    source_idx: i,
+                                    destination_dtype,
+                                    destination_level: level,
+                                    destination_layout: original_layout.clone(),
+                                    destination_vector_size: vector_size,
+                                })
+                            },
+                        ))
                     }
                 }
             }
@@ -335,6 +334,17 @@ fn gen_tile_sizes<Tgt: Target>(
             })
         });
         Box::new(smaller_tiles_iter.chain(own_shape_iter))
+    }
+}
+
+/// Returns the vector byte sizes to explore for the given level, respecting EXPLORE_ALL_VECTOR_SIZES.
+fn vector_bytes_to_explore(vector_bytes: &[u32]) -> Vec<u32> {
+    if EXPLORE_ALL_VECTOR_SIZES {
+        vector_bytes.to_vec()
+    } else if let Some(&max_bytes) = vector_bytes.iter().max() {
+        vec![max_bytes]
+    } else {
+        vec![]
     }
 }
 
