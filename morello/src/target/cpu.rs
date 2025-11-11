@@ -1624,6 +1624,9 @@ impl MemoryLevel for CpuMemoryLevel {
             CpuMemoryLevel::RF => 0,
             CpuMemoryLevel::VRF => 0,
             CpuMemoryLevel::L1 => 2,
+            #[cfg(feature = "l2-speed-gl")]
+            CpuMemoryLevel::GL => 10,
+            #[cfg(not(feature = "l2-speed-gl"))]
             CpuMemoryLevel::GL => 20,
         }
     }
