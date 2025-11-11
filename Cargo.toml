@@ -3,7 +3,8 @@ members = [
     "morello",
     "dbstats",
     "frontend",
-    "precompute"
+    "precompute",
+    "chainexp"
 ]
 default-members = [
     "morello",
