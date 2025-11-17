@@ -8,7 +8,7 @@ name = "chainexp"
 path = "src/main.rs"
 
 [dependencies]
-morello = { path = "../morello", features = [ "db-stats", "clap", "verification" ] }
+morello = { path = "../morello", features = [ "db-stats", "clap", "verification", "chainexp-config" ] }
 clap = { version = "4.2.5", features = ["derive"] }
 env_logger = "0.10.0"
 log = "0.4.0"

@@ -8,7 +8,7 @@ default = ["verification"]
 clap = ["dep:clap"]
 db-stats = ["dep:csv"]
 verification = ["dep:ndarray", "dep:ndarray-conv"]
-
+chainexp-config = []
 
 [dependencies]
 atty = "0.2"

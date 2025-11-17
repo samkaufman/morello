@@ -10,7 +10,6 @@ use crate::{
         Action,
     },
     spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType},
-    target::cpu::EXPLORE_ALL_VECTOR_SIZES,
     tensorspec::{gen_vector_sizes, gen_vector_sizes_opt},
     utils::is_power_of_two_u32,
 };
@@ -339,12 +338,17 @@ fn gen_tile_sizes<Tgt: Target>(
 
 /// Returns the vector byte sizes to explore for the given level, respecting EXPLORE_ALL_VECTOR_SIZES.
 fn vector_bytes_to_explore(vector_bytes: &[u32]) -> Vec<u32> {
-    if EXPLORE_ALL_VECTOR_SIZES {
+    #[cfg(feature = "chainexp-config")]
+    {
+        if let Some(&max_bytes) = vector_bytes.iter().max() {
+            vec![max_bytes]
+        } else {
+            vec![]
+        }
+    }
+    #[cfg(not(feature = "chainexp-config"))]
+    {
         vector_bytes.to_vec()
-    } else if let Some(&max_bytes) = vector_bytes.iter().max() {
-        vec![max_bytes]
-    } else {
-        vec![]
     }
 }
 

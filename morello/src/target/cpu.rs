@@ -32,9 +32,6 @@ use std::iter::{self, once};
 
 const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
-const EXPLORE_ODDEVEN_LAYOUTS: bool = false;
-const EXPLORE_HIGHER_PRECISION_MOVE_DTYPES: bool = false;
-pub(crate) const EXPLORE_ALL_VECTOR_SIZES: bool = true;
 const L2_SPEED_GL: bool = true;
 
 const CPU_LEVELS: [CpuMemoryLevel; 4] = [
@@ -193,10 +190,15 @@ impl<T: CpuTarget> Target for T {
         let mut all_target_vector_bytes = Vec::new();
         for lvl in Self::levels() {
             let vector_bytes = lvl.vector_bytes();
-            if EXPLORE_ALL_VECTOR_SIZES {
+            #[cfg(feature = "chainexp-config")]
+            {
+                if let Some(&max_bytes) = vector_bytes.iter().max() {
+                    all_target_vector_bytes.push(max_bytes);
+                }
+            }
+            #[cfg(not(feature = "chainexp-config"))]
+            {
                 all_target_vector_bytes.extend(vector_bytes);
-            } else if let Some(&max_bytes) = vector_bytes.iter().max() {
-                all_target_vector_bytes.push(max_bytes);
             }
         }
 
@@ -280,10 +282,15 @@ impl<T: CpuTarget> Target for T {
         let mut all_target_vector_bytes = Vec::new();
         for lvl in Self::levels() {
             let vector_bytes = lvl.vector_bytes();
-            if EXPLORE_ALL_VECTOR_SIZES {
+            #[cfg(feature = "chainexp-config")]
+            {
+                if let Some(&max_bytes) = vector_bytes.iter().max() {
+                    all_target_vector_bytes.push(max_bytes);
+                }
+            }
+            #[cfg(not(feature = "chainexp-config"))]
+            {
                 all_target_vector_bytes.extend(vector_bytes);
-            } else if let Some(&max_bytes) = vector_bytes.iter().max() {
-                all_target_vector_bytes.push(max_bytes);
             }
         }
 
@@ -316,7 +323,9 @@ impl<T: CpuTarget> Target for T {
                 &all_target_vector_bytes,
             )
         }));
-        if EXPLORE_ODDEVEN_LAYOUTS {
+        // Explore odd-even layouts only when not restricting search space.
+        #[cfg(not(feature = "chainexp-config"))]
+        {
             result.extend(base.iter().flat_map(|original_layout| {
                 oddeven_layouts_for_standard_layout(
                     original_layout,
@@ -340,7 +349,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn actions(spec: &LogicalSpec<Self>) -> Self::ActionsIter<'_> {
-        let iter = move_actions(spec, EXPLORE_HIGHER_PRECISION_MOVE_DTYPES);
+        let iter = move_actions(spec, cfg!(not(feature = "chainexp-config")));
         let iter = iter.chain(tile_out_actions(spec));
 
         // OnePrefix is an unfortunate special case. The only viable action is applying
@@ -1974,12 +1983,17 @@ where
 
 /// Returns the vector byte sizes to explore for the given level, respecting EXPLORE_ALL_VECTOR_SIZES.
 fn vector_bytes_to_explore(vector_bytes: &[u32]) -> Vec<u32> {
-    if EXPLORE_ALL_VECTOR_SIZES {
+    #[cfg(feature = "chainexp-config")]
+    {
+        if let Some(&max_bytes) = vector_bytes.iter().max() {
+            vec![max_bytes]
+        } else {
+            vec![]
+        }
+    }
+    #[cfg(not(feature = "chainexp-config"))]
+    {
         vector_bytes.to_vec()
-    } else if let Some(&max_bytes) = vector_bytes.iter().max() {
-        vec![max_bytes]
-    } else {
-        vec![]
     }
 }
 
