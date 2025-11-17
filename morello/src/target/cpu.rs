@@ -35,6 +35,7 @@ const ASSIGN_INST_COST: MainCost = 1;
 const EXPLORE_ODDEVEN_LAYOUTS: bool = false;
 const EXPLORE_HIGHER_PRECISION_MOVE_DTYPES: bool = false;
 pub(crate) const EXPLORE_ALL_VECTOR_SIZES: bool = true;
+const L2_SPEED_GL: bool = true;
 
 const CPU_LEVELS: [CpuMemoryLevel; 4] = [
     CpuMemoryLevel::RF,
@@ -1644,10 +1645,13 @@ impl MemoryLevel for CpuMemoryLevel {
             CpuMemoryLevel::RF => 0,
             CpuMemoryLevel::VRF => 0,
             CpuMemoryLevel::L1 => 2,
-            #[cfg(feature = "l2-speed-gl")]
-            CpuMemoryLevel::GL => 10,
-            #[cfg(not(feature = "l2-speed-gl"))]
-            CpuMemoryLevel::GL => 20,
+            CpuMemoryLevel::GL => {
+                if L2_SPEED_GL {
+                    10
+                } else {
+                    20
+                }
+            }
         }
     }
 
