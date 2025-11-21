@@ -83,7 +83,7 @@ fn main() {
                         .move_param(1, CpuMemoryLevel::L1)
                         .move_param(2, CpuMemoryLevel::L1)
                         .move_param(3, CpuMemoryLevel::L1)
-                        .move_vrf(0, CpuMemoryLevel::VRF, nz!(8u32))
+                        .move_vrf(0, CpuMemoryLevel::VRF, 8)
                         .subschedule(&[0], |m| {
                             m.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
                         })
@@ -92,7 +92,7 @@ fn main() {
                         .move_param(2, CpuMemoryLevel::RF)
                         .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::ValueAssign))
                         .subschedule(&[1, 1, 2], |m| m.select(CpuKernel::ValueAssign))
-                        .move_vrf(3, CpuMemoryLevel::VRF, nz!(8u32))
+                        .move_vrf(3, CpuMemoryLevel::VRF, 8)
                         .select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
                         .subschedule(&[1, 1, 1, 1], |move_spec| {
                             move_spec.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
@@ -102,7 +102,7 @@ fn main() {
         .subschedule(&[1], |subspec| {
             subspec
                 .tile_out(&[1, 4])
-                .broadcast_first(VRF, row_major, Some(nz!(4u32)))
+                .broadcast_first(VRF, row_major, Some(4))
                 .subschedule(&[0], |broadcast| {
                     broadcast
                         .move_param(0, CpuMemoryLevel::L1)
@@ -112,10 +112,10 @@ fn main() {
                 })
                 .subschedule(&[1], |d| {
                     d.move_param(0, L1)
-                        .move_vrf(0, VRF, nz!(4u32))
+                        .move_vrf(0, VRF, 4)
                         .subschedule(&[0], |m| m.select(CpuKernel::VectorAssign))
                         .move_param(2, L1)
-                        .move_vrf(2, VRF, nz!(4u32))
+                        .move_vrf(2, VRF, 4)
                         .subschedule(&[1, 0], |m| m.select(CpuKernel::DivideVec))
                         .subschedule(&[1, 1], |m| m.select(CpuKernel::VectorAssign))
                 })

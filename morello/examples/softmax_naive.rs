@@ -66,7 +66,7 @@ fn main() {
                 .move_param(0, CpuMemoryLevel::L1)
                 .move_param(1, CpuMemoryLevel::L1)
                 .move_param(2, CpuMemoryLevel::L1)
-                .move_vrf(0, CpuMemoryLevel::VRF, nz!(8u32))
+                .move_vrf(0, CpuMemoryLevel::VRF, 8)
                 .move_param(1, CpuMemoryLevel::RF)
                 .move_param(2, CpuMemoryLevel::RF)
                 .select(CpuKernel::VectorSoftmaxDenominator)

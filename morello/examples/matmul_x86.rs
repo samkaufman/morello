@@ -48,10 +48,10 @@ fn main() {
         .move_param(0, L1)
         .move_param(1, L1)
         .move_param(2, L1)
-        .move_vrf(2, VRF, nz!(8u32))
+        .move_vrf(2, VRF, 8)
         .split(1)
         .tile_out(&[1, 1, 16])
-        .move_vrf(1, VRF, nz!(8u32))
+        .move_vrf(1, VRF, 8)
         .subschedule(&[1, 0, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd))
         .subschedule(&[1, 1], |m| {
             m.tile_out(&[1, 1, 16])
@@ -59,8 +59,8 @@ fn main() {
                 .move_param(0, L1)
                 .move_param(1, L1)
                 .move_param(2, L1)
-                .move_vrf(1, VRF, nz!(8u32))
-                .move_vrf(2, VRF, nz!(8u32))
+                .move_vrf(1, VRF, 8)
+                .move_vrf(2, VRF, 8)
                 .select(CpuKernel::BroadcastVecMultAdd)
         })
         .subschedule(&[1, 0, 0], |m| {

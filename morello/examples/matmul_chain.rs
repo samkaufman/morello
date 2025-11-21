@@ -19,8 +19,6 @@ use morello::utils::ToWriteFmt;
 
 use std::io;
 
-use nonzero::nonzero as nz;
-
 const BATCH: u32 = 1;
 
 fn main() {
@@ -122,10 +120,10 @@ fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .move_param(0, L1)
         .move_param(1, L1)
         .move_param(2, L1)
-        .move_vrf(2, VRF, nz!(8u32))
+        .move_vrf(2, VRF, 8)
         .split(1)
         .tile_out(&[1, 1, 16])
-        .move_vrf(1, VRF, nz!(8u32))
+        .move_vrf(1, VRF, 8)
         .select(CpuKernel::BroadcastVecMultAdd)
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
@@ -176,8 +174,8 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
                 .move_param(1, RF)
                 .move_param(2, RF)
                 .subschedule(&[1, 1], |s| {
-                    s.move_relayout(0, VRF, row_major, Some(nz!(8u32)))
-                        .move_relayout(3, VRF, row_major, Some(nz!(8u32)))
+                    s.move_relayout(0, VRF, row_major, Some(8))
+                        .move_relayout(3, VRF, row_major, Some(8))
                         .subschedule(&[0], |m| m.synthesize(&db))
                         .subschedule(&[1, 1], |m| m.synthesize(&db))
                         .subschedule(&[1, 0], |m| {
@@ -192,7 +190,7 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .subschedule(&[1], |subspec| {
             subspec
                 .tile_out(&[1, 1, 8])
-                .broadcast_first(VRF, row_major, Some(nz!(8u32)))
+                .broadcast_first(VRF, row_major, Some(8))
                 .subschedule(&[0], |broadcast| {
                     broadcast
                         .move_relayout(0, L1, row_major, None)

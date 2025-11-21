@@ -12,7 +12,6 @@ use morello::target::{
 };
 use morello::target::{CpuKernel, MemoryLevel};
 use morello::utils::ToWriteFmt;
-use nonzero::nonzero as nz;
 use std::io;
 
 const M_C: u32 = 1020;
@@ -53,11 +52,11 @@ fn main() {
                         // Microkernel
                         .tile_out(&[1, M_R, N_R])
                         .move_param(0, L1)
-                        .move_vrf(2, VRF, nz!(8u32))
+                        .move_vrf(2, VRF, 8)
                         .split(1)
                         .tile_out(&[1, 1, 16])
                         .move_param(1, L1) // moves low to "skip" modeling
-                        .move_vrf(1, VRF, nz!(8u32))
+                        .move_vrf(1, VRF, 8)
                         .select(CpuKernel::BroadcastVecMultAdd)
                         // Moves
                         .subschedule(&[0], naive_scalar_move_impl)
@@ -74,11 +73,11 @@ fn main() {
                         // Microkernel
                         .tile_out(&[1, M_R, N_R])
                         .move_param(0, L1)
-                        .move_vrf(2, VRF, nz!(8u32))
+                        .move_vrf(2, VRF, 8)
                         .split(1)
                         .tile_out(&[1, 1, 16])
                         .move_param(1, L1) // moves low to "skip" modeling
-                        .move_vrf(1, VRF, nz!(8u32))
+                        .move_vrf(1, VRF, 8)
                         .select(CpuKernel::BroadcastVecMultAdd)
                         // Moves
                         .subschedule(&[0], naive_scalar_move_impl)
@@ -94,11 +93,11 @@ fn main() {
                 .split(K_C)
                 // Microkernel
                 .tile_out(&[1, 1, 16])
-                .move_vrf(2, VRF, nz!(8u32))
+                .move_vrf(2, VRF, 8)
                 .split(1)
                 .move_param(1, L1) // moves low to "skip" modeling
                 .move_param(0, L1)
-                .move_vrf(1, VRF, nz!(8u32))
+                .move_vrf(1, VRF, 8)
                 .select(CpuKernel::BroadcastVecMultAdd)
                 // Moves
                 .subschedule(&[1, 0], naive_vector_move_impl)
