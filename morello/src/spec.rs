@@ -2159,6 +2159,10 @@ where
                 .map(move |ls| Spec(ls, m.clone())),
         )
     }
+
+    fn defined_for(&self, spec: &Self::Domain) -> bool {
+        self.logical_spec_surmap.defined_for(&spec.0)
+    }
 }
 
 impl<Tgt, F, A, Aa> LogicalSpecSurMap<Tgt, F, A, Aa> {
@@ -2338,6 +2342,23 @@ where
             }
         }
     }
+
+    fn defined_for(&self, spec: &Self::Domain) -> bool
+    where
+        Tgt: Target,
+    {
+        match spec {
+            LogicalSpec::Primitive(basics, _, _) => {
+                BiMap::defined_for(&self.primitive_basics_bimap, basics)
+            }
+            LogicalSpec::Compose { components, .. } => {
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
+                components
+                    .iter()
+                    .all(|c| BiMap::defined_for(&shape_bimap, &c.spec_shape))
+            }
+        }
+    }
 }
 
 impl BiMap for PrimitiveBasicsBimap {
@@ -2353,7 +2374,7 @@ impl BiMap for PrimitiveBasicsBimap {
         let shifted_shape = spec_shape.iter().map(|d| d.get()).map(|d| {
             if self.binary_scale_shapes {
                 if !d.is_power_of_two() {
-                    panic!("Given non-zero/power-of-two shape {d}");
+                    panic!("Given non-power-of-two shape {d}");
                 }
                 bit_length_u32(prev_power_of_two_u32(d - 1))
             } else {
@@ -2697,6 +2718,10 @@ impl BiMap for PrimitiveBasicsBimap {
         };
         basics
     }
+
+    fn defined_for(&self, basics: &Self::Domain) -> bool {
+        BiMap::defined_for(&ShapeBimap(self.binary_scale_shapes), &basics.spec_shape)
+    }
 }
 
 impl BiMap for ShapeBimap {
@@ -2731,6 +2756,10 @@ impl BiMap for ShapeBimap {
                 .unwrap()
             })
             .collect()
+    }
+
+    fn defined_for(&self, shape: &Self::Domain) -> bool {
+        !self.0 || shape.iter().all(|d| d.get().is_power_of_two())
     }
 }
 

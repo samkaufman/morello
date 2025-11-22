@@ -9,6 +9,13 @@ pub trait SurMap {
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain;
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter;
+
+    /// Returns whether this SurMap is defined for the given domain value.
+    ///
+    /// The default implementation returns true for all inputs.
+    fn defined_for(&self, _t: &Self::Domain) -> bool {
+        true
+    }
 }
 
 pub trait BiMap {
@@ -17,6 +24,13 @@ pub trait BiMap {
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain;
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain;
+
+    /// Returns whether this BiMap is defined for the given domain value.
+    ///
+    /// The default implementation returns true for all inputs.
+    fn defined_for(&self, _t: &Self::Domain) -> bool {
+        true
+    }
 }
 
 pub trait IntBiMap: SurMap {
@@ -44,6 +58,10 @@ impl<T: BiMap> SurMap for T {
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         iter::once(<Self as BiMap>::apply_inverse(self, i))
+    }
+
+    fn defined_for(&self, t: &Self::Domain) -> bool {
+        <Self as BiMap>::defined_for(self, t)
     }
 }
 
@@ -81,6 +99,10 @@ impl<T: SurMap> BiMap for BimapEnforcer<T> {
         let result = i.next().unwrap();
         debug_assert!(i.next().is_none());
         result
+    }
+
+    fn defined_for(&self, t: &Self::Domain) -> bool {
+        <T as SurMap>::defined_for(&self.0, t)
     }
 }
 

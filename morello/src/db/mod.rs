@@ -5,7 +5,7 @@ use crate::cost::{Cost, NormalizedCost};
 use crate::datadeps::SpecKey;
 use crate::db::pagecontents::PageContents;
 use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::{AsBimap, BiMap};
+use crate::grid::general::{AsBimap, BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::imp::functions::FunctionApp;
 use crate::imp::{Impl, ImplNode};
@@ -286,7 +286,7 @@ impl FilesDatabase {
         query.canonicalize().unwrap();
 
         let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(&query);
+        let (table_key, global_pt) = BiMap::apply(&bimap, &query);
         let global_pt_u8 = global_pt
             .iter()
             .map(|&x| u8::try_from(x).unwrap())
@@ -309,7 +309,7 @@ impl FilesDatabase {
         query.canonicalize().unwrap();
 
         let bimap = self.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(&query);
+        let (table_key, global_pt) = BiMap::apply(&bimap, &query);
         let page_pt = blockify_point(&global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
@@ -333,7 +333,7 @@ impl FilesDatabase {
         debug_assert!(spec.is_canonical());
 
         let bimap = self.spec_bimap();
-        let (table_key, global_pt_lhs) = bimap.apply(spec);
+        let (table_key, global_pt_lhs) = BiMap::apply(&bimap, spec);
         let page_pt = blockify_point(&global_pt_lhs);
         PageId {
             db: self,
@@ -435,6 +435,19 @@ impl FilesDatabase {
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };
         surmap.into_bimap()
+    }
+
+    /// Returns whether the database can memoize the given Spec.
+    ///
+    /// A Spec can be memoized if the database's BiMap is defined for it. For example, if the
+    /// database uses binary-scale shapes, only Specs with power-of-two dimensions can be memoized.
+    pub fn can_memoize<Tgt>(&self, spec: &Spec<Tgt>) -> bool
+    where
+        Tgt: Target,
+        Tgt::Level: CanonicalBimap,
+        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    {
+        SurMap::defined_for(&self.spec_bimap(), spec)
     }
 
     fn load_live_page<'a>(&'a self, key: &Prehashed<PageKey>) -> impl Deref<Target = Page> + 'a {
@@ -577,7 +590,7 @@ impl PageId<'_> {
         debug_assert!(spec.is_canonical());
 
         let bimap = self.db.spec_bimap();
-        let (table_key, global_pt) = bimap.apply(spec);
+        let (table_key, global_pt) = BiMap::apply(&bimap, spec);
         if self.table_key != table_key {
             return false;
         }
@@ -976,11 +989,11 @@ where
 
     // Compute the complete upper and lower bounds from the given Spec and that Spec modified with
     // the peaks' bound (computed above).
-    let upper_inclusive = bimap.apply(spec);
+    let upper_inclusive = BiMap::apply(bimap, spec);
     let lower_inclusive = {
         let mut lower_bound_spec = spec.clone();
         lower_bound_spec.1 = MemoryLimits::Standard(per_level_peaks);
-        bimap.apply(&lower_bound_spec)
+        BiMap::apply(bimap, &lower_bound_spec)
     };
 
     // TODO: This computes the non-memory dimensions of the key/coordinates twice. Avoid that.
@@ -1645,6 +1658,36 @@ mod tests {
             spec: spec.clone(),
             actions_costs: vec![(action_num, cost)],
             children,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_bimap_apply_panics_when_defined_for_is_false(
+            spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        ) {
+            // Binary-scaling database
+            let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 2, 1);
+            let bimap = db.spec_bimap::<Avx2Target>();
+
+            if db.can_memoize(&spec) {
+                // If can_memoize returns true, apply should not panic
+                let _ = BiMap::apply(&bimap, &spec);
+            } else {
+                // If can_memoize returns false, apply should panic
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    BiMap::apply(&bimap, &spec)
+                }));
+                assert!(result.is_err(), "Expected apply to panic when defined_for is false");
+            }
+        }
+
+        #[test]
+        fn test_can_memoize_returns_true_for_non_binary_scale(
+            spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
+        ) {
+            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2, 1);
+            assert!(db.can_memoize(&spec), "All specs should be memoizable when binary_scale_shapes is false");
         }
     }
 }
