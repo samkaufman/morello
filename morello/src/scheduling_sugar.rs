@@ -19,13 +19,14 @@ use crate::scheduling::to_max_and_unscaled::ToMaxAndUnscaled;
 use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 use crate::scheduling::ActionT as _;
 use crate::scheduling::{Action, ApplyError};
-use crate::search::top_down;
+use crate::search::top_down_many_impls;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::{Param, ViewE};
 use nonzero::nonzero as nz;
 use std::convert::TryFrom;
 use std::iter;
+use std::slice;
 
 /// A trait extending [ImplNode]s and [Spec]s with methods for more conveniently applying [Action]s.
 ///
@@ -417,11 +418,11 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         Tgt::Level: CanonicalBimap,
         <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        top_down(db, self, 1);
-        match db.get_impl(self).unwrap().first() {
-            Some(imp) => imp.clone(),
-            None => panic!("No Impl exists for {self}"),
-        }
+        top_down_many_impls(db, slice::from_ref(self), 1)
+            .into_iter()
+            .flatten()
+            .next()
+            .unwrap_or_else(|| panic!("No Impl exists for {self}"))
     }
 
     fn synthesize_all(&self, db: &FilesDatabase) -> ImplNode<Tgt>

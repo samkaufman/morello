@@ -12,22 +12,26 @@ use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
+use crate::imp::ImplNode;
+use crate::reconstruct::reconstruct_impls_from_actions;
 use crate::scheduling::{ActionSolver, ActionT as _, ApplyError};
 use crate::spec::Spec;
 use crate::target::Target;
 
 type RequestId = (usize, usize);
 type WorkingPartialImplHandle = (usize, RequestId);
+type NonMemoCache<Tgt> = Rc<RefCell<HashMap<Spec<Tgt>, ActionCostVec>>>;
 
-struct TopDownSearch<'d> {
+struct TopDownSearch<'d, Tgt: Target> {
     db: &'d FilesDatabase,
     top_k: usize,
     thread_idx: usize,
     thread_count: usize,
+    nonmemo_cache: NonMemoCache<Tgt>,
 }
 
 struct BlockSearch<'a, 'd, Tgt: Target> {
-    search: &'a TopDownSearch<'d>,
+    search: &'a TopDownSearch<'d, Tgt>,
     working_set: IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
     working_set_running: usize,
     // The following two fields map requested Specs (the keys) to the recipients
@@ -92,7 +96,6 @@ where
     Tgt::Level: CanonicalBimap,
     <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    // TODO: Just return the ActionCostVec directly
     top_down_many(db, slice::from_ref(goal), top_k)
         .into_iter()
         .next()
@@ -100,11 +103,58 @@ where
         .0
 }
 
-pub fn top_down_many<'d, Tgt>(
-    db: &'d FilesDatabase,
+/// Synthesizes implementations of the given goals.
+pub fn top_down_many<Tgt>(
+    db: &FilesDatabase,
     goals: &[Spec<Tgt>],
     top_k: usize,
 ) -> Vec<ActionCostVec>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
+    top_down_many_internal(db, goals, top_k).0
+}
+
+/// Returns optimal implementations of each goal [Spec].
+///
+/// In contrast to [top_down_many], this function returns fully materialized [ImplNode]s, not just
+/// [ActionCostVec]s.
+pub fn top_down_many_impls<Tgt>(
+    db: &FilesDatabase,
+    goals: &[Spec<Tgt>],
+    top_k: usize,
+) -> Vec<Vec<ImplNode<Tgt>>>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
+    let (action_costs, cache) = top_down_many_internal(db, goals, top_k);
+    let lookup = move |spec: &Spec<Tgt>| get_action_cost(db, &cache, spec);
+    action_costs
+        .into_iter()
+        .zip(goals.iter())
+        .map(|(costs, goal)| {
+            if costs.0.is_empty() {
+                Vec::new()
+            } else {
+                let mut canonical_goal = goal.clone();
+                canonical_goal
+                    .canonicalize()
+                    .expect("should be possible to canonicalize goal Spec");
+                reconstruct_impls_from_actions(&lookup, &canonical_goal, costs)
+            }
+        })
+        .collect()
+}
+
+fn top_down_many_internal<Tgt>(
+    db: &FilesDatabase,
+    goals: &[Spec<Tgt>],
+    top_k: usize,
+) -> (Vec<ActionCostVec>, NonMemoCache<Tgt>)
 where
     Tgt: Target,
     Tgt::Level: CanonicalBimap,
@@ -115,7 +165,7 @@ where
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
-    // Group goals by database page.
+    // Group goals by database page (or `None` if not memoizable).
     let mut grouped_canonical_goals = HashMap::<_, (Vec<_>, Vec<usize>)>::new();
     for (idx, goal) in goals.iter().enumerate() {
         let mut canonical_goal = goal.clone();
@@ -123,21 +173,26 @@ where
             .canonicalize()
             .expect("should be possible to canonicalize goal Spec");
 
-        let page = db.page_id(&canonical_goal);
-        let key = (page.table_key, page.page_id);
+        let key = db.can_memoize(&canonical_goal).then(|| {
+            let page = db.page_id(&canonical_goal);
+            (page.table_key, page.page_id)
+        });
         let group_tuple = grouped_canonical_goals.entry(key).or_default();
         group_tuple.0.push(canonical_goal);
         group_tuple.1.push(idx);
     }
 
+    let nonmemo_cache = Rc::new(RefCell::new(HashMap::new()));
+
     // Synthesize each group with BlockSearch. Scatter results into combined_results.
     let mut combined_results = vec![Default::default(); goals.len()];
     for (page_group, original_indices) in grouped_canonical_goals.values() {
-        let search = TopDownSearch::<'d> {
+        let search = TopDownSearch {
             db,
             top_k,
             thread_idx: 0,
             thread_count: 1,
+            nonmemo_cache: Rc::clone(&nonmemo_cache),
         };
         let result = BlockSearch::synthesize(page_group, &search, None);
 
@@ -146,7 +201,7 @@ where
         }
     }
 
-    combined_results
+    (combined_results, nonmemo_cache)
 }
 
 impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
@@ -157,7 +212,7 @@ where
 {
     fn synthesize(
         goals: &[Spec<Tgt>],
-        search: &'a TopDownSearch<'d>,
+        search: &'a TopDownSearch<'d, Tgt>,
         prefetch_after: Option<&Spec<Tgt>>,
     ) -> Vec<ActionCostVec> {
         debug_assert!(goals.iter().all_unique());
@@ -199,7 +254,9 @@ where
                     Some(next_subblock) => prefetch_to_push_down = next_subblock.keys().next(),
                     None => {
                         if let Some(prefetch_after) = prefetch_after.as_ref() {
-                            search.db.prefetch(prefetch_after);
+                            if search.db.can_memoize(prefetch_after) {
+                                search.db.prefetch(prefetch_after);
+                            }
                         }
                     }
                 }
@@ -271,25 +328,40 @@ where
     }
 
     /// Return a working set task and its index. If none exists for the [Spec], start one.
+    ///
+    /// Memoizable specs use the on-disk database while others fall back to the side cache.
     fn get_task_internal(&mut self, spec: &Spec<Tgt>) -> (usize, Rc<RefCell<SpecTask<Tgt>>>) {
+        let can_memoize = self.search.db.can_memoize(spec);
         match self.working_set.entry(spec.clone()) {
             indexmap::map::Entry::Occupied(e) => (e.index(), Rc::clone(e.get())),
             indexmap::map::Entry::Vacant(e) => {
-                // Check the database and immediately return if present.
-                let task = match self.search.db.get_with_preference(spec) {
-                    GetPreference::Hit(v) => {
-                        // TODO: Re-enable search hits and misses tracking
-                        // search.hits += 1;
-                        SpecTask::Complete(v, true)
-                    }
-                    GetPreference::Miss(preferences) => {
-                        let started = SpecTask::start(spec.clone(), preferences, self.search);
-                        if matches!(&started, SpecTask::Running { .. }) {
-                            self.working_set_running += 1;
+                let preferences = if can_memoize {
+                    match self.search.db.get_with_preference(spec) {
+                        GetPreference::Hit(v) => {
+                            // TODO: Re-enable search hits and misses tracking
+                            // search.hits += 1;
+                            let entry_index = e.index();
+                            let task_rc = Rc::new(RefCell::new(SpecTask::Complete(v, true)));
+                            e.insert(Rc::clone(&task_rc));
+                            return (entry_index, task_rc);
                         }
-                        started
+                        GetPreference::Miss(preferences) => preferences,
                     }
+                } else {
+                    if let Some(hit) = self.search.nonmemo_cache.borrow().get(spec).cloned() {
+                        let entry_index = e.index();
+                        let task_rc = Rc::new(RefCell::new(SpecTask::Complete(hit, true)));
+                        e.insert(Rc::clone(&task_rc));
+                        return (entry_index, task_rc);
+                    }
+                    None
                 };
+
+                let task = SpecTask::start(spec.clone(), preferences, self.search);
+                if matches!(&task, SpecTask::Running { .. }) {
+                    self.working_set_running += 1;
+                }
+
                 // search.misses += 1;
                 let entry_index = e.index();
                 let task_rc = Rc::new(RefCell::new(task));
@@ -307,17 +379,23 @@ where
         visited_in_stage: &mut HashSet<Spec<Tgt>>,
         outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>, // TODO: Make Option<Cost>
     ) {
+        let db = &self.search.db;
         let mut task = task_ref.borrow_mut();
         if !matches!(&*task, SpecTask::Running { .. }) {
             return;
         }
-
-        let page_id = self.search.db.page_id(spec);
+        let page_id_opt = db.can_memoize(spec).then(|| db.page_id(spec));
 
         // collect to avoid keeping the borrow
         if let Some(next_batch) = task.next_request_batch().map(|v| v.collect::<Vec<_>>()) {
             for (subspec, request_id) in next_batch {
-                if page_id.contains(&subspec) {
+                let can_memoize = db.can_memoize(&subspec);
+                let in_same_page = match (page_id_opt.as_ref(), can_memoize) {
+                    (Some(pid), true) => pid.contains(&subspec),
+                    (None, false) => true, // Both non-memoizable
+                    _ => false,
+                };
+                if in_same_page {
                     let (subspec_idx, subtask) = self.get_task_internal(&subspec);
                     if !visited_in_stage.contains(spec) {
                         visited_in_stage.insert(subspec.clone());
@@ -458,27 +536,42 @@ where
         subspec: &Spec<Tgt>,
         request_id: RequestId,
     ) {
-        let subspec_page = self.search.db.page_id(subspec);
-        let request_set = match self
-            .subblock_requests
-            .iter_mut()
-            .find(|s| subspec_page.contains(s.keys().next().unwrap()))
-        {
-            Some(s) => s,
-            None => {
+        let request_set = if self.search.db.can_memoize(subspec) {
+            let subspec_page = self.search.db.page_id(subspec);
+            let matching_idx = self.subblock_requests.iter().position(|subblock| {
+                let existing_spec = subblock.keys().next().unwrap();
+                self.search.db.can_memoize(existing_spec) && subspec_page.contains(existing_spec)
+            });
+            if let Some(idx) = matching_idx {
+                self.subblock_requests.get_mut(idx).unwrap()
+            } else {
                 if self.subblock_requests.is_empty() {
                     let requesting_spec =
                         self.working_set.get_index(working_set_spec_idx).unwrap().0;
-                    self.search.db.prefetch(requesting_spec);
+                    if self.search.db.can_memoize(requesting_spec) {
+                        self.search.db.prefetch(requesting_spec);
+                    }
                 }
-                self.subblock_requests.push(HashMap::new());
-                self.subblock_requests.last_mut().unwrap()
+                self.new_subblock_request_set()
             }
+        } else {
+            // Always create a fresh subblock for unmemoizable specs to avoid page computations.
+            self.new_subblock_request_set()
         };
         request_set
             .entry(subspec.clone())
             .or_default()
             .push((working_set_spec_idx, request_id));
+    }
+
+    /// Allocate and return a fresh subblock request map.
+    fn new_subblock_request_set(
+        &mut self,
+    ) -> &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>> {
+        self.subblock_requests.push(HashMap::new());
+        self.subblock_requests
+            .last_mut()
+            .expect("newly pushed subblock should exist")
     }
 }
 
@@ -489,7 +582,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
     fn start(
         goal: Spec<Tgt>,
         preferences: Option<Vec<ActionNum>>,
-        search: &TopDownSearch<'_>,
+        search: &TopDownSearch<'_, Tgt>,
     ) -> Self
     where
         Tgt: Target,
@@ -761,7 +854,7 @@ impl<Tgt: Target> RequestsMapRef<'_, Tgt> {
 }
 
 fn process_complete_task<Tgt>(
-    search: &TopDownSearch<'_>,
+    search: &TopDownSearch<'_, Tgt>,
     spec: &Spec<Tgt>,
     task: Rc<RefCell<SpecTask<Tgt>>>,
 ) -> ActionCostVec
@@ -775,9 +868,35 @@ where
     };
     let action_costs = take(task_result);
     if !*from_db {
-        search.db.put(spec.clone(), action_costs.0.clone());
+        if search.db.can_memoize(spec) {
+            search.db.put(spec.clone(), action_costs.0.clone());
+        } else {
+            search
+                .nonmemo_cache
+                .borrow_mut()
+                .insert(spec.clone(), action_costs.clone());
+        }
     }
     action_costs
+}
+
+/// Checks `db` or `cache` for a memoized optima for `spec`, as appropriate.
+fn get_action_cost<Tgt>(
+    db: &FilesDatabase,
+    cache: &NonMemoCache<Tgt>,
+    spec: &Spec<Tgt>,
+) -> Option<ActionCostVec>
+where
+    Tgt: Target,
+    Tgt::Level: CanonicalBimap,
+    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
+    debug_assert!(spec.is_canonical(), "Spec must be canonical: {}", spec);
+    if db.can_memoize(spec) {
+        db.get(spec)
+    } else {
+        cache.borrow().get(spec).cloned()
+    }
 }
 
 #[cfg(test)]
@@ -1146,6 +1265,37 @@ mod tests {
         let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
         let lower_solutions = top_down(&db, &lower_spec, 1);
         assert_eq!(first_solutions, lower_solutions);
+    }
+
+    #[test]
+    fn test_binary_scale_db_memoizes_power_of_two_subspecs_not_original() {
+        let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 128, 1);
+
+        // Non-power-of-two spec (should not be memoized)
+        let spec_3 = Spec::<Avx2Target>(
+            lspec!(Move([3], (u8, GL, row_major), (u8, RF, row_major))),
+            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
+        );
+        let result = top_down(&db, &spec_3, 1);
+        assert!(!result.is_empty(), "Should be able to synthesize Move([3])");
+
+        // Power-of-two subspecs should be memoized
+        let spec_2 = Spec::<Avx2Target>(
+            lspec!(Move([2], (u8, GL, row_major), (u8, RF, row_major))),
+            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
+        );
+        assert!(
+            db.get(&spec_2).is_some(),
+            "Database should contain Move([2]) after synthesizing Move([3])"
+        );
+        let spec_1 = Spec::<Avx2Target>(
+            lspec!(Move([1], (u8, GL, row_major), (u8, RF, row_major))),
+            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
+        );
+        assert!(
+            db.get(&spec_1).is_some(),
+            "Database should contain Move([1]) after synthesizing Move([3])"
+        );
     }
 
     fn lower_and_higher_canonical_specs<Tgt: Target>(
