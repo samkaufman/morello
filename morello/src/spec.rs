@@ -3607,6 +3607,50 @@ mod tests {
     }
 
     #[test]
+    /// Verifies compose matmul tiling records every component parameter shape exactly as the tiles
+    /// passed between stages.
+    fn test_compose_matmul_component_parameter_shapes_match_tiles() {
+        let spec = compose_matmul_spec_for_tiling_test();
+        let inferred_input_tilings = spec
+            .0
+            .input_tilings_for_tile_out(&Tiling::new_simple(shape![1, 4, 16]))
+            .expect("compose should infer tilings");
+        let expected_component_shapes = vec![
+            vec![shape![1, 4, 64], shape![1, 64, 16], shape![1, 4, 16]],
+            vec![shape![1, 4, 32], shape![1, 32, 64], shape![1, 4, 64]],
+        ];
+        assert_eq!(
+            inferred_input_tilings.component_parameter_shapes,
+            expected_component_shapes
+        );
+    }
+
+    // TODO: Replace this with a proptest (unless one exists).
+    #[test]
+    /// Ensures Compose matmul tiling emits external input tiles that match the dependency-driven
+    /// slices actually consumed by the pipeline (which may be smaller than the static
+    /// `input_shapes`).
+    fn test_compose_matmul_input_tilings_match_input_shapes() {
+        let spec = compose_matmul_spec_for_tiling_test();
+        let inferred_input_tilings = spec
+            .0
+            .input_tilings_for_tile_out(&Tiling::new_simple(shape![1, 4, 16]))
+            .expect("compose should infer tilings");
+        let inferred_shapes: Vec<Shape> = inferred_input_tilings
+            .input_tilings
+            .0
+            .iter()
+            .map(|(tiling, _)| tiling.shape().clone())
+            .collect();
+        let expected_shapes = vec![
+            shape![1, 64, 16], // operand 0 keeps full rows
+            shape![1, 4, 32],  // operand 1 shrinks to the dependency slice feeding component 0
+            shape![1, 32, 64], // operand 2 keeps full rows
+        ];
+        assert_eq!(inferred_shapes, expected_shapes);
+    }
+
+    #[test]
     fn test_dim_range_with_odd_max() {
         assert_eq!(
             dim_range(nz!(3u32), false).collect::<Vec<_>>(),
@@ -4031,6 +4075,54 @@ mod tests {
         let projection = BiMap::apply(&bimap, &spec);
         let reversed = BiMap::apply_inverse(&bimap, &projection);
         assert_eq!(spec, reversed);
+    }
+
+    /// Makes a:
+    /// ```morello
+    /// (Compose((MatmulAccum, Matmul), [
+    ///     (1×64×16, f32, GL), (1×8×32, f32, GL), (1×32×64, f32, GL),
+    ///         out=(1×8×16, f32, GL)],
+    ///     serial), [0, 16, 1024, 524288])
+    /// ```
+    fn compose_matmul_spec_for_tiling_test() -> Spec<Avx2Target> {
+        const BATCH: u32 = 1;
+        let basics_accum = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: true },
+            spec_shape: shape![BATCH, 8, 64, 16],
+            dtypes: vec![Dtype::Float32; 3],
+        };
+        let basics = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![BATCH, 8, 32, 64],
+            dtypes: vec![Dtype::Float32; 3],
+        };
+        let operand_shapes = [
+            shape![BATCH, 64, 16],
+            shape![BATCH, 8, 32],
+            shape![BATCH, 32, 64],
+            shape![BATCH, 8, 16],
+        ];
+        let operand_auxes: Vec<_> = operand_shapes
+            .iter()
+            .map(|shape| TensorSpecAux {
+                level: GL,
+                layout: row_major(shape),
+                vector_size: None,
+            })
+            .collect();
+        let spec = Spec::<Avx2Target>(
+            LogicalSpec::Compose {
+                components: vec![basics_accum, basics],
+                operand_auxes,
+                serial_only: true,
+            },
+            MemoryLimits::Standard(MemVec::new_for_target::<Avx2Target>([0, 16, 1024, 524288])),
+        );
+        assert!(
+            spec.is_canonical(),
+            "compose spec in regression test must stay canonical"
+        );
+        spec
     }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
