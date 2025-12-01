@@ -22,8 +22,8 @@ use crate::shape;
 
 use crate::target::{
     cpu::{
-        DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE,
-        DOT_PRODUCT_STRIP_SIZE,
+        dotproduct_accum_count, DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT,
+        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE,
     },
     CpuKernel, CpuMemoryLevel, CpuTarget, Kernel, Target,
 };
@@ -1319,9 +1319,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         });
 
                         let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE, 0);
+                        debug_assert_eq!(lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE, 0);
+                        let strip = DOT_PRODUCT_STRIP_SIZE.get();
+                        let accum_count = dotproduct_accum_count(lhs_spec.shape()[2].get())
+                            .expect("DotProductLoop applies should have ensured accum_count");
+                        let step_size = accum_count * strip;
                         let step_idx_name = self.namer.fresh_name();
-                        let vector_accum_names = (0..DOT_PRODUCT_ACCUM_COUNT as usize)
+                        let vector_accum_names = (0..usize::try_from(accum_count).unwrap())
                             .map(|_| self.namer.fresh_name())
                             .collect::<Vec<_>>();
 
@@ -1343,8 +1347,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             step_idx_name,
-                            lhs_spec.shape()[1],
-                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_STRIP_SIZE.get()
+                            lhs_spec.shape()[2],
+                            step_size
                         )?;
                         for (i, accum_name) in vector_accum_names.iter().enumerate() {
                             writeln!(

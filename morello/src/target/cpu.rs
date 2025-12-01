@@ -763,19 +763,25 @@ impl CpuKernel {
                                 },
                             }
                         ] if lhs_shape[0] == nz!(1u32)
-                          && lhs_shape[1].get() % (DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT) == 0
+                          && lhs_shape[1] == nz!(1u32)
+                          && dotproduct_accum_count(lhs_shape[2].get()).is_some()
                           && out_shape[..] == [nz!(1u32), nz!(1u32), nz!(1u32)]
                           && lhs.layout().is_row_major()
                           && rhs.layout().is_col_major()
                           && lhs.is_contiguous() && rhs.is_contiguous()
-                          && lhs.level() == CpuMemoryLevel::L1
+                          && lhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
+                          && rhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
+                          // If lhs is already in VRF, require a full vector so we don't need pointer arithmetic.
+                          && (lhs.level() == CpuMemoryLevel::L1
+                              || (lhs.level() == CpuMemoryLevel::VRF
+                                  && lhs.vector_size() == Some(DOT_PRODUCT_STRIP_SIZE)))
                           && rhs.level() == CpuMemoryLevel::L1
                           && *out_level == CpuMemoryLevel::RF
                     )
             }
             CpuKernel::DotProductLoopF32Bf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
-                    && dotproductloop_applies(
+                    && dotproductloop_bf16_applies(
                         &operands,
                         Dtype::Float32,
                         [row_major(operands[0].shape())],
@@ -788,11 +794,11 @@ impl CpuKernel {
                 }
                 let layout0 = layout![0, 1, 2, 2 oe(16)];
                 let layout1 = layout![0, 2, 1, 1 oe(16)];
-                dotproductloop_applies(&operands, Dtype::Float32, [layout0, layout1])
+                dotproductloop_bf16_applies(&operands, Dtype::Float32, [layout0, layout1])
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
-                    && dotproductloop_applies(
+                    && dotproductloop_bf16_applies(
                         &operands,
                         Dtype::Bfloat16,
                         [row_major(operands[0].shape())],
@@ -1560,7 +1566,18 @@ impl CpuKernel {
     }
 }
 
-fn dotproductloop_applies<const N: usize, Tgt: CpuTarget>(
+pub(crate) fn dotproduct_accum_count(k: u32) -> Option<u32> {
+    let strip = DOT_PRODUCT_STRIP_SIZE.get();
+    if !k.is_multiple_of(strip) {
+        return None;
+    }
+    let chunk_count = k / strip;
+    (1..=DOT_PRODUCT_ACCUM_COUNT)
+        .rev()
+        .find(|c| chunk_count.is_multiple_of(*c))
+}
+
+fn dotproductloop_bf16_applies<const N: usize, Tgt: CpuTarget>(
     operands: &[TensorSpec<Tgt>],
     lhs_dtype: Dtype,
     allowed_lhs_layouts: [Layout; N],
@@ -2097,6 +2114,45 @@ mod tests {
         ));
         assert!(logical_spec.is_canonical());
         assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_dotproductloop_applies_to_vrf_lhs_strip() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 1, 8, 1],
+            (f32, CpuMemoryLevel::VRF, row_major, 8),
+            (f32, CpuMemoryLevel::L1, col_major),
+            (f32, CpuMemoryLevel::RF, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_dotproductloop_applies_to_longer_k() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 1, 32, 1],
+            (f32, CpuMemoryLevel::VRF, row_major, 8),
+            (f32, CpuMemoryLevel::L1, col_major),
+            (f32, CpuMemoryLevel::RF, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_dotproductloop_rejects_wrong_vector_size() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 1, 8, 1],
+            (f32, CpuMemoryLevel::VRF, row_major, 4),
+            (f32, CpuMemoryLevel::L1, col_major),
+            (f32, CpuMemoryLevel::RF, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(!CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
     }
 
     #[test]
