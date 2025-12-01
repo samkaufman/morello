@@ -1165,19 +1165,15 @@ fn fuse_matmul_compose<Tgt: Target>(
             .ok_or(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
                 "Expected a tile for the head Matmul RHS parameter",
             ))))?;
-        rhs_tile.parameter_index = 0;
+        reindex_loop_tile_param(&mut rhs_tile, 0);
         rhs_tile
     });
 
     let tail_output_index = tail_body_specapp.0 .0.unique_output_index().unwrap();
-    final_tiles.extend(tail_tiles.into_iter().filter_map(|mut tile| {
+    final_tiles.extend(tail_tiles.into_iter().map(|mut tile| {
         let parameter_index_usize = usize::from(tile.parameter_index);
-        if parameter_index_usize == tail_output_index {
-            None
-        } else {
-            tile.parameter_index = (parameter_index_usize + 1).try_into().unwrap();
-            Some(tile)
-        }
+        reindex_loop_tile_param(&mut tile, (parameter_index_usize + 1).try_into().unwrap());
+        tile
     }));
 
     // Destructure the head Matmul SpecApp
@@ -1214,14 +1210,23 @@ fn fuse_matmul_compose<Tgt: Target>(
     final_operand_auxes.extend(tail_operand_auxes_updated);
     final_operand_auxes.push(output_aux);
 
-    let output_arg = head_args.swap_remove(2);
     let rhs_arg = head_args.swap_remove(1);
     drop(head_args); // order is messed up; dropping for safety
 
-    tail_args.truncate(tail_output_index);
-    let final_args: Vec<_> = once(rhs_arg)
-        .chain(tail_args)
-        .chain(once(output_arg))
+    let output_parent_view = match tail_args.remove(tail_output_index) {
+        ViewE::Tile(tile) => *tile.view,
+        other => other,
+    };
+    let final_param_index = u8::try_from(tail_args.len() + 1).unwrap();
+    let final_args: Vec<_> = once(reindex_view_param(rhs_arg, 0))
+        .chain(tail_args.into_iter().enumerate().map(|(i, arg)| {
+            let new_param_index = u8::try_from(i + 1).unwrap();
+            reindex_view_param(arg, new_param_index)
+        }))
+        .chain(once(reindex_view_param(
+            output_parent_view,
+            final_param_index,
+        )))
         .collect();
 
     let mut final_spec = Spec(
@@ -1242,6 +1247,55 @@ fn fuse_matmul_compose<Tgt: Target>(
         parallel: false,
         spec: None,
     })
+}
+
+/// Rewrites a [LoopTile] so it points at a new parameter index, updating both the
+/// field and the [Param] references inside the stored view.
+fn reindex_loop_tile_param<Tgt: Target>(loop_tile: &mut LoopTile<Tgt>, new_parameter_index: u8) {
+    let old_parameter_index = loop_tile.parameter_index;
+    if old_parameter_index == new_parameter_index {
+        return;
+    }
+    loop_tile.tile.view = Box::new(reindex_view_param(
+        (*loop_tile.tile.view).clone(),
+        new_parameter_index,
+    ));
+    loop_tile.parameter_index = new_parameter_index;
+}
+
+/// Returns a copy of `view` whose sole parameter reference is rebound to
+/// `new_parameter_index`. We expect callers to provide views referencing exactly
+/// one parameter.
+fn reindex_view_param<Tgt: Target>(view: ViewE<Tgt>, new_parameter_index: u8) -> ViewE<Tgt> {
+    // TODO: Remove the following calls to `first_matching_param` by modifying `bind` to
+    //   pass the Param Spec to the closure as well.
+    let (old_index, param_spec) =
+        first_matching_param(&view, |_| true).expect("View should reference a parameter");
+    debug_assert!(
+        first_matching_param(&view, |idx| idx != old_index).is_none(),
+        "View references multiple parameters",
+    );
+    view.bind(&mut |idx| {
+        (idx == old_index)
+            .then(|| ViewE::Param(Param::new(new_parameter_index, param_spec.clone())))
+    })
+}
+
+/// Visits params in `view` and returns the first one matching `predicate`.
+fn first_matching_param<Tgt: Target, F>(
+    view: &ViewE<Tgt>,
+    mut predicate: F,
+) -> Option<(u8, TensorSpec<Tgt>)>
+where
+    F: FnMut(u8) -> bool,
+{
+    let mut result: Option<(u8, TensorSpec<Tgt>)> = None;
+    view.visit_params(&mut |idx, spec| {
+        if result.is_none() && predicate(idx) {
+            result = Some((idx, spec.clone()));
+        }
+    });
+    result
 }
 
 fn bitvector_combinations(bitvectors: &[usize]) -> impl Iterator<Item = usize> + '_ {

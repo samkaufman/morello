@@ -26,7 +26,6 @@ use crate::views::{Param, ViewE};
 use nonzero::nonzero as nz;
 use std::convert::TryFrom;
 use std::iter;
-use std::slice;
 
 /// A trait extending [ImplNode]s and [Spec]s with methods for more conveniently applying [Action]s.
 ///
