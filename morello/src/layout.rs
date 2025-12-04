@@ -389,21 +389,14 @@ impl Layout {
         parent_shape: &[DimSize],
         tile_shape: &[DimSize],
     ) -> Result<Layout, LayoutError> {
-        // If all logical dims are size 1, force row-major layout and contiguous_full. This bypasses
-        // potential failures to, for instance, tile Packed physical dimensions.
-        // TODO: This should be a natural result of being able to tile within Packed dims.
-        if tile_shape.iter().all(|d| d.get() == 1) {
-            Ok(row_major(tile_shape))
-        } else {
-            let mut new_layout = self.clone();
-            new_layout.contig =
-                new_layout.lower_contig_to_first_broken_dimension(parent_shape, tile_shape)?;
-            new_layout.contig =
-                new_layout.prune_size_one_logical_dims_with_contig(tile_shape, new_layout.contig);
-            new_layout.merge_consecutive_dimensions();
-            new_layout.drop_unneeded_packings(tile_shape);
-            Ok(new_layout)
-        }
+        let mut new_layout = self.clone();
+        new_layout.contig =
+            new_layout.lower_contig_to_first_broken_dimension(parent_shape, tile_shape)?;
+        new_layout.contig =
+            new_layout.prune_size_one_logical_dims_with_contig(tile_shape, new_layout.contig);
+        new_layout.merge_consecutive_dimensions();
+        new_layout.drop_unneeded_packings(tile_shape);
+        Ok(new_layout)
     }
 
     // TODO: Instead of returning the `Contig`, update self.

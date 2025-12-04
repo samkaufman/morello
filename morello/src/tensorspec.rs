@@ -10,7 +10,7 @@ use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::{row_major, Layout, LayoutBuilder, LayoutError, PhysDim};
+use crate::layout::{Layout, LayoutBuilder, LayoutError, PhysDim};
 use crate::target::{MemoryLevel, Target};
 use crate::utils::join_into_string;
 
@@ -146,9 +146,6 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         if parallel_loop && !level.can_parallel_tile() && original_shape != shape {
             return false;
         }
-        if shape.iter().all(|d| d.get() == 1) {
-            return true;
-        }
         !level.has_layout() || self.aux.layout.applies_to_shape(shape)
     }
 
@@ -260,12 +257,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             new_shape.remove(dim.into());
         }
 
-        let new_layout = if new_shape.iter().all(|&d| d.get() == 1) {
-            row_major(&new_shape)
-        } else {
-            let dropped_dims_set = dropped_dims.iter().copied().collect::<HashSet<_>>();
-            self.layout().dim_drop(&dropped_dims_set)
-        };
+        let dropped_dims_set = dropped_dims.iter().copied().collect::<HashSet<_>>();
+        let new_layout = self.layout().dim_drop(&dropped_dims_set);
 
         Self::new_canon(
             new_shape,

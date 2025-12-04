@@ -2412,16 +2412,16 @@ mod tests {
             // same result as (spec -> tile_a -> tile_b).
             match (direct_path, indirect_path) {
                 (Ok(_), Ok(_)) | (Err(_), Err(_)) => {}
-                (Ok(_), b @ Err(_)) => {
+                (Ok(_), ind @ Err(_)) => {
                     prop_assert!(
                         false,
-                        "spec->B succeeded but spec->A->B failed; A: Ok(_), B: {b:?}",
+                        "spec->B succeeded but spec->A->B failed; {ind:?}  (intermediate Spec is {nested_spec})",
                     );
                 }
-                (a @ Err(_), Ok(_)) => {
+                (dir @ Err(_), Ok(_)) => {
                     prop_assert!(
                         false,
-                        "spec->B failed but spec->A->B succeeded; A: {a:?}, B: Ok(_)",
+                        "spec->B failed but spec->A->B succeeded; {dir:?} (intermediate Spec is {nested_spec})",
                     );
                 }
             }
