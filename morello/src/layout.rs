@@ -1078,6 +1078,26 @@ mod tests {
     }
 
     #[test]
+    fn test_can_tile_a_packed_dimension_to_one() {
+        let layout = layout![1, 0, 1 p(4)];
+        let result_layout = layout
+            .update_for_tiling(&shape![64, 64], &shape![16, 1])
+            .unwrap();
+        assert!(result_layout.is_row_major());
+        assert!(!result_layout.is_fully_contiguous());
+    }
+
+    #[test]
+    fn test_can_tile_a_packed_dimension_to_half() {
+        let layout = layout![1, 0, 1 p(4)];
+        let result_layout = layout
+            .update_for_tiling(&shape![64, 64], &shape![16, 2])
+            .unwrap();
+        assert!(result_layout.is_row_major());
+        assert!(!result_layout.is_fully_contiguous());
+    }
+
+    #[test]
     fn test_can_tile_an_oddeven_dimension_to_one() {
         let mut layout = layout![0 oe(4), 1];
         layout.set_contig(0);
