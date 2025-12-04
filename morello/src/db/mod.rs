@@ -884,7 +884,7 @@ fn analyze_visit_dir(
             continue;
         }
 
-        // Choose with 1/sample probability to skip this file.
+        // Skip with probability 1/sample.
         if sample > 1 && !rand::random::<usize>().is_multiple_of(sample) {
             continue;
         }
