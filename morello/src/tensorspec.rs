@@ -605,16 +605,23 @@ pub(crate) fn check_tensor_vector_size<Tgt: Target>(
     level: &Tgt::Level,
     vector_size: Option<DimSize>,
 ) -> Result<(), CanonicalizeError> {
-    let vector_bytes = level.vector_bytes();
-    if vector_bytes.is_empty() {
+    let vector_bytes_allowed = level.vector_bytes();
+    if vector_bytes_allowed.is_empty() {
         debug_assert!(vector_size.is_none());
         return Ok(());
     }
     let vector_size = vector_size.expect("vector_size must be Some for vector level");
+    let vector_size_bytes = vector_size.get() * u32::from(dtype.size());
+    if !vector_bytes_allowed.contains(&vector_size_bytes) {
+        return Err(CanonicalizeError::VectorSizeInvalid);
+    }
     let volume = DimSize::new(shape.iter().map(|d| d.get()).product()).unwrap();
     let bytes = volume.get() * u32::from(dtype.size());
 
-    if !vector_bytes.iter().any(|&vb| bytes.is_multiple_of(vb)) {
+    if !vector_bytes_allowed
+        .iter()
+        .any(|&vb| bytes.is_multiple_of(vb))
+    {
         return Err(CanonicalizeError::VectorSizeInvalid);
     }
     if !volume.get().is_multiple_of(vector_size.get()) {
@@ -847,6 +854,23 @@ mod tests {
                 vector_size: Some(nz!(16u32)),
             },
         );
+    }
+
+    #[test]
+    fn test_canonicalize_rejects_unsupported_vector_size_even_when_volume_is_multiple() {
+        let mut spec = TensorSpec::<Avx2Target> {
+            shape: shape![1, 1, 16],
+            dtype: Dtype::Uint8,
+            aux: TensorSpecAux {
+                level: CpuMemoryLevel::VRF,
+                layout: layout![0, 1, 2],
+                vector_size: Some(nz!(8u32)),
+            },
+        };
+        assert!(matches!(
+            spec.canonicalize(),
+            Err(CanonicalizeError::VectorSizeInvalid)
+        ));
     }
 
     fn shared_tensorspec_canonicalize_should_be_idempodent<Tgt: Target>(
