@@ -1078,6 +1078,20 @@ mod tests {
     }
 
     #[test]
+    fn test_can_tile_an_oddeven_dimension_to_one() {
+        let mut layout = layout![0 oe(4), 1];
+        layout.set_contig(0);
+        let result_layout = layout
+            .update_for_tiling(&shape![4, 64], &shape![1, 1])
+            .unwrap();
+        assert!(result_layout.is_row_major());
+        assert!(
+            result_layout.is_fully_contiguous(),
+            "Layout should be contiguous after tiling"
+        );
+    }
+
+    #[test]
     fn test_dim_drop_1() {
         let layout = layout![0, 1];
         let new_layout = layout.dim_drop(&iter::once(0u8).collect());
