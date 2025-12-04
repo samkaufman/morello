@@ -54,6 +54,13 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         let logical_spec = &spec.0;
         let operands = logical_spec.parameters();
 
+        let parallel = self.parallel();
+        if parallel && !operands.iter().all(|o| o.level().can_parallel_tile()) {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::LevelPreventedParallel,
+            ));
+        }
+
         // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
         if let Some(daufm_result) = tile_out_daufm(spec, self) {
             return daufm_result;
@@ -70,7 +77,6 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         let rank = current_out_shape.len();
 
         let output_shape = self.tiled_output_shape(current_out_shape);
-        let parallel = self.parallel();
 
         // TODO: Move assertions into solver() as well.
         if parallel && logical_spec.serial_only() {
@@ -118,6 +124,16 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
     }
 
     // fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+    //     if self.parallel() {
+    //         for idx in 0..spec.0.operand_count() {
+    //             if !spec.0.parameter_level(idx).can_parallel_tile() {
+    //                 return Err(ApplyError::NotApplicable(
+    //                     NotApplicableReason::LevelPreventedParallel,
+    //                 ));
+    //             }
+    //         }
+    //     }
+    //
     //     match &spec.0 {
     //         LogicalSpec::Primitive(basics, ..) => {
     //             // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
@@ -1505,6 +1521,57 @@ mod tests {
             result,
             Err(ApplyError::NotApplicable(
                 NotApplicableReason::TileShapeInvalid
+            ))
+        ));
+    }
+
+    /// Test that attempting a parallel TileOut on a Spec with RF level (which cannot
+    /// be parallel tiled) returns NotApplicableReason::LevelPreventedParallel.
+    #[test]
+    fn test_parallel_tile_out_with_rf_returns_level_prevented_parallel() {
+        let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
+            [1, 8, 8, 8],
+            (f32, CpuMemoryLevel::RF, row_major),
+            (f32, CpuMemoryLevel::GL, row_major),
+            (f32, CpuMemoryLevel::GL, row_major)
+        ));
+        spec.canonicalize().expect("spec should canonicalize");
+
+        let tile_action = Action::TileOut(TileOut::SingleLoop {
+            dim: 0,
+            size: nz!(2u32),
+            parallel: true,
+        });
+        let result = tile_action.apply(&spec);
+        assert!(matches!(
+            result,
+            Err(ApplyError::NotApplicable(
+                NotApplicableReason::LevelPreventedParallel
+            ))
+        ));
+    }
+
+    /// Test that attempting a parallel TileOut on a Spec with VRF level (which cannot
+    /// be parallel tiled) returns NotApplicableReason::LevelPreventedParallel.
+    #[test]
+    fn test_parallel_tile_out_with_vrf_returns_level_prevented_parallel() {
+        let mut spec: Spec<Avx2Target> = spec!(Move(
+            [64, 1],
+            (f32, CpuMemoryLevel::L1, crate::layout![0, 1, 0 p(8)]),
+            (f32, CpuMemoryLevel::VRF, crate::layout![0, 1, 0 p(8)], 8)
+        ));
+        spec.canonicalize().expect("spec should canonicalize");
+
+        let tile_action = Action::TileOut(TileOut::SingleLoop {
+            dim: 0,
+            size: nz!(2u32),
+            parallel: true,
+        });
+        let result = tile_action.apply(&spec);
+        assert!(matches!(
+            result,
+            Err(ApplyError::NotApplicable(
+                NotApplicableReason::LevelPreventedParallel
             ))
         ));
     }

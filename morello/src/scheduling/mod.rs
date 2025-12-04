@@ -140,6 +140,7 @@ pub enum NotApplicableReason {
     TileShapeIsLarger,
     TileShapeInvalid,
     SerialOnly,
+    LevelPreventedParallel,
     LayoutIncompatible,
     SelfMove,
     VectorSizeInvalid,
@@ -264,6 +265,18 @@ impl<Tgt: Target> ActionSolver<Tgt> {
     // where
     //     B: Iterator<Item = (usize, usize)> + ExactSizeIterator,
     // {
+    //     if parallel {
+    //         for param_idx in 0..original_spec.0.operand_count() {
+    //             if !original_spec
+    //                 .0
+    //                 .parameter_level(param_idx)
+    //                 .can_parallel_tile()
+    //             {
+    //                 todo!("Return an error");
+    //             }
+    //         }
+    //     }
+
     //     let mut new_spec = original_spec.clone();
     //     match &mut new_spec.0 {
     //         LogicalSpec::Primitive(PrimitiveBasics { spec_shape, .. }, _, serial_only) => {
@@ -274,15 +287,16 @@ impl<Tgt: Target> ActionSolver<Tgt> {
     //         }
     //         _ => unreachable!(),
     //     }
-    //
-    //     let outer_parameters = original_spec.0.parameters();
+
     //     let new_parameters = new_spec.0.parameters();
     //     let LogicalSpec::Primitive(_, new_auxes, _) = &mut new_spec.0 else {
     //         unreachable!();
     //     };
-    //
+
     //     // TODO: Should the following be optimized with `tile_shape_is_valid`?
-    //     for ((outer, inner), new_aux) in outer_parameters
+    //     for ((outer, inner), new_aux) in original_spec
+    //         .0
+    //         .parameters()
     //         .into_iter()
     //         .zip(new_parameters)
     //         .zip(new_auxes)
@@ -363,6 +377,9 @@ impl Display for NotApplicableReason {
             }
             NotApplicableReason::SerialOnly => {
                 write!(f, "Cannot implement serial-only Spec with parallel tile")
+            }
+            NotApplicableReason::LevelPreventedParallel => {
+                write!(f, "Spec has a non-parallel-tileable level")
             }
             NotApplicableReason::LayoutIncompatible => {
                 write!(f, "Layout does not apply to tile size")
