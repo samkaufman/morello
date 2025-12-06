@@ -922,15 +922,40 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             loop_iter_name,
                             vector_count * 8,
                         )?;
+
+                        let input_vec = self.namer.fresh_name();
+                        let out_vec = self.namer.fresh_name();
+                        let input_ptr = format!(
+                            "{} + {loop_iter_name}",
+                            self.c_index_ptr(input_buffer, &inp_base_expr, None)
+                        );
+                        let output_ptr = format!(
+                            "{} + {loop_iter_name}",
+                            self.c_index_ptr(output_buffer, &out_base_expr, None)
+                        );
+                        writeln!(w, "{0}{vtype} {1};", indent(depth + 1), input_vec,)?;
                         writeln!(
                             w,
-                            "{0}*(({vtype} *)({1} + {5})) = exp256_ps(*(({vtype} *)({2} + {5})) - {3}) / {4};",
+                            "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
                             indent(depth + 1),
-                            self.c_index_ptr(output_buffer, &out_base_expr, None),
-                            self.c_index_ptr(input_buffer, &inp_base_expr, None),
+                            input_vec,
+                            input_ptr,
+                        )?;
+                        writeln!(
+                            w,
+                            "{0}{vtype} {1} = exp256_ps({2} - {3}) / {4};",
+                            indent(depth + 1),
+                            out_vec,
+                            input_vec,
                             max_expr,
                             denom_expr,
-                            loop_iter_name,
+                        )?;
+                        writeln!(
+                            w,
+                            "{0}__builtin_memcpy({1}, &{2}, sizeof({2}));",
+                            indent(depth + 1),
+                            output_ptr,
+                            out_vec,
                         )?;
                         writeln!(w, "{}}}", indent(depth),)
                     }
@@ -1245,12 +1270,21 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
 
                             // TODO: Don't inline `short` below.
+                            let scalar_name = self.namer.fresh_name();
+                            writeln!(w, "{0}short {scalar_name};", indent(depth),)?;
                             writeln!(
                                 w,
-                                "{0}{1} {broad_name} = {shift_fn_out}({broadcast16_out}(*(short *)({2})), 16);",
+                                "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
+                                indent(depth),
+                                scalar_name,
+                                exprs[0]
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} {broad_name} = {shift_fn_out}({broadcast16_out}({2}), 16);",
                                 indent(depth),
                                 vfc.name,
-                                exprs[0]
+                                scalar_name
                             )?;
 
                             writeln!(
@@ -1288,12 +1322,21 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             // TODO: Lift the broadcast out of this loop.
                             let broadcast_name = self.namer.fresh_name();
                             writeln!(w, "/* TwoVecBroadcastVecMultAddU8S8S16 */")?;
+                            let broadcast_scalar = self.namer.fresh_name();
+                            writeln!(w, "{0}int16_t {broadcast_scalar};", indent(depth),)?;
                             writeln!(
                                 w,
-                                "{}__m256i {} = _mm256_set1_epi16(*(int16_t *)({}));",
+                                "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
+                                indent(depth),
+                                broadcast_scalar,
+                                exprs[0]
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}__m256i {1} = _mm256_set1_epi16({2});",
                                 indent(depth),
                                 broadcast_name,
-                                exprs[0]
+                                broadcast_scalar
                             )?;
 
                             // matmul (k=2) the broadcast vector with the rhs vectors.
@@ -1351,16 +1394,35 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             step_size
                         )?;
                         for (i, accum_name) in vector_accum_names.iter().enumerate() {
+                            let lhs_vec = self.namer.fresh_name();
+                            let rhs_vec = self.namer.fresh_name();
+                            writeln!(w, "{0}{1} {2};", indent(depth + 1), vtype.name, lhs_vec)?;
+                            writeln!(w, "{0}{1} {2};", indent(depth + 1), vtype.name, rhs_vec)?;
                             writeln!(
                                 w,
-                                "{0}{1} += *({2} *)({3} + {5} + {6}) * *({2} *)({4} + {5} + {6});",
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
-                                accum_name,
-                                vtype.name,
+                                lhs_vec,
                                 exprs[0],
+                                step_idx_name,
+                                i * DOT_PRODUCT_STRIP_SIZE.get() as usize
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
+                                indent(depth + 1),
+                                rhs_vec,
                                 exprs[1],
                                 step_idx_name,
                                 i * DOT_PRODUCT_STRIP_SIZE.get() as usize
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} += {2} * {3};",
+                                indent(depth + 1),
+                                accum_name,
+                                lhs_vec,
+                                rhs_vec
                             )?;
                         }
                         writeln!(w, "{}}}", indent(depth))?;
@@ -1438,9 +1500,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 let compressed_name = self.namer.fresh_name();
                                 writeln!(
                                     w,
-                                    "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                    "{0}{1} {compressed_name};",
                                     indent(depth + 1),
-                                    vf32.name,
+                                    vf32.name
+                                )?;
+                                writeln!(
+                                    w,
+                                    "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
+                                    indent(depth + 1),
+                                    compressed_name,
                                     exprs[j],
                                     step_idx_name,
                                     i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
@@ -1472,13 +1540,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     &loop_names[(i + 2) % loop_names.len()].0,
                                 ),
                             ] {
-                                writeln!(
-                                    w,
-                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
-                                    indent(depth + 1),
-                                    a,
-                                    vf32.name
-                                )?;
+                                writeln!(w, "{0}{1} += {lhs} * {rhs};", indent(depth + 1), a)?;
                             }
                         }
                         writeln!(w, "{}}}", indent(depth))?;
@@ -1547,20 +1609,22 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         ) in loop_names.iter().enumerate()
                         {
                             // Load already-dequantized f32 lhs into a pair of vectors.
+                            writeln!(w, "{0}{1} {upper_lhs_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
-                                "{0}{1} {upper_lhs_name} = *({1} *)({2} + {3} + {4});",
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
-                                vf32.name,
+                                upper_lhs_name,
                                 exprs[0],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
+                            writeln!(w, "{0}{1} {lower_lhs_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
-                                "{0}{1} {lower_lhs_name} = *({1} *)({2} + {3} + {4} + 8);",
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4} + 8, sizeof({1}));",
                                 indent(depth + 1),
-                                vf32.name,
+                                lower_lhs_name,
                                 exprs[0],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
@@ -1568,11 +1632,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                             // Load compressed bf16 rhs strip and dequantize.
                             let compressed_name = self.namer.fresh_name();
+                            writeln!(w, "{0}{1} {compressed_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
-                                "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
-                                vf32.name,
+                                compressed_name,
                                 exprs[1],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
@@ -1593,13 +1658,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     &loop_names[(i + 2) % loop_names.len()].0,
                                 ),
                             ] {
-                                writeln!(
-                                    w,
-                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
-                                    indent(depth + 1),
-                                    a,
-                                    vf32.name
-                                )?;
+                                writeln!(w, "{0}{1} += {lhs} * {rhs};", indent(depth + 1), a)?;
                             }
                         }
                         writeln!(w, "{}}}", indent(depth))?;
@@ -1669,20 +1728,22 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         ) in loop_names.iter().enumerate()
                         {
                             // Load already-dequantized f32 lhs into a pair of vectors.
+                            writeln!(w, "{0}{1} {upper_lhs_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
-                                "{0}{1} {upper_lhs_name} = *({1} *)({2} + {3} + {4});",
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
-                                vf32.name,
+                                upper_lhs_name,
                                 exprs[0],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
+                            writeln!(w, "{0}{1} {lower_lhs_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
-                                "{0}{1} {lower_lhs_name} = *({1} *)({2} + {3} + {4} + 8);",
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4} + 8, sizeof({1}));",
                                 indent(depth + 1),
-                                vf32.name,
+                                lower_lhs_name,
                                 exprs[0],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
@@ -1690,11 +1751,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                             // Load compressed bf16 rhs strip and dequantize without crossing lanes.
                             let compressed_name = self.namer.fresh_name();
+                            writeln!(w, "{0}{1} {compressed_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
-                                "{0}{1} {compressed_name} = *({1} *)({2} + {3} + {4});",
+                                "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
-                                vf32.name,
+                                compressed_name,
                                 exprs[1],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
@@ -1703,7 +1765,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
                             writeln!(
                                 w,
-                                "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), 16);",
+                                "{0}{1} {2} = ({1}){shift_fn}(({3}){4}, 16);",
                                 indent(depth + 1),
                                 vf32.name,
                                 upper_rhs_name,
@@ -1712,7 +1774,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
                             writeln!(
                                 w,
-                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), ({3}){4}, 0xAA);",
                                 indent(depth + 1),
                                 vf32.name,
                                 lower_rhs_name,
@@ -1728,13 +1790,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     &loop_names[(i + 2) % loop_names.len()].0,
                                 ),
                             ] {
-                                writeln!(
-                                    w,
-                                    "{0}{1} += *({2} *)(&{lhs}) * *({2} *)(&{rhs});",
-                                    indent(depth + 1),
-                                    a,
-                                    vf32.name
-                                )?;
+                                writeln!(w, "{0}{1} += {lhs} * {rhs};", indent(depth + 1), a)?;
                             }
                         }
                         writeln!(w, "{}}}", indent(depth))?;
