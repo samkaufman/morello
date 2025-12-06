@@ -9,7 +9,6 @@ use crate::target::Target;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 
 use crate::views::{Param, Tensor, TileError, View, ViewE};
-use enum_dispatch::enum_dispatch;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
@@ -36,7 +35,6 @@ pub mod to_max_and_unscaled;
 pub mod to_softmax_parts;
 
 // TODO: Rename this. (`Action` should probably be X86-specific.)
-#[enum_dispatch]
 pub trait ActionT<Tgt: Target> {
     fn apply(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         if !spec.is_canonical() {
@@ -67,38 +65,77 @@ pub trait ActionT<Tgt: Target> {
 /// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
 /// decision from another, which makes it appropriate for storing in a database so that the
 /// corresponding Impl node can be computed given the Spec.
-#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(bound(
-    deserialize = "Tgt::Kernel: Deserialize<'de>",
-    serialize = "Tgt::Kernel: Serialize"
-))]
-#[enum_dispatch(ActionT<Tgt>)]
-pub enum Action<Tgt: Target> {
+macro_rules! action_dispatch {
+    (
+        $(#[$meta:meta])* $name:ident,
+        $( $(#[$var_meta:meta])* ($variant:tt, $innertype:ty) ),* $(,)?
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
+        #[serde(bound(
+            deserialize = "Tgt::Kernel: Deserialize<'de>",
+            serialize = "Tgt::Kernel: Serialize"
+        ))]
+        pub enum $name<Tgt: Target> {
+            $( $(#[$var_meta])* $variant($innertype) ),*
+        }
+
+        impl<Tgt: Target> ActionT<Tgt> for $name<Tgt> {
+            fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+                match self {
+                    $( Self::$variant(action) => action.apply_unchecked_canon(spec) ),*
+                }
+            }
+
+            fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+                match self {
+                    $( Self::$variant(action) => action.top_down_solver(spec) ),*
+                }
+            }
+        }
+
+        $(
+        impl<Tgt: Target> From<$innertype> for $name<Tgt> {
+            fn from(value: $innertype) -> Self {
+                Self::$variant(value)
+            }
+        }
+        )*
+    };
+}
+
+action_dispatch! {
+    /// A scheduling decision which can be applied to a Spec to produce an Impl.
+    ///
+    /// [Action]s contain the minimal amount of information needed to distinguish a one scheduling
+    /// decision from another, which makes it appropriate for storing in a database so that the
+    /// corresponding Impl node can be computed given the Spec.
+    Action,
     /// Tile the output tensor and its inputs to respect the updated inputs.
-    TileOut(TileOut),
-    Split(Split),
+    (TileOut, TileOut),
+    (Split, Split),
     /// Move a tensor to a different memory level, layout, and/or dtype.
-    Move(Move<Tgt>),
+    (Move, Move<Tgt>),
     /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
-    ToAccum(ToAccum),
-    BroadcastFirst(BroadcastFirst<Tgt>),
+    (ToAccum, ToAccum),
+    (BroadcastFirst, BroadcastFirst<Tgt>),
     /// Rewrites a Softmax into a SoftmaxDenominatorAndUnscaled and a DivideVecScalar.
-    ToSoftmaxParts(ToSoftmaxParts<Tgt>),
+    (ToSoftmaxParts, ToSoftmaxParts<Tgt>),
     /// Rewrites a Softmax into SoftmaxDenominatorAndMax followed by SoftmaxComplete.
-    ToSoftmaxPartsRecompute(ToSoftmaxPartsRecompute<Tgt>),
+    (ToSoftmaxPartsRecompute, ToSoftmaxPartsRecompute<Tgt>),
     /// Rewrites a SoftmaxDenominatorAndMax into a Max followed by SoftmaxDenominator.
-    ToMaxAndDenominator(ToMaxAndDenominator),
+    (ToMaxAndDenominator, ToMaxAndDenominator),
     /// Rewrites a SoftmaxDenominatorAndUnscaled into a Max followed by
     /// SoftmaxDenominatorAndUnscaledFromMax.
-    ToMaxAndUnscaled(ToMaxAndUnscaled<Tgt>),
-    Bufferize(Bufferize<Tgt>),
-    SpatialSplit(SpatialSplit),
+    (ToMaxAndUnscaled, ToMaxAndUnscaled<Tgt>),
+    (Bufferize, Bufferize<Tgt>),
+    (SpatialSplit, SpatialSplit),
     // TODO: Remove 'force' bool from Select
     #[serde(bound(
         deserialize = "Select<Tgt>: Deserialize<'de>",
         serialize = "Select<Tgt>: Serialize",
     ))]
-    Select(Select<Tgt>),
+    (Select, Select<Tgt>),
 }
 
 #[derive(Debug)]
