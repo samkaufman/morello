@@ -35,10 +35,6 @@ pub struct VecType {
     pub value_cnt: u8,
     pub name: &'static str,
     pub native_type_name: &'static str,
-    pub load_fn: &'static str,
-    pub load_fn_arg0: &'static str,
-    pub store_fn: &'static str,
-    pub store_fn_arg0: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

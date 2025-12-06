@@ -1139,7 +1139,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         });
 
                         let dtype = first_spec.dtype();
-                        let vtype = get_vector(Tgt::vec_types(), dtype, vector_size);
+                        let byte_count =
+                            usize::from(dtype.size()) * usize::try_from(vector_size.get()).unwrap();
                         let vector_count = first_spec.volume().get() / vector_size.get();
 
                         for vector_idx in 0..vector_count {
@@ -1158,14 +1159,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                             writeln!(
                                 w,
-                                "{0}{1}(({2} *)({3}), {4}(({5} *)({6})));  /* VectorAssign */",
+                                "{0}__builtin_memcpy((void *)({1}), (const void *)({2}), {3});  /* VectorAssign */",
                                 indent(depth),
-                                vtype.store_fn,
-                                vtype.store_fn_arg0,
                                 exprs[1],
-                                vtype.load_fn,
-                                vtype.load_fn_arg0,
                                 exprs[0],
+                                byte_count,
                             )?;
                         }
                         Ok(())

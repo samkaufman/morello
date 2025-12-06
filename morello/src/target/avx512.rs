@@ -20,80 +20,48 @@ crate::target::x86::define_x86_vec_types!(
         value_cnt: 32,
         name: "vbf16_32",
         native_type_name: "__m512i",
-        load_fn: "_mm512_loadu_si512",
-        load_fn_arg0: "__m512i",
-        store_fn: "_mm512_storeu_si512",
-        store_fn_arg0: "__m512i"
     },
     VecType {
         dtype: Dtype::Float32,
         value_cnt: 16,
         name: "vf16",
         native_type_name: "__m512",
-        load_fn: "_mm512_loadu_ps",
-        load_fn_arg0: "float const",
-        store_fn: "_mm512_storeu_ps",
-        store_fn_arg0: "float"
     },
     VecType {
         dtype: Dtype::Sint32,
         value_cnt: 16,
         name: "vsi16",
         native_type_name: "__m512i",
-        load_fn: "_mm512_loadu_si512",
-        load_fn_arg0: "__m512i",
-        store_fn: "_mm512_storeu_si512",
-        store_fn_arg0: "__m512i"
     },
     VecType {
         dtype: Dtype::Uint32,
         value_cnt: 16,
         name: "vui16",
         native_type_name: "__m512i",
-        load_fn: "_mm512_loadu_si512",
-        load_fn_arg0: "__m512i",
-        store_fn: "_mm512_storeu_si512",
-        store_fn_arg0: "__m512i"
     },
     VecType {
         dtype: Dtype::Sint16,
         value_cnt: 32,
         name: "vsi32",
         native_type_name: "__m512i",
-        load_fn: "_mm512_loadu_si512",
-        load_fn_arg0: "__m512i",
-        store_fn: "_mm512_storeu_si512",
-        store_fn_arg0: "__m512i"
     },
     VecType {
         dtype: Dtype::Uint16,
         value_cnt: 32,
         name: "vui32",
         native_type_name: "__m512i",
-        load_fn: "_mm512_loadu_si512",
-        load_fn_arg0: "__m512i",
-        store_fn: "_mm512_storeu_si512",
-        store_fn_arg0: "__m512i"
     },
     VecType {
         dtype: Dtype::Sint8,
         value_cnt: 64,
         name: "vsb64",
         native_type_name: "__m512i",
-        load_fn: "_mm512_loadu_si512",
-        load_fn_arg0: "__m512i",
-        store_fn: "_mm512_storeu_si512",
-        store_fn_arg0: "__m512i"
     },
     VecType {
         dtype: Dtype::Uint8,
         value_cnt: 64,
         name: "vub64",
         native_type_name: "__m512i",
-        load_fn: "_mm512_loadu_si512",
-        load_fn_arg0: "__m512i",
-        store_fn: "_mm512_storeu_si512",
-        store_fn_arg0: "__m512i"
     },
 );
 
