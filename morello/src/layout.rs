@@ -460,7 +460,7 @@ impl Layout {
         let mut new_dims = Vec::with_capacity(self.dims.len());
         new_dims.push(self.dims[0]);
 
-        for (idx, (dim, phys_dim)) in self.dims.iter().skip(1).enumerate() {
+        for (idx, (dim, phys_dim)) in self.dims.iter().enumerate().skip(1) {
             let (last_dim, last_phys_dim): &mut (u8, PhysDim) = new_dims.last_mut().unwrap();
             if dim != last_dim {
                 new_dims.push((*dim, *phys_dim));
@@ -1217,7 +1217,6 @@ mod tests {
         let mut layout = layout![0, 1, 0 p(4), 1, 0 p(4)];
         let expected = layout![1, 0];
         layout.drop_unneeded_packings(&[nz!(4u32), nz!(1024u32)]);
-        layout.merge_consecutive_dimensions(); // TODO: Remove
         assert_eq!(layout, expected);
     }
 
@@ -1263,6 +1262,34 @@ mod tests {
         let expected = layout![0 oe(6), 1, 0 p(4)];
         layout.drop_unneeded_packings(&[nz!(12u32), nz!(16u32)]);
         assert_eq!(layout, expected);
+    }
+
+    #[test]
+    fn test_merge_dynamic_then_packed_collapses_to_dynamic_full_contig() {
+        let mut layout = Layout {
+            dims: vec![(0, PhysDim::Dynamic), (0, PhysDim::Packed(nz!(2u32)))],
+            contig: 2,
+        };
+        layout.merge_consecutive_dimensions();
+        assert_eq!(layout, layout![0]);
+    }
+
+    #[test]
+    fn test_merge_dynamic_then_packed_collapses_to_dynamic_partly_contig() {
+        let mut layout = Layout {
+            dims: vec![(0, PhysDim::Dynamic), (0, PhysDim::Packed(nz!(2u32)))],
+            contig: 1,
+        };
+        layout.merge_consecutive_dimensions();
+        assert_eq!(layout.dims, [(0, PhysDim::Dynamic)]);
+        assert_eq!(layout.contig(), 0);
+    }
+
+    #[test]
+    fn test_drop_unneeded_packings_keeps_outer_when_tile_spans_multiple_packs() {
+        let mut layout = layout![0, 1, 0 p(2), 2, 0 p(2)];
+        layout.drop_unneeded_packings(&[nz!(8u32), nz!(1u32), nz!(1u32)]);
+        assert_eq!(layout, layout![0, 1, 0 p(2), 2, 0 p(2)]);
     }
 
     proptest! {

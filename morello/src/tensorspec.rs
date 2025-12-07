@@ -866,6 +866,24 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_tiling_packed_suffix_not_fully_contiguous() {
+        let mut spec = TensorSpec::<Avx2Target>::new_canon(
+            shape![1, 8, 8],
+            Dtype::Float32,
+            CpuMemoryLevel::L1,
+            layout![1, 2, 1 p(2)],
+            None,
+        );
+        spec.shrink(&shape![1, 8, 1]).unwrap();
+        assert!(
+            !spec.is_contiguous(),
+            "Tiling to 1x8x1 should break contiguousness; contig={:?} layout={:?}",
+            spec.layout().contig(),
+            spec.layout(),
+        );
+    }
+
     fn shared_tensorspec_canonicalize_should_be_idempodent<Tgt: Target>(
         mut tspec: TensorSpec<Tgt>,
     ) {
