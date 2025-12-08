@@ -19,11 +19,10 @@ use crate::imp::ImplNode;
 use crate::layout::BufferVar;
 use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
-
 use crate::target::{
     cpu::{
-        dotproduct_accum_count, DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT,
-        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE,
+        broadcastvecmult_side, dotproduct_accum_count, DOT_PRODUCT_ACCUM_COUNT,
+        DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE,
     },
     CpuKernel, CpuMemoryLevel, CpuTarget, Kernel, Target,
 };
@@ -1169,15 +1168,33 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     CpuKernel::BroadcastVecMultAdd => {
+                        let (scalar_idx, broadcast_idx) = broadcastvecmult_side(
+                            &arguments
+                                .iter()
+                                .map(|a| a.spec().clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap();
+
                         let vector_size = arguments[2].spec().vector_size().unwrap().get();
+                        let output_shape = arguments[2].spec().shape();
+                        debug_assert_eq!(output_shape.len(), 3);
+                        let row_len = output_shape[2].get();
+                        debug_assert!(row_len > 0);
                         let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
                         for vector_idx in 0..vector_count {
                             let exprs =
                                 self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                                    0 => self.c_index(a, b, None),
-                                    1 | 2 => self.c_index_vec(
+                                    idx if idx == scalar_idx => self.c_index(a, b, None),
+                                    idx if idx == broadcast_idx => self.c_index_vec(
+                                        a,
+                                        &(b.clone()
+                                            + i32::try_from(vector_idx * vector_size).unwrap()),
+                                        None,
+                                    ),
+                                    2 => self.c_index_vec(
                                         a,
                                         &(b.clone()
                                             + i32::try_from(vector_idx * vector_size).unwrap()),

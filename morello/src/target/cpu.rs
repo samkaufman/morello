@@ -693,7 +693,7 @@ impl CpuKernel {
                     return false;
                 }
                 operands.iter().skip(1).all(|o| o.dtype() == first_dtype)
-                    && shared_broadcastvecmult_applies_to_operands(&operands)
+                    && broadcastvecmult_side(&operands).is_some()
             }
             CpuKernel::BroadcastVecMultAddBf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
@@ -701,7 +701,7 @@ impl CpuKernel {
                     && operands[1].dtype() == Dtype::Bfloat16
                     && operands[2].dtype() == Dtype::Float32
                     && operands[1].vector_size() == operands[2].vector_size()
-                    && shared_broadcastvecmult_applies_to_operands(&operands)
+                    && broadcastvecmult_bf16_applies_to_operands(&operands)
             }
             CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
@@ -1776,11 +1776,104 @@ where
     true
 }
 
-pub fn shared_broadcastvecmult_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
+pub fn broadcastvecmult_side<Tgt>(operands: &[TensorSpec<Tgt>]) -> Option<(usize, usize)>
 where
     Tgt: Target,
     Tgt::Level: PartialEq<CpuMemoryLevel>,
 {
+    debug_assert_eq!(operands.len(), 3);
+
+    let out = &operands[2];
+
+    // Output must live in VRF and be vector-aligned/contiguous.
+    if out.level() != CpuMemoryLevel::VRF || !out.is_contiguous() {
+        return None;
+    }
+
+    // Both inputs must be contiguous regardless of role.
+    if !operands[0].is_contiguous() || !operands[1].is_contiguous() {
+        return None;
+    }
+
+    let &[batch0, op0_dim1, op0_dim2] = operands[0].shape() else {
+        unreachable!()
+    };
+    let &[batch1, op1_dim1, op1_dim2] = operands[1].shape() else {
+        unreachable!()
+    };
+    let &[batch_out, out_dim1, out_dim2] = out.shape() else {
+        unreachable!()
+    };
+
+    // Batch must align across all operands independent of operand roles.
+    if batch0 != batch_out || batch1 != batch_out {
+        return None;
+    }
+
+    let out_vector_size = out.vector_size()?;
+    if !out.volume().get().is_multiple_of(out_vector_size.get()) {
+        return None;
+    }
+
+    for (scalar_idx, broadcast_idx) in [(0, 1), (1, 0)] {
+        let scalar = &operands[scalar_idx];
+        let broadcast = &operands[broadcast_idx];
+
+        if !(scalar.level() == CpuMemoryLevel::RF || scalar.level() == CpuMemoryLevel::L1)
+            || !scalar.is_contiguous()
+            || broadcast.level() != CpuMemoryLevel::VRF
+            || !broadcast.is_contiguous()
+        {
+            continue;
+        }
+
+        // The non-VRF side must be a scalar.
+        if scalar.shape().iter().any(|d| d.get() != 1) {
+            continue;
+        }
+
+        // Vector sizing must line up with the output.
+        if broadcast.vector_size() != Some(out_vector_size)
+            || !broadcast
+                .volume()
+                .get()
+                .is_multiple_of(out_vector_size.get())
+        {
+            continue;
+        }
+
+        let (b_dim1, b_dim2) = match broadcast_idx {
+            0 => (op0_dim1, op0_dim2),
+            1 => (op1_dim1, op1_dim2),
+            _ => unreachable!(),
+        };
+        let (s_dim1, s_dim2) = match scalar_idx {
+            0 => (op0_dim1, op0_dim2),
+            1 => (op1_dim1, op1_dim2),
+            _ => unreachable!(),
+        };
+
+        // Two acceptable orientations:
+        // 1) Scalar is lhs: scalar dims [B, M, 1], broadcast dims [B, 1, N].
+        // 2) Scalar is rhs: scalar dims [B, 1, N], broadcast dims [B, M, 1].
+        if s_dim1 == out_dim1 && s_dim2.get() == 1 && b_dim1.get() == 1 && b_dim2 == out_dim2 {
+            return Some((scalar_idx, broadcast_idx));
+        }
+        if s_dim1.get() == 1 && s_dim2 == out_dim2 && b_dim1 == out_dim1 && b_dim2.get() == 1 {
+            return Some((scalar_idx, broadcast_idx));
+        }
+    }
+
+    None
+}
+
+pub fn broadcastvecmult_bf16_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
+where
+    Tgt: Target,
+    Tgt::Level: PartialEq<CpuMemoryLevel>,
+{
+    debug_assert_eq!(operands.len(), 3);
+
     let scalar_level = operands[0].level();
     if scalar_level != CpuMemoryLevel::RF && scalar_level != CpuMemoryLevel::L1 {
         return false;
@@ -2217,6 +2310,19 @@ mod tests {
             ),
             "Expected OutOfMemory error, got {act_unchecked_application:?}",
         );
+    }
+
+    #[test]
+    fn test_broadcastvecmultadd_rhs_broadcast_param_order() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 8, 1, 1],
+            (f32, CpuMemoryLevel::VRF, row_major, 8),
+            (f32, CpuMemoryLevel::L1, row_major),
+            (f32, CpuMemoryLevel::VRF, row_major, 8),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::BroadcastVecMultAdd.applies_to_logical_spec(&logical_spec));
     }
 
     #[test]
