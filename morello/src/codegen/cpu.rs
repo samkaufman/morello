@@ -3,6 +3,7 @@ use nonzero::nonzero as nz;
 use std::collections::HashMap;
 use std::fmt::{self, Write};
 use std::iter;
+use std::marker::PhantomData;
 use std::rc::Rc;
 
 use super::c_utils::{c_type, printf_fmt, CBuffer, CName, InitType, VecType};
@@ -14,12 +15,11 @@ use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{unique_dims_per_axis, Loop};
 use crate::imp::pipeline::Pipeline;
-use crate::imp::Impl;
-use crate::imp::ImplNode;
+use crate::imp::{Impl, ImplNode};
 use crate::layout::BufferVar;
+use crate::opaque_symbol::OpaqueSymbol;
 use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
-
 use crate::target::{
     cpu::{
         dotproduct_accum_count, DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT,
@@ -34,12 +34,13 @@ const STACK_CUTOFF: u32 = 256;
 
 pub struct CpuCodeGenerator<Tgt: Target> {
     pub namer: NameGenerator,
-    pub name_env: HashMap<Rc<Tensor<Tgt>>, CBuffer>,
+    pub name_env: HashMap<OpaqueSymbol, CBuffer>,
     pub loop_iter_bindings: HashMap<BufferVar, Either<String, i32>>,
     pub headers: HeaderEmitter,
     pub kernel_name: String,
     pub thread_style: CpuCodeGenThreadStyle,
     pub benchmark: bool,
+    phantom: PhantomData<Tgt>,
 }
 
 #[derive(Default)]
@@ -107,7 +108,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }
             )?;
             self.name_env.insert(
-                Rc::clone(tensor),
+                tensor.identifier(),
                 CBuffer::Ptr {
                     name: parameter_name,
                 },
@@ -250,7 +251,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             buf.emit(&mut main_body_str, InitType::Zero, depth)?;
             parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
-            self.name_env.insert(Rc::clone(kernel_argument), buf);
+            self.name_env.insert(kernel_argument.identifier(), buf);
             writeln!(main_body_str)?;
         }
 
@@ -329,7 +330,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
         // Free the buffers.
         for kernel_argument in top_arg_tensors {
-            let buf = self.name_env.get(kernel_argument).unwrap();
+            let buf = self.name_env.get(&kernel_argument.identifier()).unwrap();
             buf.emit_free(&mut main_body_str, depth)?;
         }
 
@@ -372,7 +373,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
             buf.emit(&mut main_body_str, InitType::Random, depth)?;
             parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
-            self.name_env.insert(Rc::clone(kernel_argument), buf);
+            self.name_env.insert(kernel_argument.identifier(), buf);
             writeln!(main_body_str)?;
         }
 
@@ -410,7 +411,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
         // Free the buffers.
         for kernel_argument in top_arg_tensors {
-            let buf = self.name_env.get(kernel_argument).unwrap();
+            let buf = self.name_env.get(&kernel_argument.identifier()).unwrap();
             buf.emit_free(&mut main_body_str, depth)?;
         }
 
@@ -424,7 +425,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let mut kernel_call_str = String::new();
         write!(kernel_call_str, "{}(", self.kernel_name)?;
         for (i, kernel_argument) in top_arg_tensors.iter().enumerate() {
-            let a = self.name_env.get(kernel_argument).unwrap();
+            let a = self.name_env.get(&kernel_argument.identifier()).unwrap();
             write!(
                 kernel_call_str,
                 "{}{}",
@@ -499,7 +500,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         mut depth: usize,
         out: &mut W,
     ) -> Result<(), fmt::Error> {
-        let buffer = self.name_env.get(tensor).unwrap();
+        let buffer = self.name_env.get(&tensor.identifier()).unwrap();
         if buffer.needs_unroll() {
             unimplemented!();
         }
@@ -600,7 +601,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         .expect("tile should have backing tensor");
                     let backing_tensor_name = self
                         .name_env
-                        .get(backing_tensor)
+                        .get(&backing_tensor.identifier())
                         .expect("tile's backing tensor should have a name");
                     backing_tensor_name.needs_unroll()
                 }) {
@@ -622,7 +623,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             spec.level(),
                         );
                         dest_buffer.emit(w, InitType::None, depth)?;
-                        self.name_env.insert(Rc::new(tensor.clone()), dest_buffer);
+                        self.name_env.insert(tensor.identifier(), dest_buffer);
                     }
                     ViewE::CacheView(_) => (),
                     _ => unreachable!(),
@@ -637,7 +638,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }
 
                 if let ViewE::Tensor(tensor) = &alloc_binding.introduced {
-                    self.name_env.remove(tensor).unwrap().emit_free(w, depth)?;
+                    self.name_env
+                        .remove(&tensor.identifier())
+                        .unwrap()
+                        .emit_free(w, depth)?;
                 }
                 Ok(())
             }
@@ -663,13 +667,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 intermediate_spec.level(),
                             );
                             buffer.emit(w, InitType::None, depth)?;
-                            self.name_env.insert(Rc::clone(tensor_wiring), buffer);
+                            self.name_env.insert(tensor_wiring.identifier(), buffer);
                         }
                     }
                     self.emit(w, stage, depth)?;
                     if stage_idx > 0 {
                         for tensor in &wirings[stage_idx - 1].intermediate_tensors {
-                            let consumed_buffer = self.name_env.get(tensor).unwrap();
+                            let consumed_buffer = self.name_env.get(&tensor.identifier()).unwrap();
                             consumed_buffer.emit_free(w, depth)?;
                         }
                     }
@@ -735,7 +739,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     p.1.iter()
                         .map(|arg| {
                             let backing_tensor = arg.backing_tensor().unwrap();
-                            match self.name_env.get(backing_tensor).unwrap() {
+                            match self.name_env.get(&backing_tensor.identifier()).unwrap() {
                                 CBuffer::HeapArray { name, .. }
                                 | CBuffer::StackArray { name, .. }
                                 | CBuffer::Ptr { name, .. } => format!("{name}[_]"),
@@ -802,7 +806,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let input_vector_exprs = (0..vector_count)
                             .map(|vector_idx| {
                                 let backing_tensor = arguments[0].backing_tensor().unwrap();
-                                let buffer = self.name_env.get(backing_tensor).unwrap();
+                                let buffer =
+                                    self.name_env.get(&backing_tensor.identifier()).unwrap();
                                 let mut buffer_indexing_expr =
                                     arguments[0].make_buffer_indexing_expr();
                                 buffer_indexing_expr = zero_points(buffer_indexing_expr);
@@ -813,9 +818,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             .collect::<Vec<_>>();
 
                         let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(max_tensor).unwrap();
+                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
                         let out_tensor = arguments[2].backing_tensor().unwrap();
-                        let out_buffer = self.name_env.get(out_tensor).unwrap();
+                        let out_buffer = self.name_env.get(&out_tensor.identifier()).unwrap();
 
                         let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
                         let out_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
@@ -863,10 +868,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         debug_assert_eq!(input_vector_exprs.len(), unscaled_vector_exprs.len());
 
                         let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(max_tensor).unwrap();
+                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
                         let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
                         let denom_tensor = arguments[2].backing_tensor().unwrap();
-                        let denom_buffer = self.name_env.get(denom_tensor).unwrap();
+                        let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
                         let denom_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
 
                         for (input_vector_name, unscaled_vector_name) in
@@ -897,13 +902,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             .native_type_name;
 
                         let input_tensor = arguments[0].backing_tensor().unwrap();
-                        let input_buffer = self.name_env.get(input_tensor).unwrap();
+                        let input_buffer = self.name_env.get(&input_tensor.identifier()).unwrap();
                         let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(max_tensor).unwrap();
+                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
                         let denominator_tensor = arguments[2].backing_tensor().unwrap();
-                        let denominator_buffer = self.name_env.get(denominator_tensor).unwrap();
+                        let denominator_buffer =
+                            self.name_env.get(&denominator_tensor.identifier()).unwrap();
                         let output_tensor = arguments[3].backing_tensor().unwrap();
-                        let output_buffer = self.name_env.get(output_tensor).unwrap();
+                        let output_buffer = self.name_env.get(&output_tensor.identifier()).unwrap();
 
                         let inp_base_expr = zero_points(arguments[0].make_buffer_indexing_expr());
                         let max_expr = zero_points(arguments[1].make_buffer_indexing_expr());
@@ -983,7 +989,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let out_expr = {
                             let backing_tensor = arguments[1].backing_tensor().unwrap();
-                            let buffer = self.name_env.get(backing_tensor).unwrap();
+                            let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
                             let mut buffer_indexing_expr = arguments[1].make_buffer_indexing_expr();
                             buffer_indexing_expr = zero_points(buffer_indexing_expr);
                             self.c_index(buffer, &buffer_indexing_expr, None)
@@ -1045,9 +1051,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 .unwrap();
 
                         let lhs_tensor = arguments[0].backing_tensor().unwrap();
-                        let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
+                        let lhs_buffer = self.name_env.get(&lhs_tensor.identifier()).unwrap();
                         let rhs_tensor = arguments[1].backing_tensor().unwrap();
-                        let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
+                        let rhs_buffer = self.name_env.get(&rhs_tensor.identifier()).unwrap();
 
                         let lhs_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
                         let rhs0_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
@@ -1068,7 +1074,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
                         debug_assert_eq!(arguments.len(), 1);
                         let backing_tensor = arguments[0].backing_tensor().unwrap();
-                        let buffer = self.name_env.get(backing_tensor).unwrap();
+                        let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
                         let mut buffer_indexing_expr = arguments[0].make_buffer_indexing_expr();
                         buffer_indexing_expr = zero_points(buffer_indexing_expr);
                         let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
@@ -1148,7 +1154,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 .iter()
                                 .map(|arg| {
                                     let backing_tensor = arg.backing_tensor().unwrap();
-                                    let buffer = self.name_env.get(backing_tensor).unwrap();
+                                    let buffer =
+                                        self.name_env.get(&backing_tensor.identifier()).unwrap();
                                     let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
                                     buffer_indexing_expr = zero_points(buffer_indexing_expr);
                                     buffer_indexing_expr +=
@@ -1810,7 +1817,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         ]
                         .into_iter()
                         .map(|(arg, idx)| {
-                            let buffer = self.name_env.get(arg.backing_tensor().unwrap()).unwrap();
+                            let buffer = self
+                                .name_env
+                                .get(&arg.backing_tensor().unwrap().identifier())
+                                .unwrap();
                             let buffer_indexing_expr =
                                 zero_points(arg.make_buffer_indexing_expr()) + idx;
                             self.c_index_vec(buffer, &buffer_indexing_expr, None)
@@ -1847,7 +1857,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         ]
                         .into_iter()
                         .map(|(arg, idx)| {
-                            let buffer = self.name_env.get(arg.backing_tensor().unwrap()).unwrap();
+                            let buffer = self
+                                .name_env
+                                .get(&arg.backing_tensor().unwrap().identifier())
+                                .unwrap();
                             let buffer_indexing_expr =
                                 zero_points(arg.make_buffer_indexing_expr()) + idx;
                             self.c_index_vec(buffer, &buffer_indexing_expr, None)
@@ -1907,9 +1920,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     CpuKernel::VectorInterleaveBf16F32 => {
                         let lhs_tensor = arguments[0].backing_tensor().unwrap();
-                        let lhs_buffer = self.name_env.get(lhs_tensor).unwrap();
+                        let lhs_buffer = self.name_env.get(&lhs_tensor.identifier()).unwrap();
                         let rhs_tensor = arguments[1].backing_tensor().unwrap();
-                        let rhs_buffer = self.name_env.get(rhs_tensor).unwrap();
+                        let rhs_buffer = self.name_env.get(&rhs_tensor.identifier()).unwrap();
 
                         let lhs_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
                         let rhs0_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
@@ -2195,7 +2208,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             .enumerate()
             .map(|(idx, arg)| {
                 let backing_tensor = arg.backing_tensor().unwrap();
-                let buffer = self.name_env.get(backing_tensor).unwrap();
+                let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
                 let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
                 buffer_indexing_expr = zero_points(buffer_indexing_expr);
                 f(idx, buffer, &buffer_indexing_expr)
@@ -2330,7 +2343,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         (0..vector_count)
             .map(|vector_idx| {
                 let backing_tensor = tensor.backing_tensor().unwrap();
-                let buffer = self.name_env.get(backing_tensor).unwrap();
+                let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
                 let mut buffer_indexing_expr = tensor.make_buffer_indexing_expr();
                 buffer_indexing_expr = zero_points(buffer_indexing_expr);
                 buffer_indexing_expr += i32::try_from(vector_size.get() * vector_idx).unwrap();
@@ -2380,6 +2393,7 @@ impl<Tgt: Target> Default for CpuCodeGenerator<Tgt> {
             kernel_name: String::from("kernel"),
             thread_style: Default::default(),
             benchmark: false,
+            phantom: PhantomData,
         }
     }
 }
