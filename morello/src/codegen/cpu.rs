@@ -1,6 +1,6 @@
 use itertools::{Either, Itertools};
 use nonzero::nonzero as nz;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write};
 use std::iter;
 use std::marker::PhantomData;
@@ -31,6 +31,8 @@ use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
 
 const STACK_CUTOFF: u32 = 256;
+/// Hoist ImplNode::Alloc buffers to the function prologue when true.
+const HOIST_ALLOCS: bool = false;
 
 pub struct CpuCodeGenerator<Tgt: Target> {
     pub namer: NameGenerator,
@@ -41,6 +43,12 @@ pub struct CpuCodeGenerator<Tgt: Target> {
     pub thread_style: CpuCodeGenThreadStyle,
     pub benchmark: bool,
     phantom: PhantomData<Tgt>,
+}
+
+#[derive(Debug)]
+struct HoistedAlloc {
+    id: OpaqueSymbol,
+    buffer: CBuffer,
 }
 
 #[derive(Default)]
@@ -56,6 +64,40 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             benchmark,
             ..Self::default()
         }
+    }
+
+    fn plan_hoisted_allocs(&mut self, imp: &ImplNode<Tgt>) -> Vec<HoistedAlloc> {
+        fn collect<Tgt: CpuTarget>(
+            this: &mut CpuCodeGenerator<Tgt>,
+            imp: &ImplNode<Tgt>,
+            hoisted: &mut Vec<HoistedAlloc>,
+            seen: &mut HashSet<OpaqueSymbol>,
+        ) {
+            if let ImplNode::Alloc(alloc_binding) = imp {
+                if let ViewE::Tensor(tensor) = &alloc_binding.introduced {
+                    let id = tensor.identifier();
+                    if seen.insert(id) {
+                        let spec = alloc_binding.introduced.spec();
+                        let buffer = this.make_buffer(
+                            spec.shape(),
+                            spec.vector_size(),
+                            spec.dtype(),
+                            spec.level(),
+                        );
+                        hoisted.push(HoistedAlloc { id, buffer });
+                    }
+                }
+            }
+
+            for child in imp.children() {
+                collect(this, child, hoisted, seen);
+            }
+        }
+
+        let mut hoisted = Vec::new();
+        let mut seen: HashSet<OpaqueSymbol> = HashSet::new();
+        collect(self, imp, &mut hoisted, &mut seen);
+        hoisted
     }
 
     /// Write a pretty-printed Impl as a C comment.
@@ -138,7 +180,23 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let beta_reduced_imp = imp
             .clone()
             .bind(&mut |param_idx| tensors_as_viewe.get(usize::from(param_idx)).cloned());
+
+        let hoisted_allocs = if HOIST_ALLOCS {
+            self.plan_hoisted_allocs(&beta_reduced_imp)
+        } else {
+            Vec::new()
+        };
+        for hoisted in &hoisted_allocs {
+            hoisted.buffer.emit(&mut main_body_str, InitType::None, 1)?;
+            self.name_env.insert(hoisted.id, hoisted.buffer.clone());
+        }
+
         self.emit(&mut main_body_str, &beta_reduced_imp, 1)?;
+
+        for hoisted in &hoisted_allocs {
+            hoisted.buffer.emit_free(&mut main_body_str, 1)?;
+            self.name_env.remove(&hoisted.id);
+        }
 
         writeln!(main_body_str, "}}")?;
 
@@ -611,21 +669,26 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }
             }
             ImplNode::Alloc(alloc_binding) => {
-                match &alloc_binding.introduced {
+                let (introduced_tensor_id, already_bound) = match &alloc_binding.introduced {
                     ViewE::Tensor(tensor) => {
-                        // Emit variable declaration(s) and store association between the
-                        // CBuffer and Tensor.
-                        let spec = alloc_binding.introduced.spec();
-                        let dest_buffer = self.make_buffer(
-                            spec.shape(),
-                            spec.vector_size(),
-                            spec.dtype(),
-                            spec.level(),
-                        );
-                        dest_buffer.emit(w, InitType::None, depth)?;
-                        self.name_env.insert(tensor.identifier(), dest_buffer);
+                        let tensor_id = tensor.identifier();
+                        let already_bound = self.name_env.contains_key(&tensor_id);
+                        if !already_bound {
+                            // Emit variable declaration(s) and store association between the
+                            // CBuffer and Tensor.
+                            let spec = alloc_binding.introduced.spec();
+                            let dest_buffer = self.make_buffer(
+                                spec.shape(),
+                                spec.vector_size(),
+                                spec.dtype(),
+                                spec.level(),
+                            );
+                            dest_buffer.emit(w, InitType::None, depth)?;
+                            self.name_env.insert(tensor_id, dest_buffer);
+                        }
+                        (Some(tensor_id), already_bound)
                     }
-                    ViewE::CacheView(_) => (),
+                    ViewE::CacheView(_) => (None, false),
                     _ => unreachable!(),
                 };
 
@@ -637,11 +700,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     self.emit(w, epilogue, depth)?;
                 }
 
-                if let ViewE::Tensor(tensor) = &alloc_binding.introduced {
-                    self.name_env
-                        .remove(&tensor.identifier())
-                        .unwrap()
-                        .emit_free(w, depth)?;
+                if let Some(tensor_id) = introduced_tensor_id {
+                    if !already_bound {
+                        self.name_env
+                            .remove(&tensor_id)
+                            .unwrap()
+                            .emit_free(w, depth)?;
+                    }
                 }
                 Ok(())
             }
