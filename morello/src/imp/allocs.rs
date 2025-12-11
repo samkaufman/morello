@@ -8,6 +8,9 @@ use crate::tensorspec::TensorSpec;
 use crate::views::{View, ViewE};
 use std::iter;
 
+const STACK_ALLOC_CUTOFF_BYTES: u64 = 256;
+const HEAP_ALLOCATION_COST: MainCost = 100;
+
 #[derive(Debug, Clone)]
 pub struct Alloc<Tgt: Target> {
     pub parameter_idx: u8,
@@ -89,8 +92,8 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        let mut cost = move_cost(&self.source_spec);
-        cost += move_cost(self.introduced.spec());
+        let mut cost = move_cost(&self.source_spec, false);
+        cost += move_cost(self.introduced.spec(), true);
         child_costs.iter().fold(cost, |a, &b| a.saturating_add(b))
     }
 
@@ -153,7 +156,10 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
     }
 }
 
-pub(crate) fn move_cost<Tgt: Target>(accessed: &TensorSpec<Tgt>) -> MainCost {
+pub(crate) fn move_cost<Tgt: Target>(
+    accessed: &TensorSpec<Tgt>,
+    apply_heap_penalty: bool,
+) -> MainCost {
     let hit_cost = accessed.level().cache_hit_cost();
     let mut cost = 0;
     if accessed.level().has_layout() {
@@ -169,7 +175,18 @@ pub(crate) fn move_cost<Tgt: Target>(accessed: &TensorSpec<Tgt>) -> MainCost {
     if !accessed.is_contiguous() {
         cost *= 2;
     }
+    if apply_heap_penalty
+        && !accessed.level().counts_registers()
+        && !alloc_on_stack(accessed.level(), accessed.bytes_used())
+    {
+        cost = cost.saturating_add(HEAP_ALLOCATION_COST);
+    }
     cost
+}
+
+pub(crate) fn alloc_on_stack<L: MemoryLevel>(level: L, bytes_used: u64) -> bool {
+    debug_assert!(!level.counts_registers());
+    bytes_used <= STACK_ALLOC_CUTOFF_BYTES
 }
 
 pub(crate) fn alloc_memory_allocation<Tgt: Target>(

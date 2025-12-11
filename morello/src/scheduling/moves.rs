@@ -113,7 +113,8 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
             &self.destination_layout,
             self.destination_vector_size,
         )?;
-        let base_main_cost = move_cost(plan.outer_moved_operand_spec) + move_cost(&plan.new_spec);
+        let base_main_cost =
+            move_cost(plan.outer_moved_operand_spec, false) + move_cost(&plan.new_spec, true);
         let allocation = alloc_memory_allocation(&plan.new_spec);
         Ok(MoveActionSolver {
             prologue: plan.prologue_spec,
