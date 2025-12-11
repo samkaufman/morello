@@ -54,7 +54,7 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
         let mut cost: MainCost = 0;
         for wiring in &self.wirings {
             for t in &wiring.intermediate_tensors {
-                cost = cost.saturating_add(move_cost(t.spec()));
+                cost = cost.saturating_add(move_cost(t.spec(), false));
             }
         }
         for child_cost in child_costs {

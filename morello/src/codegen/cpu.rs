@@ -11,6 +11,7 @@ use super::header::HeaderEmitter;
 use super::namegen::NameGenerator;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, Bounds as _, NonAffine, NonAffineExpr, Substitute, Term};
+use crate::imp::allocs::alloc_on_stack;
 use crate::imp::blocks::Block;
 use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{unique_dims_per_axis, Loop};
@@ -29,8 +30,6 @@ use crate::target::{
 };
 use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
-
-const STACK_CUTOFF: u32 = 256;
 
 pub struct CpuCodeGenerator<Tgt: Target> {
     pub namer: NameGenerator,
@@ -575,10 +574,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             },
             CpuMemoryLevel::L1 | CpuMemoryLevel::GL => {
                 let name = self.namer.fresh_name();
-                if size * u32::from(dtype.size()) > STACK_CUTOFF {
-                    CBuffer::HeapArray { name, size, dtype }
-                } else {
+                let bytes_used = u64::from(dtype.size()) * u64::from(size);
+                let stack_alloc = alloc_on_stack(level, bytes_used);
+                if stack_alloc {
                     CBuffer::StackArray { name, size, dtype }
+                } else {
+                    CBuffer::HeapArray { name, size, dtype }
                 }
             }
         }
