@@ -2579,7 +2579,21 @@ mod tests {
                 },
             )
             .prop_flat_map(|(spec, tile_a)| {
-                let tile_b_dims = tile_a.iter().map(|&d| 1..=d).collect::<Vec<_>>();
+                let tile_a_for_b = tile_a.clone();
+                let tile_b_dims =
+                    prop::collection::vec(any::<u32>(), tile_a.len()).prop_map(move |choices| {
+                        choices
+                            .into_iter()
+                            .zip(tile_a_for_b.iter())
+                            .map(|(choice, &dim)| {
+                                let divisors: Vec<u32> =
+                                    (1..=dim).filter(|candidate| dim % candidate == 0).collect();
+                                let idx = (choice as usize) % divisors.len();
+                                divisors[idx]
+                            })
+                            .collect::<Vec<u32>>()
+                    });
+
                 (Just(spec), Just(tile_a), tile_b_dims, any::<bool>())
             })
             .prop_filter(
