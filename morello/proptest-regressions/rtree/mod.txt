@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 94c9a7cc191149a684b6035b141f1e742745f0693e339c19d9a01468116c81ae # shrinks to rects = [RTreeRect { top: RTreePt { arr: [1, 3, 2] }, bottom: RTreePt { arr: [0, 1, 1] }, value: 1 }, RTreeRect { top: RTreePt { arr: [3, 4, 3] }, bottom: RTreePt { arr: [1, 3, 1] }, value: 0 }], insert_mode = Merge
