@@ -311,6 +311,20 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             value,
         };
 
+        // TODO: Implement without requiring a separate locate_ traversal.
+        if disallow_overlap {
+            let new_envelope = new_rect.envelope();
+            for candidate in self.locate_in_envelope_intersecting(&new_envelope) {
+                if candidate.value != new_rect.value
+                    && candidate.envelope().intersects(&new_envelope)
+                {
+                    panic!(
+                        "New rectangle overlaps with existing rectangle that has a different value"
+                    );
+                }
+            }
+        }
+
         // Find the first rectangle which matches except for one dimension which is larger or
         // matches (and has the same cost).
         let mut to_remove = BatchRemoveSelFn::<RTreeRect<D, T>>::default();
@@ -1036,9 +1050,10 @@ mod tests {
         );
     }
 
-    // TODO: Re-enable the below test when `merge_insert` panics instead of warns again.
     // #[test]
-    // #[should_panic(expected = "new rectangle overlaps")]
+    // #[should_panic(
+    //     expected = "New rectangle overlaps with existing rectangle that has a different value"
+    // )]
     // fn test_merge_insert_disallow_overlap_different_values() {
     //     let mut tree = RTree::<RTreeRect<2, _>>::new();
     //     tree.merge_insert(&[0, 0], &[2, 2], "a", false);
@@ -1393,7 +1408,7 @@ mod tests {
         }
 
         #[test]
-        fn test_rtree_never_contains_overlaps(
+        fn test_rtree_never_contains_overlaps_per_value(
             rects in proptest::collection::vec(arb_rect::<3>(), 2..=3),
             insert_mode in any::<InsertMode>(),
         ) {
@@ -1402,7 +1417,7 @@ mod tests {
                 // Box values so that we can later compare memory addresses to determine
                 // whether a rects are the same.
                 match insert_mode {
-                    InsertMode::Merge => tree.merge_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), true),
+                    InsertMode::Merge => tree.merge_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), false),
                     InsertMode::Fold => tree.fold_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), false, |a, _| a),
                     InsertMode::FoldMerging => tree.fold_insert(&r.bottom.arr, &r.top.arr, Rc::new(r.value), true, |a, _| a),
                 };
