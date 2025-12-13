@@ -1455,9 +1455,9 @@ impl CpuKernel {
                 // TODO: Adjust the TwoVecBroadcastVecMultAddU8S8S16 cost.
                 // TODO: Model cost for BroadcastVecMultAddBf16F32 correctly.
 
-                let vec_tensor_spec = &parameters[1].spec();
-                let vector_size = vec_tensor_spec.vector_size().unwrap().get();
-                let volume = vec_tensor_spec.volume().get();
+                let out_spec = parameters.last().unwrap().spec();
+                let vector_size = out_spec.vector_size().unwrap().get();
+                let volume = out_spec.volume().get();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
                 let mut cost = INST_COST * ((vector_count * 2) + 1);
