@@ -284,7 +284,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
                 let peaks = move_solver
                     .allocation
                     .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
-                    .snap_up_for_target::<Tgt>(false);
+                    .snap_up_for_target::<Tgt>();
                 Cost { main, peaks, depth }
             }
             ActionSolver::Fallback(partial_impl) => {

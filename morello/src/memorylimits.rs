@@ -13,10 +13,6 @@ use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
 use std::{iter, ops::Sub};
 
-// If true, schedules will be saved as if they had memory limits, for all banks,
-// that are the next highest power of 2. This discretizes cache line counts.
-const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
-
 /// MemoryLimits are bounds on available memory for each level of a target.
 ///
 /// There are two variants. `MemoryLimits::Standard` counts the number of registers for
@@ -477,12 +473,10 @@ impl MemVec {
         self
     }
 
-    /// Snaps memory values up to the next power of two if SNAP_CAP_TO_POWER_OF_TWO is enabled
-    /// or if `always` is true. Only applies to non-register-counting levels.
-    pub fn snap_up_for_target<Tgt: Target>(self, always: bool) -> MemVec {
-        if !SNAP_CAP_TO_POWER_OF_TWO && !always {
-            return self;
-        }
+    /// Snaps memory values up to the next power of two.
+    ///
+    /// Only applies to non-register-counting levels.
+    pub fn snap_up_for_target<Tgt: Target>(self) -> MemVec {
         let levels = Tgt::levels();
         let mut result = self;
         for (i, level) in levels.iter().enumerate() {

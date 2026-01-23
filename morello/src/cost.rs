@@ -64,7 +64,7 @@ impl Cost {
         let raised_peaks = imp
             .memory_allocated()
             .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
-            .snap_up_for_target::<Tgt>(false);
+            .snap_up_for_target::<Tgt>();
         Cost {
             main: main_cost,
             peaks: raised_peaks,
