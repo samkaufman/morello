@@ -1270,10 +1270,7 @@ fn reindex_loop_tile_param<Tgt: Target>(loop_tile: &mut LoopTile<Tgt>, new_param
     if old_parameter_index == new_parameter_index {
         return;
     }
-    loop_tile.tile.view = Box::new(reindex_view_param(
-        (*loop_tile.tile.view).clone(),
-        new_parameter_index,
-    ));
+    *loop_tile.tile.view = reindex_view_param((*loop_tile.tile.view).clone(), new_parameter_index);
     loop_tile.parameter_index = new_parameter_index;
 }
 
