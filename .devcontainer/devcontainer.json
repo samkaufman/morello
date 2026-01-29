@@ -5,8 +5,8 @@
 	"build": { "dockerfile": "Dockerfile" },
 	"containerEnv": {
 		"RUST_LOG": "info",
-		"CLANG": "/usr/bin/clang-16",
-		"CC": "/usr/bin/clang-16"
+		"CLANG": "/usr/bin/clang-18",
+		"CC": "/usr/bin/clang-18"
 	},
 	"customizations": {
 		"vscode": {
