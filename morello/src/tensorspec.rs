@@ -564,6 +564,7 @@ pub(crate) fn gen_vector_sizes(
     );
     vector_bytes.iter().map(move |&vb| {
         let value_cnt = vb / u32::from(dtype.size());
+        debug_assert!(value_cnt > 1, "Target vector sizes must be greater than 1.");
         DimSize::new(value_cnt).unwrap()
     })
 }

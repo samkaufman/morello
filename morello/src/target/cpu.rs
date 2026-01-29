@@ -120,8 +120,7 @@ pub enum CpuKernel {
     VectorMax, // TODO: Add F32 to name
     VecScalarAssign,
     DivideVec,
-    ValueAssign,
-    VectorAssign,
+    Assign,
     MemsetZero,
     /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
     VectorZero,
@@ -401,9 +400,8 @@ impl<T: CpuTarget> Target for T {
                     }
                 }
                 PrimitiveSpecType::Move => {
-                    const MOVE_KERNELS: [CpuKernel; 8] = [
-                        CpuKernel::ValueAssign,
-                        CpuKernel::VectorAssign,
+                    const MOVE_KERNELS: [CpuKernel; 7] = [
+                        CpuKernel::Assign,
                         CpuKernel::PhysicalTransposeByte128,
                         CpuKernel::PhysicalTransposeByte256,
                         CpuKernel::VectorInterleaveBf16F32,
@@ -631,8 +629,7 @@ impl CpuKernel {
             | CpuKernel::VectorDeinterleaveF32Bf16
             | CpuKernel::ValueMax
             | CpuKernel::VectorMax
-            | CpuKernel::ValueAssign
-            | CpuKernel::VectorAssign
+            | CpuKernel::Assign
             | CpuKernel::CastBf16F32
             | CpuKernel::VectorCastBf16F32
             | CpuKernel::VecScalarAssign => 2,
@@ -1178,36 +1175,30 @@ impl CpuKernel {
 
                 true
             }
-            CpuKernel::ValueAssign => {
+            CpuKernel::Assign => {
                 debug_assert_eq!(operands.len(), 2);
 
                 if !matches!(typ, PrimitiveSpecType::Move) {
                     return false;
                 }
 
-                if operands
+                let is_scalar = operands
                     .iter()
                     .flat_map(|o| o.shape())
-                    .any(|d| d.get() != 1)
-                {
-                    return false;
-                }
-
-                for o in &operands[1..] {
-                    if (o.dtype(), o.layout()) != (operands[0].dtype(), operands[0].layout()) {
-                        return false;
+                    .all(|d| d.get() == 1);
+                if is_scalar {
+                    for o in &operands[1..] {
+                        if (o.dtype(), o.layout()) != (operands[0].dtype(), operands[0].layout()) {
+                            return false;
+                        }
                     }
+
+                    return operands.iter().any(|o| o.level() == CpuMemoryLevel::RF)
+                        && operands.iter().all(|o| {
+                            o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1
+                        });
                 }
 
-                operands.iter().any(|o| o.level() == CpuMemoryLevel::RF)
-                    && operands
-                        .iter()
-                        .all(|o| o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1)
-            }
-            CpuKernel::VectorAssign => {
-                if !matches!(typ, PrimitiveSpecType::Move) {
-                    return false;
-                }
                 if operands.iter().any(|o| !o.is_contiguous()) {
                     return false;
                 }
@@ -1542,15 +1533,23 @@ impl CpuKernel {
             CpuKernel::VectorCastBf16F32 => 6 * INST_COST, // RThroughput = 3
             CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
-            CpuKernel::VectorAssign => {
-                let vector_value_count = parameters[0]
-                    .spec()
-                    .vector_size()
-                    .unwrap_or_else(|| parameters[1].spec().vector_size().unwrap());
-                let vec_count = parameters[0].spec().volume().get() / vector_value_count.get();
-                ASSIGN_INST_COST * vec_count
+            CpuKernel::Assign => {
+                let is_scalar = parameters
+                    .iter()
+                    .flat_map(|parameter| parameter.spec().shape())
+                    .all(|d| d.get() == 1);
+                if is_scalar {
+                    ASSIGN_INST_COST
+                } else {
+                    let vector_value_count = parameters[0]
+                        .spec()
+                        .vector_size()
+                        .unwrap_or_else(|| parameters[1].spec().vector_size().unwrap());
+                    let vec_count = parameters[0].spec().volume().get() / vector_value_count.get();
+                    ASSIGN_INST_COST * vec_count
+                }
             }
-            CpuKernel::ValueAssign | CpuKernel::MemsetZero => ASSIGN_INST_COST,
+            CpuKernel::MemsetZero => ASSIGN_INST_COST,
             CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
                 debug_assert_eq!(
                     parameters[0].spec().volume().get(),
@@ -2326,7 +2325,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vectorassign_main_cost() {
+    fn test_assign_main_cost() {
         let arg0 = TensorSpec::new_canon(
             shape![2, 32],
             Dtype::Uint32,
@@ -2343,7 +2342,7 @@ mod tests {
         );
         let parameter0: Param<Avx2Target> = Param::new(0, arg0);
         let parameter1: Param<Avx2Target> = Param::new(1, arg1);
-        let cost = CpuKernel::VectorAssign.main_cost(&[parameter0, parameter1]);
+        let cost = CpuKernel::Assign.main_cost(&[parameter0, parameter1]);
         assert_eq!(cost, 8 * ASSIGN_INST_COST);
     }
 

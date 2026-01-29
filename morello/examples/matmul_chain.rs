@@ -132,17 +132,17 @@ fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
                 .move_param(0, L1)
                 .move_param(1, L1)
                 .move_param(0, RF)
-                .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
-                .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
+                .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
+                .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
         })
         .subschedule(&[1, 0], |m| {
-            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::Assign)
         })
         .subschedule(&[1, 1, 0], |m| {
-            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::Assign)
         })
         .subschedule(&[1, 2], |m| {
-            m.tile_out(&[1, 1, 8]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 8]).select(CpuKernel::Assign)
         })
 }
 
@@ -210,9 +210,7 @@ fn schedule_zero(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .subschedule(&[0], |s| {
             s.tile_out(&[1, 1, 1]).select(CpuKernel::MemsetZero)
         })
-        .subschedule(&[1], |s| {
-            s.tile_out(&[1, 1, 1]).select(CpuKernel::ValueAssign)
-        })
+        .subschedule(&[1], |s| s.tile_out(&[1, 1, 1]).select(CpuKernel::Assign))
 }
 
 fn layout_b() -> Layout {

@@ -114,19 +114,19 @@ fn main() {
     //           tile (ag: (1×64, u32, L1) <-[0, 2]- ad, ah: (64×1, u32, L1, c1) <-[3, 1]- ae, ai: (1×1, u32, L1) <-[0, 1]- af)
     //               alloc aj: (1×1, u32, RF)
     //                 MemsetZero(aj)
-    //                 ValueAssign(aj, ai)
+    //                 Assign(aj, ai)
     //               tile (ak: (1×4, u32, L1) <-[0, 1]- ag, al: (4×1, u32, L1, c1) <-[1, 2]- ah)
     //                 alloc am: (1×4, u32, RF)
     //                   tile (an: (1×1, u32, L1) <-[0, 1]- ak, ao: (1×1, u32, RF) <-[0, 1]- am)
-    //                     ValueAssign(an, ao)
+    //                     Assign(an, ao)
     //                   alloc ap: (4×1, u32, RF)
     //                     tile (aq: (1×1, u32, L1) <-[0, 1]- al, ar: (1×1, u32, RF) <-[0, 1]- ap)
-    //                       ValueAssign(aq, ar)
+    //                       Assign(aq, ar)
     //                     alloc as: (1×1, u32, RF)
-    //                       ValueAssign(ai, as)
+    //                       Assign(ai, as)
     //                       tile (at: (1×1, u32, RF) <-[0, 1]- am, au: (1×1, u32, RF) <-[1, 2]- ap)
     //                         MultAdd(at, au, as)
-    //                       ValueAssign(as, ai)
+    //                       Assign(as, ai)
     //
 
     println!("\nImpl resulting from manual scheduling:");
@@ -216,23 +216,21 @@ fn main() {
 fn zero_schedule(zero: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     zero.move_param(0, CpuMemoryLevel::RF)
         .subschedule(&[0], |z| z.select(CpuKernel::MemsetZero))
-        .subschedule(&[1], |move_back| move_back.select(CpuKernel::ValueAssign))
+        .subschedule(&[1], |move_back| move_back.select(CpuKernel::Assign))
 }
 
 /// Schedules the given Move Spec.
 ///
 /// Specifically, this checks if the Move's tensor is a single value. If it is, it directly assigns
-/// the value using the `ValueAssign` kernel. If not, it tiles the tensor and then assigns the values
-/// using the `ValueAssign` kernel.
+/// the value using the `Assign` kernel. If not, it tiles the tensor and then assigns the values
+/// using the `Assign` kernel.
 fn move_schedule(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let is_single_value = move_spec.0.parameter_shapes()[0]
         .iter()
         .all(|size| size.get() == 1);
     if is_single_value {
-        move_spec.select(CpuKernel::ValueAssign)
+        move_spec.select(CpuKernel::Assign)
     } else {
-        move_spec
-            .tile_out(&[1, 1, 1])
-            .select(CpuKernel::ValueAssign)
+        move_spec.tile_out(&[1, 1, 1]).select(CpuKernel::Assign)
     }
 }

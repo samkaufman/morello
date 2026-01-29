@@ -153,8 +153,8 @@ fn naive_scalar_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> 
         .move_relayout(0, L1, row_major, None)
         .move_relayout(1, L1, row_major, None)
         .move_relayout(0, RF, row_major, None)
-        .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
-        .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
+        .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
+        .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
 }
 
 fn naive_vector_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
@@ -173,7 +173,7 @@ fn naive_vector_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> 
         .into_iter()
         .any(|p| p.level().vector_rf())
     {
-        imp.select(CpuKernel::VectorAssign)
+        imp.select(CpuKernel::Assign)
     } else {
         imp
     }

@@ -40,8 +40,8 @@ fn main() {
                 .move_param(0, L1)
                 .move_param(1, L1)
                 .move_param(0, RF)
-                .subschedule(&[0], |m0| m0.select(CpuKernel::ValueAssign))
-                .subschedule(&[1], |m0| m0.select(CpuKernel::ValueAssign))
+                .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
+                .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
         })
         .tile_out(&[1, 128, 1024])
         .tile_out(&[1, 6, 16])
@@ -64,15 +64,15 @@ fn main() {
                 .select(CpuKernel::BroadcastVecMultAdd)
         })
         .subschedule(&[1, 0, 0], |m| {
-            m.tile_out(&[1, 1, 16]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 16]).select(CpuKernel::Assign)
         })
         .subschedule(&[1, 0, 2], |m| {
-            m.tile_out(&[1, 1, 16]).select(CpuKernel::VectorAssign)
+            m.tile_out(&[1, 1, 16]).select(CpuKernel::Assign)
         })
-        .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::VectorAssign))
-        .subschedule(&[1, 0, 1, 0], |m| m.select(CpuKernel::VectorAssign))
-        .subschedule(&[1, 1, 1, 0], |m| m.select(CpuKernel::VectorAssign))
-        .subschedule(&[1, 1, 1, 2], |m| m.select(CpuKernel::VectorAssign));
+        .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::Assign))
+        .subschedule(&[1, 0, 1, 0], |m| m.select(CpuKernel::Assign))
+        .subschedule(&[1, 1, 1, 0], |m| m.select(CpuKernel::Assign))
+        .subschedule(&[1, 1, 1, 2], |m| m.select(CpuKernel::Assign));
 
     implementation
         .emit(

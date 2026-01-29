@@ -42,11 +42,11 @@ fn main() {
             z.tile_out(&[1, 1, 16])
                 .move_param(0, L1)
                 .move_relayout(0, VRF, row_major, Some(16))
-                .subschedule(&[0], |z| z.select(CpuKernel::VectorAssign))
+                .subschedule(&[0], |z| z.select(CpuKernel::Assign))
                 .subschedule(&[1], |z| {
                     z.move_relayout(1, VRF, interleaved.clone(), Some(8))
                         .subschedule(&[0], |z| z.select(CpuKernel::VectorInterleaveBf16F32))
-                        .subschedule(&[1], |z| z.select(CpuKernel::VectorAssign))
+                        .subschedule(&[1], |z| z.select(CpuKernel::Assign))
                 })
         })
         .tile_out_parallel(&[1, 1, 128])
@@ -57,7 +57,7 @@ fn main() {
         .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::MemsetZero))
         .move_param(1, L1)
         .select(CpuKernel::DotProductLoopF32InterleavedBf16F32)
-        .subschedule(&[1, 1], |body| body.select(CpuKernel::ValueAssign));
+        .subschedule(&[1, 1], |body| body.select(CpuKernel::Assign));
 
     implementation
         .emit(

@@ -1033,11 +1033,59 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             exprs[1]
                         )
                     }
-                    CpuKernel::ValueAssign => {
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
+                    CpuKernel::Assign => {
+                        let is_scalar = arguments
+                            .iter()
+                            .flat_map(|arg| arg.spec().shape())
+                            .all(|d| d.get() == 1);
+                        if is_scalar {
+                            let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
+                                self.c_index(a, b, None)
+                            });
+                            return writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0]);
+                        }
+
+                        let first_spec = arguments[0].spec();
+                        let second_spec = arguments[1].spec();
+
+                        let vector_size = first_spec.vector_size().unwrap_or_else(|| {
+                            second_spec.vector_size().unwrap_or_else(|| {
+                                panic!(
+                                    "neither Spec had a vector size: {first_spec} and {second_spec}"
+                                )
+                            })
                         });
-                        writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
+
+                        let dtype = first_spec.dtype();
+                        let byte_count =
+                            usize::from(dtype.size()) * usize::try_from(vector_size.get()).unwrap();
+                        let vector_count = first_spec.volume().get() / vector_size.get();
+
+                        for vector_idx in 0..vector_count {
+                            let exprs = arguments
+                                .iter()
+                                .map(|arg| {
+                                    let backing_tensor = arg.backing_tensor().unwrap();
+                                    let buffer =
+                                        self.name_env.get(&backing_tensor.identifier()).unwrap();
+                                    let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
+                                    buffer_indexing_expr = zero_points(buffer_indexing_expr);
+                                    buffer_indexing_expr +=
+                                        i32::try_from(vector_size.get() * vector_idx).unwrap();
+                                    self.c_index_ptr(buffer, &buffer_indexing_expr, None)
+                                })
+                                .collect::<Vec<_>>();
+
+                            writeln!(
+                                w,
+                                "{0}__builtin_memcpy((void *)({1}), (const void *)({2}), {3});  /* Assign */",
+                                indent(depth),
+                                exprs[1],
+                                exprs[0],
+                                byte_count,
+                            )?;
+                        }
+                        Ok(())
                     }
                     CpuKernel::CastBf16F32 => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
@@ -1071,7 +1119,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )
                     }
                     CpuKernel::MemsetZero => {
-                        // TODO: Merge this duplicate `exprs` block. It's used also in the ValueAssign.
+                        // TODO: Merge this duplicate `exprs` block. It's used also in the Assign.
                         debug_assert_eq!(arguments.len(), 1);
                         let backing_tensor = arguments[0].backing_tensor().unwrap();
                         let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
@@ -1131,49 +1179,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             }
                             _ => unreachable!(),
                         }
-                    }
-                    CpuKernel::VectorAssign => {
-                        let first_spec = arguments[0].spec();
-                        let second_spec = arguments[1].spec();
-
-                        let vector_size = first_spec.vector_size().unwrap_or_else(|| {
-                            second_spec.vector_size().unwrap_or_else(|| {
-                                panic!(
-                                    "neither Spec had a vector size: {first_spec} and {second_spec}"
-                                )
-                            })
-                        });
-
-                        let dtype = first_spec.dtype();
-                        let byte_count =
-                            usize::from(dtype.size()) * usize::try_from(vector_size.get()).unwrap();
-                        let vector_count = first_spec.volume().get() / vector_size.get();
-
-                        for vector_idx in 0..vector_count {
-                            let exprs = arguments
-                                .iter()
-                                .map(|arg| {
-                                    let backing_tensor = arg.backing_tensor().unwrap();
-                                    let buffer =
-                                        self.name_env.get(&backing_tensor.identifier()).unwrap();
-                                    let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
-                                    buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                                    buffer_indexing_expr +=
-                                        i32::try_from(vector_size.get() * vector_idx).unwrap();
-                                    self.c_index_ptr(buffer, &buffer_indexing_expr, None)
-                                })
-                                .collect::<Vec<_>>();
-
-                            writeln!(
-                                w,
-                                "{0}__builtin_memcpy((void *)({1}), (const void *)({2}), {3});  /* VectorAssign */",
-                                indent(depth),
-                                exprs[1],
-                                exprs[0],
-                                byte_count,
-                            )?;
-                        }
-                        Ok(())
                     }
                     CpuKernel::BroadcastVecMultAdd => {
                         let (scalar_idx, broadcast_idx) = broadcastvecmult_side(

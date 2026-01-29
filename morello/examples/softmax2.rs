@@ -55,7 +55,7 @@ fn main() {
                 .move_param(0, L1)
                 .move_param(0, RF)
                 .subschedule(&[0], |s| s.select(CpuKernel::ValueNegInf))
-                .subschedule(&[1], |s| s.select(CpuKernel::ValueAssign))
+                .subschedule(&[1], |s| s.select(CpuKernel::Assign))
         })
         .subschedule(&[0, 0, 1], |maxaccum| {
             maxaccum
@@ -64,9 +64,9 @@ fn main() {
                 .move_param(1, L1)
                 .move_param(1, RF)
                 .select(CpuKernel::ValueMax)
-                .subschedule(&[0], |s| s.select(CpuKernel::ValueAssign))
-                .subschedule(&[1, 0], |s| s.select(CpuKernel::ValueAssign))
-                .subschedule(&[1, 2], |s| s.select(CpuKernel::ValueAssign))
+                .subschedule(&[0], |s| s.select(CpuKernel::Assign))
+                .subschedule(&[1, 0], |s| s.select(CpuKernel::Assign))
+                .subschedule(&[1, 2], |s| s.select(CpuKernel::Assign))
         })
         .subschedule(&[0, 1], |subspec| {
             subspec
@@ -75,7 +75,7 @@ fn main() {
                     s.move_param(0, L1)
                         .move_param(0, RF)
                         .subschedule(&[0], |s| s.select(CpuKernel::MemsetZero))
-                        .subschedule(&[1], |s| s.select(CpuKernel::ValueAssign))
+                        .subschedule(&[1], |s| s.select(CpuKernel::Assign))
                 })
                 .subschedule(&[1], |s| {
                     s.tile_out(&[1, 32])
@@ -84,18 +84,16 @@ fn main() {
                         .move_param(2, CpuMemoryLevel::L1)
                         .move_param(3, CpuMemoryLevel::L1)
                         .move_vrf(0, CpuMemoryLevel::VRF, 8)
-                        .subschedule(&[0], |m| {
-                            m.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
-                        })
+                        .subschedule(&[0], |m| m.tile_out(&[1, 8]).select(CpuKernel::Assign))
                         .move_param(1, CpuMemoryLevel::RF)
-                        .subschedule(&[1, 0], |m| m.select(CpuKernel::ValueAssign))
+                        .subschedule(&[1, 0], |m| m.select(CpuKernel::Assign))
                         .move_param(2, CpuMemoryLevel::RF)
-                        .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::ValueAssign))
-                        .subschedule(&[1, 1, 2], |m| m.select(CpuKernel::ValueAssign))
+                        .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::Assign))
+                        .subschedule(&[1, 1, 2], |m| m.select(CpuKernel::Assign))
                         .move_vrf(3, CpuMemoryLevel::VRF, 8)
                         .select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
                         .subschedule(&[1, 1, 1, 1], |move_spec| {
-                            move_spec.tile_out(&[1, 8]).select(CpuKernel::VectorAssign)
+                            move_spec.tile_out(&[1, 8]).select(CpuKernel::Assign)
                         })
                 })
         })
@@ -107,17 +105,17 @@ fn main() {
                     broadcast
                         .move_param(0, CpuMemoryLevel::L1)
                         .move_param(0, CpuMemoryLevel::RF)
-                        .subschedule(&[0], |s| s.select(CpuKernel::ValueAssign))
+                        .subschedule(&[0], |s| s.select(CpuKernel::Assign))
                         .select(CpuKernel::VecScalarAssign)
                 })
                 .subschedule(&[1], |d| {
                     d.move_param(0, L1)
                         .move_vrf(0, VRF, 4)
-                        .subschedule(&[0], |m| m.select(CpuKernel::VectorAssign))
+                        .subschedule(&[0], |m| m.select(CpuKernel::Assign))
                         .move_param(2, L1)
                         .move_vrf(2, VRF, 4)
                         .subschedule(&[1, 0], |m| m.select(CpuKernel::DivideVec))
-                        .subschedule(&[1, 1], |m| m.select(CpuKernel::VectorAssign))
+                        .subschedule(&[1, 1], |m| m.select(CpuKernel::Assign))
                 })
         });
 
