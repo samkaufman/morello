@@ -38,7 +38,7 @@ pub enum MemoryLimits {
 ///
 /// Put another way: this is a description of the memory live during execution of a single node,
 /// ignoring children.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MemoryAllocation {
     Simple([u64; LEVEL_COUNT]),
     Inner(Vec<[u64; LEVEL_COUNT]>),
@@ -221,6 +221,16 @@ impl MemoryAllocation {
         let levels = Tgt::levels();
         let mut peak = MemVec::zero::<Tgt>();
         match self {
+            MemoryAllocation::Simple(own) if child_peaks.is_empty() => {
+                for (i, o) in own.iter().enumerate() {
+                    let mut computed_peak = *o;
+                    if !levels[i].counts_registers() {
+                        computed_peak = next_binary_power(computed_peak);
+                    }
+                    peak.set_snap_up(i, computed_peak);
+                }
+                return peak;
+            }
             MemoryAllocation::Simple(own) => {
                 for child_peak in child_peaks {
                     for (i, o) in own.iter().enumerate() {
@@ -786,6 +796,30 @@ pub fn arb_memorylimits_ext<Tgt: Target>(
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryAllocationArbConfig(pub bool);
+
+#[cfg(test)]
+impl proptest::prelude::Arbitrary for MemoryAllocation {
+    type Parameters = MemoryAllocationArbConfig;
+    type Strategy = proptest::prelude::BoxedStrategy<Self>;
+
+    fn arbitrary_with(params: Self::Parameters) -> Self::Strategy {
+        use proptest::{array::uniform4, collection, prelude::*, prop_oneof};
+
+        let simple = uniform4(0u64..=64).prop_map(MemoryAllocation::Simple);
+        let empty_inner = Just(MemoryAllocation::Inner(vec![]));
+        if params.0 {
+            prop_oneof![simple, empty_inner].boxed()
+        } else {
+            let inner =
+                collection::vec(uniform4(0u64..=64), 1..=3).prop_map(MemoryAllocation::Inner);
+            prop_oneof![simple, inner, empty_inner].boxed()
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel};
@@ -928,6 +962,35 @@ mod tests {
             shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero::<ArmTarget>(
                 limits, &bounds
             );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn test_peak_memory_preserves_self_allocation_when_no_children(
+            allocation in any_with::<MemoryAllocation>(MemoryAllocationArbConfig(true)),
+        ) {
+            let peaks = allocation.peak_memory_from_child_peaks::<Avx2Target>(&[]);
+            for (i, level) in Avx2Target::levels().iter().enumerate() {
+                let allocated = match &allocation {
+                    MemoryAllocation::Simple(own) => {
+                        if level.counts_registers() {
+                            own[i]
+                        } else {
+                            next_binary_power(own[i])
+                        }
+                    }
+                    MemoryAllocation::Inner(child_adds) => {
+                        prop_assert!(child_adds.is_empty());
+                        0
+                    }
+                    MemoryAllocation::Pipeline { .. } => {
+                        prop_assert!(false, "pipeline allocations are not valid without child peaks");
+                        0
+                    }
+                };
+                prop_assert!(peaks.get_unscaled(i) >= allocated);
+            }
         }
     }
 

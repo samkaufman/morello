@@ -223,8 +223,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 if candidate.value != new_rect.value
                     && candidate.envelope().intersects(&new_envelope)
                 {
-                    // TODO: Convert to a panic once fixed.
-                    log::warn!(
+                    panic!(
                         "New rectangle overlaps with existing rectangle that has a different value"
                     );
                 }
