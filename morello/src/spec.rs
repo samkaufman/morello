@@ -223,14 +223,11 @@ impl From<Option<DimSize>> for PrimitiveBasicsArbParams {
 
 impl<Tgt: Target> Spec<Tgt> {
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
-        let levels = self.0.parameter_levels();
-        self.1.zero_levels_slower_than_all::<Tgt>(&levels);
         self.0.canonicalize()
     }
 
     pub fn is_canonical(&self) -> bool {
-        let levels = self.0.parameter_levels();
-        !self.1.any_nonzero_levels_slower_than::<Tgt>(&levels) && self.0.is_canonical()
+        self.0.is_canonical()
     }
 
     /// Returns the FLOPs required to implement this Spec, if appropriate.
@@ -4175,14 +4172,6 @@ mod tests {
         let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
         for v in maxes_vec.iter() {
             maxes.push(v.min(64));
-        }
-
-        // Zero out levels which are slower than all present operands' levels.
-        let parameter_levels = logical_spec.parameter_levels();
-        for (level_idx, level) in Tgt::levels().into_iter().enumerate() {
-            if parameter_levels.iter().all(|l| *l < level) {
-                maxes[level_idx] = 0;
-            }
         }
 
         // The list of actions depends only on the logical Spec. Filtering by memory limit happens

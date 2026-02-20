@@ -86,43 +86,6 @@ impl MemoryLimits {
         }
     }
 
-    pub fn zero_levels_slower_than_all<Tgt>(&mut self, levels_bounds: &[Tgt::Level])
-    where
-        Tgt: Target,
-    {
-        // This is slow; it visits the product rather than computing a lub when that's correct.
-        let target_levels = Tgt::levels();
-        match self {
-            MemoryLimits::Standard(mem_vec) => {
-                for (limit_idx, cur) in target_levels.iter().enumerate() {
-                    if levels_bounds.iter().all(|bound| bound < cur) {
-                        mem_vec.set_bit_length(limit_idx, 0);
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn any_nonzero_levels_slower_than<Tgt>(&self, levels_bounds: &[Tgt::Level]) -> bool
-    where
-        Tgt: Target,
-    {
-        // This is slow; it visits the product rather than computing a lub when that's correct.
-        let target_levels = Tgt::levels();
-        match self {
-            MemoryLimits::Standard(mem_vec) => {
-                for (limit_idx, cur) in target_levels.iter().enumerate() {
-                    if mem_vec.get_unscaled(limit_idx) != 0
-                        && levels_bounds.iter().all(|bound| bound < cur)
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
     /// Produce new MemoryLimits for each child of a node after some allocation.
     /// Returns `None` if the given memory allocation exceeds this limit.
     ///
@@ -822,18 +785,8 @@ impl proptest::prelude::Arbitrary for MemoryAllocation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel};
+    use crate::target::Avx2Target;
     use proptest::{array::uniform4, prelude::*};
-
-    #[test]
-    fn test_zero_levels_slower_than_all_avx2() {
-        shared_test_zero_levels_slower_than_all::<Avx2Target>();
-    }
-
-    #[test]
-    fn test_zero_levels_slower_than_all_arm() {
-        shared_test_zero_levels_slower_than_all::<ArmTarget>();
-    }
 
     #[test]
     fn test_memorylimits_standard_partialord() {
@@ -944,25 +897,6 @@ mod tests {
             prop_assert_eq!(memvec.get_unscaled(3), initials[3]);
         }
 
-        #[test]
-        fn test_zero_levels_slow_than_all_consistent_with_any_nonzero_avx2(
-            limits in arb_memorylimits::<Avx2Target>(&MemVec::new([1; LEVEL_COUNT])),
-            bounds in prop::collection::vec(any::<CpuMemoryLevel>(), 0..=3)
-        ) {
-            shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero::<Avx2Target>(
-                limits, &bounds
-            );
-        }
-
-        #[test]
-        fn test_zero_levels_slow_than_all_consistent_with_any_nonzero_arm(
-            limits in arb_memorylimits::<ArmTarget>(&MemVec::new([1; LEVEL_COUNT])),
-            bounds in prop::collection::vec(any::<CpuMemoryLevel>(), 0..=3)
-        ) {
-            shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero::<ArmTarget>(
-                limits, &bounds
-            );
-        }
     }
 
     proptest! {
@@ -992,36 +926,5 @@ mod tests {
                 prop_assert!(peaks.get_unscaled(i) >= allocated);
             }
         }
-    }
-
-    fn shared_test_zero_levels_slower_than_all<Tgt>()
-    where
-        Tgt: Target<Level = CpuMemoryLevel>,
-    {
-        let mut levels = MemoryLimits::Standard(MemVec::new([8, 8, 8, 8]));
-        levels.zero_levels_slower_than_all::<Tgt>(&[CpuMemoryLevel::GL]);
-        assert_eq!(levels, MemoryLimits::Standard(MemVec::new([8, 8, 8, 8])));
-
-        levels = MemoryLimits::Standard(MemVec::new([8, 8, 8, 8]));
-        levels.zero_levels_slower_than_all::<Tgt>(&[CpuMemoryLevel::L1]);
-        assert_eq!(levels, MemoryLimits::Standard(MemVec::new([8, 8, 8, 0])));
-
-        // Notice that VRF is *not* slwoer than RF. This maps to an assumption that we can move from
-        // RF to VRF.
-        levels = MemoryLimits::Standard(MemVec::new([8, 8, 8, 8]));
-        levels.zero_levels_slower_than_all::<Tgt>(&[CpuMemoryLevel::RF]);
-        assert_eq!(levels, MemoryLimits::Standard(MemVec::new([8, 8, 0, 0])));
-    }
-
-    fn shared_test_zero_levels_slow_than_all_consistent_with_any_nonzero<Tgt: Target>(
-        limits: MemoryLimits,
-        bounds: &[Tgt::Level],
-    ) {
-        let mut zeroed_limits = limits.clone();
-        zeroed_limits.zero_levels_slower_than_all::<Tgt>(bounds);
-        assert_eq!(
-            zeroed_limits == limits,
-            !limits.any_nonzero_levels_slower_than::<Tgt>(bounds)
-        );
     }
 }
