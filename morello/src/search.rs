@@ -93,8 +93,8 @@ enum RequestsMapRef<'a, Tgt: Target> {
 pub fn top_down<Tgt>(db: &FilesDatabase, goal: &Spec<Tgt>, top_k: usize) -> Vec<(ActionNum, Cost)>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     top_down_many(db, slice::from_ref(goal), top_k)
         .into_iter()
@@ -111,8 +111,8 @@ pub fn top_down_many<Tgt>(
 ) -> Vec<ActionCostVec>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     top_down_many_internal(db, goals, top_k).0
 }
@@ -128,8 +128,8 @@ pub fn top_down_many_impls<Tgt>(
 ) -> Vec<Vec<ImplNode<Tgt>>>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     let (action_costs, cache) = top_down_many_internal(db, goals, top_k);
     let lookup = move |spec: &Spec<Tgt>| get_action_cost(db, &cache, spec);
@@ -157,8 +157,8 @@ fn top_down_many_internal<Tgt>(
 ) -> (Vec<ActionCostVec>, NonMemoCache<Tgt>)
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     assert!(db.max_k().is_none_or(|k| k >= top_k));
     if top_k > 1 {
@@ -207,8 +207,8 @@ where
 impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     fn synthesize(
         goals: &[Spec<Tgt>],
@@ -586,8 +586,8 @@ impl<Tgt: Target> SpecTask<Tgt> {
     ) -> Self
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let mut reducer = ImplReducer::new(search.top_k, preferences.unwrap_or_default());
         let mut max_children = 0;
@@ -682,8 +682,8 @@ impl<Tgt: Target> SpecTask<Tgt> {
         cost: Option<Cost>, // `None` means that the Spec was unsat
     ) where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let SpecTask::Running {
             reducer,
@@ -860,8 +860,8 @@ fn process_complete_task<Tgt>(
 ) -> ActionCostVec
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     let SpecTask::Complete(task_result, from_db) = &mut *task.borrow_mut() else {
         unreachable!("Expected goal to be complete.");
@@ -888,8 +888,8 @@ fn get_action_cost<Tgt>(
 ) -> Option<ActionCostVec>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     debug_assert!(spec.is_canonical(), "Spec must be canonical: {}", spec);
     if db.can_memoize(spec) {
@@ -908,11 +908,11 @@ mod tests {
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
     use crate::spec::{arb_canonical_primitive_spec, arb_canonical_spec, LogicalSpec};
-    use crate::target::MemoryLevel;
+    use crate::target::Memory;
     use crate::target::{
         Avx2Target,
-        CpuMemoryLevel::{GL, L1, RF},
-        LEVEL_COUNT,
+        CpuMemory::{GL, L1, RF},
+        MEMORY_COUNT,
     };
     use crate::utils::{bit_length, bit_length_inverse};
     use nonzero::nonzero as nz;
@@ -1321,8 +1321,8 @@ mod tests {
                 let MemoryLimits::Standard(top_memvec) = top_memory_c.as_ref();
                 let MemoryLimits::Standard(spec_memvec) = &spec.1;
 
-                let levels = Tgt::levels();
-                let raise_strategy = if levels[dim_idx_to_raise].counts_registers() {
+                let memories = Tgt::memories();
+                let raise_strategy = if memories[dim_idx_to_raise].counts_registers() {
                     let low = spec_memvec.get_unscaled(dim_idx_to_raise);
                     let high = top_memvec.get_unscaled(dim_idx_to_raise);
                     ((low + 1)..=high).boxed()
@@ -1337,17 +1337,17 @@ mod tests {
                 let MemoryLimits::Standard(base_memvec) = &spec.1;
 
                 // Get current values
-                let mut new_values: [u64; LEVEL_COUNT] =
+                let mut new_values: [u64; MEMORY_COUNT] =
                     base_memvec.iter().collect::<Vec<_>>().try_into().unwrap();
 
-                // Update the specific level
+                // Update the specific memory
                 new_values[dim_idx_to_raise] = raise_amount;
 
-                // Create encoding flags based on whether each level counts registers
-                let levels = Tgt::levels();
-                let encoding_flags: [bool; LEVEL_COUNT] = levels
+                // Create encoding flags based on whether each memory counts registers
+                let memories = Tgt::memories();
+                let encoding_flags: [bool; MEMORY_COUNT] = memories
                     .iter()
-                    .map(|level| level.counts_registers())
+                    .map(|memory| memory.counts_registers())
                     .collect::<Vec<_>>()
                     .try_into()
                     .unwrap();

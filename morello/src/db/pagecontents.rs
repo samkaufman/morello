@@ -36,8 +36,8 @@ impl PageContents {
     ) -> GetPreference<ActionCostVec, Vec<ActionNum>>
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let block_result = match self {
             PageContents::RTree(b) => b.get(inner_pt, query.0.volume()),

@@ -317,7 +317,7 @@ mod tests {
             let spec = TensorSpec::<Avx2Target>::new_canon(
                 origin_shape.clone(),
                 Dtype::Uint32,
-                Avx2Target::levels()[0],
+                Avx2Target::memories()[0],
                 row_major,
                 None,
             );
@@ -366,7 +366,7 @@ mod tests {
         let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![5, 7, 6],
             Dtype::Uint32,
-            Avx2Target::levels()[0],
+            Avx2Target::memories()[0],
             row_major,
             None,
         );
@@ -414,7 +414,7 @@ mod tests {
         let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![4, 6],
             Dtype::Uint32,
-            Avx2Target::levels()[0],
+            Avx2Target::memories()[0],
             row_major,
             None,
         );
@@ -432,7 +432,7 @@ mod tests {
         let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![6, 7, 9],
             Dtype::Uint32,
-            Avx2Target::levels()[0],
+            Avx2Target::memories()[0],
             row_major,
             None,
         );

@@ -8,9 +8,9 @@ use morello::spec;
 use morello::spec::Spec;
 use morello::target::{
     Avx2Target,
-    CpuMemoryLevel::{GL, L1, RF, VRF},
+    CpuMemory::{GL, L1, RF, VRF},
 };
-use morello::target::{CpuKernel, MemoryLevel};
+use morello::target::{CpuKernel, Memory};
 use morello::utils::ToWriteFmt;
 use std::io;
 
@@ -171,7 +171,7 @@ fn naive_vector_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> 
         .0
         .parameters()
         .into_iter()
-        .any(|p| p.level().vector_rf())
+        .any(|p| p.memory().vector_rf())
     {
         imp.select(CpuKernel::Assign)
     } else {

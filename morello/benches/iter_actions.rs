@@ -4,7 +4,7 @@ use std::hint::black_box;
 use morello::layout::row_major;
 use morello::lspec;
 use morello::spec::LogicalSpec;
-use morello::target::{Avx2Target, CpuMemoryLevel::GL, Target};
+use morello::target::{Avx2Target, CpuMemory::GL, Target};
 
 #[library_benchmark]
 fn copy_actions_into_vec() {

@@ -35,10 +35,10 @@ impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {
                 .wirings
                 .iter()
                 .map(|wiring| {
-                    Tgt::levels().map(|l| {
+                    Tgt::memories().map(|l| {
                         let mut level_consumption = 0;
                         for t in &wiring.intermediate_tensors {
-                            if t.spec().level() == l {
+                            if t.spec().memory() == l {
                                 level_consumption += t.spec().memory_units();
                             }
                         }

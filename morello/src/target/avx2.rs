@@ -3,7 +3,7 @@ use crate::common::Dtype;
 use crate::cost::MainCost;
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::spec::LogicalSpec;
-use crate::target::CpuMemoryLevel;
+use crate::target::CpuMemory;
 use crate::{codegen::c_utils::VecType, views::View};
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub struct Avx2Kernel(CpuKernel);
 
 impl CpuTarget for Avx2Target {
     type Kernel = Avx2Kernel;
-    type Level = CpuMemoryLevel;
+    type Memory = CpuMemory;
 
     fn target_id() -> TargetId {
         TargetId::Avx2

@@ -35,7 +35,7 @@ use morello::spec::{
     PrimitiveSpecType, Spec,
 };
 use morello::target::{
-    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel, CpuTarget, MemoryLevel, Target, TargetId,
+    ArmTarget, Avx2Target, Avx512Target, CpuMemory, CpuTarget, Memory, Target, TargetId,
 };
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::{bit_length, diagonals};
@@ -142,8 +142,8 @@ fn main() -> Result<()> {
 fn main_with_target<Tgt>(args: &Args) -> Result<()>
 where
     Tgt: CpuTarget,
-    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
-    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+    Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Memory as morello::grid::canon::CanonicalBimap>::Bimap:
         morello::grid::general::BiMap<Codomain = u8>,
 {
     env_logger::init();
@@ -164,11 +164,11 @@ fn main_per_db<Tgt>(
     db_path: Option<&path::Path>,
 ) where
     Tgt: CpuTarget,
-    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
-    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+    Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Memory as morello::grid::canon::CanonicalBimap>::Bimap:
         morello::grid::general::BiMap<Codomain = u8>,
 {
-    let levels = Tgt::levels();
+    let memories = Tgt::memories();
     let MemoryLimits::Standard(top) = Tgt::max_mem();
 
     let phases = goal_phases::<Tgt>(args);
@@ -221,7 +221,7 @@ fn main_per_db<Tgt>(
                 process_spec(
                     &db,
                     bound_spec,
-                    &levels,
+                    &memories,
                     &top,
                     spec_completed,
                     meta_update_tx.clone(),
@@ -237,14 +237,14 @@ fn main_per_db<Tgt>(
 fn process_spec<Tgt>(
     db: &FilesDatabase,
     bound_spec: LogicalSpec<Tgt>,
-    levels: &[Tgt::Level],
+    memories: &[Tgt::Memory],
     top: &MemVec,
     spec_completed: usize,
     progress_sender: mpsc::Sender<(LogicalSpec<Tgt>, usize)>,
 ) where
     Tgt: CpuTarget,
-    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
-    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+    Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Memory as morello::grid::canon::CanonicalBimap>::Bimap:
         morello::grid::general::BiMap<Codomain = u8>,
 {
     let unscaled_surmap = LogicalSpecSurMap::new(
@@ -319,7 +319,7 @@ fn process_spec<Tgt>(
                 {
                     synthesis_time += synthesis_start.elapsed();
                 }
-                compute_next_stage(&worklist, stage_results, levels, &mut next_stage);
+                compute_next_stage(&worklist, stage_results, memories, &mut next_stage);
                 worklist = next_stage.drain().collect();
             }
 
@@ -366,8 +366,8 @@ fn validate_stage_worklist_unique<Tgt: Target>(worklist: &[Spec<Tgt>]) {
 fn process_worklist_chunks<Tgt>(db: &FilesDatabase, worklist: &[Spec<Tgt>]) -> Vec<ActionCostVec>
 where
     Tgt: CpuTarget,
-    Tgt::Level: morello::grid::canon::CanonicalBimap + Sync,
-    <Tgt::Level as morello::grid::canon::CanonicalBimap>::Bimap:
+    Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
+    <Tgt::Memory as morello::grid::canon::CanonicalBimap>::Bimap:
         morello::grid::general::BiMap<Codomain = u8>,
 {
     let mut subworklist_offset = 0;
@@ -389,13 +389,13 @@ where
 fn compute_next_stage<Tgt: Target>(
     worklist: &[Spec<Tgt>],
     stage_results: Vec<morello::db::ActionCostVec>,
-    levels: &[Tgt::Level],
+    memories: &[Tgt::Memory],
     next_stage: &mut HashSet<Spec<Tgt>>,
 ) {
     for (spec, result) in worklist.iter().zip(stage_results) {
         if let [(_, only_result_cost)] = &result.0[..] {
             next_stage.extend(
-                next_limits(&spec.1, &only_result_cost.peaks, levels)
+                next_limits(&spec.1, &only_result_cost.peaks, memories)
                     .map(|l| Spec(spec.0.clone(), MemoryLimits::Standard(l))),
             );
         }
@@ -616,7 +616,7 @@ fn matmul_top<Tgt: CpuTarget>(size: DimSize, dtype: Dtype) -> LogicalSpec<Tgt> {
     let auxes = param_shapes
         .into_iter()
         .map(|shape| TensorSpecAux {
-            level: CpuMemoryLevel::GL.into(),
+            memory: CpuMemory::GL.into(),
             layout: row_major(&shape),
             vector_size: None,
         })
@@ -642,12 +642,12 @@ fn move_top<Tgt: CpuTarget>(size: DimSize, rank: u8, dtype: Dtype) -> LogicalSpe
         },
         vec![
             TensorSpecAux {
-                level: CpuMemoryLevel::GL.into(),
+                memory: CpuMemory::GL.into(),
                 layout: row_major(&shape),
                 vector_size: None,
             },
             TensorSpecAux {
-                level: CpuMemoryLevel::GL.into(),
+                memory: CpuMemory::GL.into(),
                 layout: row_major(&shape),
                 vector_size: None,
             },
@@ -671,10 +671,10 @@ fn fill_zero_top<Tgt: CpuTarget>(size: DimSize, rank: u8, dtype: Dtype) -> Logic
     )
 }
 
-fn next_limits<'a, L: MemoryLevel + 'a>(
+fn next_limits<'a, L: Memory + 'a>(
     result_limits: &'a MemoryLimits,
     result_peak: &'a MemVec,
-    levels: &'a [L],
+    memories: &'a [L],
 ) -> impl Iterator<Item = MemVec> + 'a {
     let MemoryLimits::Standard(limits_vec) = result_limits;
     debug_assert!(limits_vec
@@ -686,7 +686,7 @@ fn next_limits<'a, L: MemoryLevel + 'a>(
         let lower = match result_peak.get_unscaled(idx) {
             0 => return None,
             1 => 0,
-            prev if levels[idx].counts_registers() => prev - 1,
+            prev if memories[idx].counts_registers() => prev - 1,
             prev => 1 << (bit_length(prev) - 2),
         };
         new_values.set(idx, lower);
@@ -750,7 +750,7 @@ fn downscaler<'a>(unscaled_bound: Vec<BimapInt>) -> MaxVec<'a, DownscaleSurMap<'
 
 fn taux_gl<Tgt: CpuTarget>(shape: &[DimSize]) -> TensorSpecAux<Tgt> {
     TensorSpecAux {
-        level: CpuMemoryLevel::GL.into(),
+        memory: CpuMemory::GL.into(),
         layout: row_major(shape),
         vector_size: None,
     }

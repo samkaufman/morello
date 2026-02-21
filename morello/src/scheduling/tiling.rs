@@ -11,7 +11,7 @@ use crate::spec::{
     CanonicalizeError, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
     PrimitiveSpecType, Spec,
 };
-use crate::target::{MemoryLevel, Target};
+use crate::target::{Memory, Target};
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::views::{BoundaryTile, Param, Tile, View, ViewE};
@@ -55,7 +55,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         let operands = logical_spec.parameters();
 
         let parallel = self.parallel();
-        if parallel && !operands.iter().all(|o| o.level().can_parallel_tile()) {
+        if parallel && !operands.iter().all(|o| o.memory().can_parallel_tile()) {
             return Err(ApplyError::NotApplicable(
                 NotApplicableReason::LevelPreventedParallel,
             ));
@@ -126,7 +126,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
     // fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
     //     if self.parallel() {
     //         for idx in 0..spec.0.operand_count() {
-    //             if !spec.0.parameter_level(idx).can_parallel_tile() {
+    //             if !spec.0.parameter_memory(idx).can_parallel_tile() {
     //                 return Err(ApplyError::NotApplicable(
     //                     NotApplicableReason::LevelPreventedParallel,
     //                 ));
@@ -945,7 +945,7 @@ pub(crate) fn update_component_shapes<Tgt: Target>(
             for (original_shape, new_shape, aux) in
                 izip!(original_shapes, new_shapes, primitive_aux.iter_mut())
             {
-                if !aux.level.has_layout() {
+                if !aux.memory.has_layout() {
                     continue;
                 }
                 if let Ok(new_layout) = aux.layout.update_for_tiling(&original_shape, new_shape) {
@@ -999,7 +999,7 @@ fn update_aux_for_tiling<Tgt: Target>(
     original_shape: &[DimSize],
     new_shape: &[DimSize],
 ) {
-    if !aux.level.has_layout() {
+    if !aux.memory.has_layout() {
         aux.layout = Layout::empty();
     } else if let Ok(new_layout) = aux.layout.update_for_tiling(original_shape, new_shape) {
         aux.layout = new_layout;
@@ -1115,7 +1115,7 @@ fn split_head_matmul_specs<Tgt: Target>(
 
     let lhs_shape = head_component.parameter_shape(0);
     let lhs_aux = TensorSpecAux {
-        level: output_aux.level,
+        memory: output_aux.memory,
         layout: row_major(&lhs_shape),
         vector_size: output_aux.vector_size,
     };
@@ -1350,7 +1350,7 @@ mod tests {
     use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
     use crate::target::{
         Avx2Target,
-        CpuMemoryLevel::{self, GL},
+        CpuMemory::{self, GL},
     };
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape, TensorSpecAux};
     use crate::views::{View, ViewE};
@@ -1399,22 +1399,22 @@ mod tests {
         };
         let operand_auxes: Vec<TensorSpecAux<Avx2Target>> = vec![
             TensorSpecAux {
-                level: CpuMemoryLevel::L1,
+                memory: CpuMemory::L1,
                 layout: row_major(&shape![1, 5, 2, 2]),
                 vector_size: None,
             },
             TensorSpecAux {
-                level: CpuMemoryLevel::L1,
+                memory: CpuMemory::L1,
                 layout: row_major(&shape![1, 6, 4, 2]),
                 vector_size: None,
             },
             TensorSpecAux {
-                level: CpuMemoryLevel::RF,
+                memory: CpuMemory::RF,
                 layout: row_major(&shape![5, 6, 3, 1]),
                 vector_size: None,
             },
             TensorSpecAux {
-                level: CpuMemoryLevel::L1,
+                memory: CpuMemory::L1,
                 layout: row_major(&shape![1, 5, 2, 2]),
                 vector_size: None,
             },
@@ -1445,9 +1445,9 @@ mod tests {
         let bcm_layout = crate::layout![0, 2, 1];
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [4, 8, 8, 8],
-            (f32, CpuMemoryLevel::GL, bcm_layout),
-            (f32, CpuMemoryLevel::GL, row_major),
-            (f32, CpuMemoryLevel::GL, row_major)
+            (f32, CpuMemory::GL, bcm_layout),
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major)
         ));
         let application = action.apply(&spec);
         assert!(
@@ -1462,9 +1462,9 @@ mod tests {
         // Test tiling of 10x10 to 3x3
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [4, 10, 10, 10],
-            (f32, CpuMemoryLevel::GL, row_major),
-            (f32, CpuMemoryLevel::GL, row_major),
-            (f32, CpuMemoryLevel::GL, row_major)
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major)
         ));
         let tile_action = Action::TileOut(TileOut::MultiLoop {
             output_shape: shape![4, 3, 3],
@@ -1484,9 +1484,9 @@ mod tests {
     fn test_tile_out_within_packed_dimensions() {
         let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 2, 64, 4],
-            (f32, CpuMemoryLevel::L1, crate::layout![2, 1, 0, 1 p(8)]),
-            (f32, CpuMemoryLevel::L1, crate::layout![2, 1, 0, 1 p(8)]),
-            (f32, CpuMemoryLevel::L1, crate::layout![2, 1, 0, 1 p(2)])
+            (f32, CpuMemory::L1, crate::layout![2, 1, 0, 1 p(8)]),
+            (f32, CpuMemory::L1, crate::layout![2, 1, 0, 1 p(8)]),
+            (f32, CpuMemory::L1, crate::layout![2, 1, 0, 1 p(2)])
         ));
         spec.canonicalize().unwrap();
 
@@ -1504,8 +1504,8 @@ mod tests {
     fn test_tile_out_within_vector_register_disallowed() {
         let mut spec: Spec<Avx2Target> = spec!(Move(
             [64, 1],
-            (f32, CpuMemoryLevel::VRF, crate::layout![0, 1, 0 p(8)], 8),
-            (f32, CpuMemoryLevel::VRF, crate::layout![0, 1, 0 p(8)], 8)
+            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)], 8),
+            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)], 8)
         ));
         spec.canonicalize().expect("spec should canonicalize");
 
@@ -1523,15 +1523,15 @@ mod tests {
         ));
     }
 
-    /// Test that attempting a parallel TileOut on a Spec with RF level (which cannot
+    /// Test that attempting a parallel TileOut on a Spec with RF memory (which cannot
     /// be parallel tiled) returns NotApplicableReason::LevelPreventedParallel.
     #[test]
     fn test_parallel_tile_out_with_rf_returns_level_prevented_parallel() {
         let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 8, 8, 8],
-            (f32, CpuMemoryLevel::RF, row_major),
-            (f32, CpuMemoryLevel::GL, row_major),
-            (f32, CpuMemoryLevel::GL, row_major)
+            (f32, CpuMemory::RF, row_major),
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major)
         ));
         spec.canonicalize().expect("spec should canonicalize");
 
@@ -1549,14 +1549,14 @@ mod tests {
         ));
     }
 
-    /// Test that attempting a parallel TileOut on a Spec with VRF level (which cannot
+    /// Test that attempting a parallel TileOut on a Spec with VRF memory (which cannot
     /// be parallel tiled) returns NotApplicableReason::LevelPreventedParallel.
     #[test]
     fn test_parallel_tile_out_with_vrf_returns_level_prevented_parallel() {
         let mut spec: Spec<Avx2Target> = spec!(Move(
             [64, 1],
-            (f32, CpuMemoryLevel::L1, crate::layout![0, 1, 0 p(8)]),
-            (f32, CpuMemoryLevel::VRF, crate::layout![0, 1, 0 p(8)], 8)
+            (f32, CpuMemory::L1, crate::layout![0, 1, 0 p(8)]),
+            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)], 8)
         ));
         spec.canonicalize().expect("spec should canonicalize");
 
@@ -1589,7 +1589,7 @@ mod tests {
                 },
                 vec![
                     TensorSpecAux {
-                        level: CpuMemoryLevel::GL,
+                        memory: CpuMemory::GL,
                         layout: row_major(&shape![4, 8, 16]),
                         vector_size: None,
                     };
@@ -1684,25 +1684,25 @@ mod tests {
         let operand_auxes: Vec<TensorSpecAux<Avx2Target>> = vec![
             // for matmul_final's parameter 1
             TensorSpecAux {
-                level: CpuMemoryLevel::GL,
+                memory: CpuMemory::GL,
                 layout: row_major(&matmul_final.parameter_shape(1)),
                 vector_size: None,
             },
             // for matmul_initial's parameter 0
             TensorSpecAux {
-                level: CpuMemoryLevel::GL,
+                memory: CpuMemory::GL,
                 layout: row_major(&matmul_initial.parameter_shape(0)),
                 vector_size: None,
             },
             // for matmul_initial's parameter 1
             TensorSpecAux {
-                level: CpuMemoryLevel::GL,
+                memory: CpuMemory::GL,
                 layout: row_major(&matmul_initial.parameter_shape(1)),
                 vector_size: None,
             },
             // for matmul_final's parameter 2 (final output)
             TensorSpecAux {
-                level: CpuMemoryLevel::GL,
+                memory: CpuMemory::GL,
                 layout: row_major(&matmul_final.parameter_shape(2)),
                 vector_size: None,
             },
@@ -1765,7 +1765,7 @@ mod tests {
             let original_aux = tspec.aux.clone();
             update_aux_for_tiling(&mut tspec.aux, &shape, &shape);
             prop_assert_eq!(tspec.aux.layout, original_aux.layout);
-            prop_assert_eq!(tspec.aux.level, original_aux.level);
+            prop_assert_eq!(tspec.aux.memory, original_aux.memory);
             prop_assert_eq!(tspec.aux.vector_size, original_aux.vector_size);
         }
 
@@ -2025,17 +2025,17 @@ mod tests {
         };
 
         let lhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: row_major(&shape![1, 4, 8]),
             vector_size: None,
         };
         let rhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: row_major(&shape![1, 8, 4]),
             vector_size: None,
         };
         let out_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: row_major(&shape![1, 4, 4]),
             vector_size: None,
         };
@@ -2190,9 +2190,9 @@ mod tests {
         let conv_spec: Spec<Avx2Target> = spec!(
             Conv(
                 [4, 7, 5, 8, 6, 4, 8],
-                (f32, CpuMemoryLevel::RF, row_major),
-                (u8, CpuMemoryLevel::L1, row_major),
-                (u8, CpuMemoryLevel::RF, row_major)
+                (f32, CpuMemory::RF, row_major),
+                (u8, CpuMemory::L1, row_major),
+                (u8, CpuMemory::RF, row_major)
             ),
             [16, 16, 32768, 0]
         );

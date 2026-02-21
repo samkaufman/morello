@@ -10,7 +10,7 @@ use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
-    CpuMemoryLevel::{self, GL},
+    CpuMemory::{self, GL},
     Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -34,7 +34,7 @@ fn main() {
         layouts
             .into_iter()
             .map(|layout| TensorSpecAux {
-                level: CpuMemoryLevel::GL,
+                memory: CpuMemory::GL,
                 layout,
                 vector_size: None,
             })
@@ -63,12 +63,12 @@ fn main() {
             subspec
                 .to_accum()
                 .split(64)
-                .move_param(0, CpuMemoryLevel::L1)
-                .move_param(1, CpuMemoryLevel::L1)
-                .move_param(2, CpuMemoryLevel::L1)
-                .move_vrf(0, CpuMemoryLevel::VRF, 8)
-                .move_param(1, CpuMemoryLevel::RF)
-                .move_param(2, CpuMemoryLevel::RF)
+                .move_param(0, CpuMemory::L1)
+                .move_param(1, CpuMemory::L1)
+                .move_param(2, CpuMemory::L1)
+                .move_vrf(0, CpuMemory::VRF, 8)
+                .move_param(1, CpuMemory::RF)
+                .move_param(2, CpuMemory::RF)
                 .select(CpuKernel::VectorSoftmaxDenominator)
         })
         .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db))
@@ -79,10 +79,10 @@ fn main() {
         // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete
-                .move_param(0, CpuMemoryLevel::L1)
-                .move_param(1, CpuMemoryLevel::L1)
-                .move_param(2, CpuMemoryLevel::L1)
-                .move_param(3, CpuMemoryLevel::L1)
+                .move_param(0, CpuMemory::L1)
+                .move_param(1, CpuMemory::L1)
+                .move_param(2, CpuMemory::L1)
+                .move_param(3, CpuMemory::L1)
                 .tile_out(&[1, 32])
                 .synthesize(&db)
         });

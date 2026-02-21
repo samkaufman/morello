@@ -11,7 +11,7 @@ use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
-    CpuMemoryLevel::{GL, L1, RF, VRF},
+    CpuMemory::{GL, L1, RF, VRF},
     Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -39,7 +39,7 @@ fn main() {
     };
     let tensors_shape = shape![BATCH, 2048, 2048];
     let aux = TensorSpecAux {
-        level: GL,
+        memory: GL,
         layout: row_major(&tensors_shape),
         vector_size: None,
     };
@@ -148,7 +148,7 @@ fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
 
 fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     use morello::db::FilesDatabase;
-    use morello::target::CpuMemoryLevel::{GL, L1, RF, VRF};
+    use morello::target::CpuMemory::{GL, L1, RF, VRF};
 
     let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 10_000, 1);
 

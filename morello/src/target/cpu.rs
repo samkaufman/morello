@@ -17,7 +17,7 @@ use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecomput
 use crate::scheduling::Action;
 use crate::shape;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::target::{Kernel, MemoryLevel, Target, TargetId, LEVEL_COUNT};
+use crate::target::{Kernel, Memory, Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::gen_vector_sizes_opt;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::View;
@@ -32,12 +32,7 @@ use std::iter::{self, once};
 
 const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
-const CPU_LEVELS: [CpuMemoryLevel; 4] = [
-    CpuMemoryLevel::RF,
-    CpuMemoryLevel::VRF,
-    CpuMemoryLevel::L1,
-    CpuMemoryLevel::GL,
-];
+const CPU_MEMORIES: [CpuMemory; 4] = [CpuMemory::RF, CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
 pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
 pub(crate) const DOT_PRODUCT_ACCUM_COUNT: u32 = 4;
 pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
@@ -45,10 +40,7 @@ pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
-    type Level: MemoryLevel
-        + From<CpuMemoryLevel>
-        + Into<CpuMemoryLevel>
-        + PartialEq<CpuMemoryLevel>;
+    type Memory: Memory + From<CpuMemory> + Into<CpuMemory> + PartialEq<CpuMemory>;
     fn max_mem() -> MemoryLimits;
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType];
@@ -135,7 +127,7 @@ pub enum CpuKernel {
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
-pub enum CpuMemoryLevel {
+pub enum CpuMemory {
     RF,
     VRF,
     L1,
@@ -143,10 +135,10 @@ pub enum CpuMemoryLevel {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct CpuMemoryLevelBimap;
+pub struct CpuMemoryBimap;
 
 impl<T: CpuTarget> Target for T {
-    type Level = <Self as CpuTarget>::Level;
+    type Memory = <Self as CpuTarget>::Memory;
     type Kernel = <Self as CpuTarget>::Kernel;
     type ActionsIter<'a> = Box<dyn Iterator<Item = Action<Self>> + 'a>;
 
@@ -162,28 +154,24 @@ impl<T: CpuTarget> Target for T {
         32
     }
 
-    fn default_level() -> Self::Level {
-        CpuMemoryLevel::GL.into()
+    fn default_memory() -> Self::Memory {
+        CpuMemory::GL.into()
     }
 
-    fn levels() -> [Self::Level; LEVEL_COUNT] {
-        CPU_LEVELS.map(Into::into)
+    fn memories() -> [Self::Memory; MEMORY_COUNT] {
+        CPU_MEMORIES.map(Into::into)
     }
 
-    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level> {
+    fn possible_destination_memories(slower: Self::Memory) -> Vec<Self::Memory> {
         match slower.into() {
-            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => vec![slower],
-            CpuMemoryLevel::L1 => vec![
-                slower,
-                CpuMemoryLevel::RF.into(),
-                CpuMemoryLevel::VRF.into(),
-            ],
-            CpuMemoryLevel::GL => vec![slower, CpuMemoryLevel::L1.into()],
+            CpuMemory::RF | CpuMemory::VRF => vec![slower],
+            CpuMemory::L1 => vec![slower, CpuMemory::RF.into(), CpuMemory::VRF.into()],
+            CpuMemory::GL => vec![slower, CpuMemory::L1.into()],
         }
     }
 
     fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
-        let all_target_vector_bytes = Self::levels()
+        let all_target_vector_bytes = Self::memories()
             .into_iter()
             .flat_map(|lvl| lvl.vector_bytes().iter().copied())
             .collect::<Vec<_>>();
@@ -265,7 +253,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
-        let all_target_vector_bytes = Self::levels()
+        let all_target_vector_bytes = Self::memories()
             .into_iter()
             .flat_map(|lvl| lvl.vector_bytes().iter().copied())
             .collect::<Vec<_>>();
@@ -483,13 +471,13 @@ impl<T: CpuTarget> Target for T {
                     if let LogicalSpec::Primitive(basics, _, _) = spec {
                         let spec_shape = &basics.spec_shape;
                         let dtype = basics.dtypes[1];
-                        for level in Self::levels() {
+                        for memory in Self::memories() {
                             for layout in Self::move_destination_layouts(spec_shape, dtype) {
-                                gen_vector_sizes_opt(dtype, level.vector_bytes()).for_each(
+                                gen_vector_sizes_opt(dtype, memory.vector_bytes()).for_each(
                                     |vector_size| {
                                         broadcast_firsts.push(
                                             BroadcastFirst {
-                                                broadcast_level: level,
+                                                broadcast_level: memory,
                                                 broadcast_layout: layout.clone(),
                                                 broadcast_vector_size: vector_size,
                                             }
@@ -507,15 +495,15 @@ impl<T: CpuTarget> Target for T {
                     if let LogicalSpec::Primitive(basics, _, _) = spec {
                         let spec_shape = &basics.spec_shape;
                         let dtype = basics.dtypes[0];
-                        let levels = Self::levels();
+                        let memories = Self::memories();
                         let layouts = Self::move_destination_layouts(spec_shape, dtype);
 
                         // Fully fused loops using shared alt_level for both max and exps
-                        for denom_level in levels {
+                        for denom_level in memories {
                             for denom_layout in &layouts {
                                 gen_vector_sizes_opt(dtype, denom_level.vector_bytes()).for_each(
                                     |denominator_vector_size| {
-                                        for alt_level in levels {
+                                        for alt_level in memories {
                                             for alt_layout in &layouts {
                                                 gen_vector_sizes_opt(
                                                     dtype,
@@ -565,13 +553,13 @@ impl<T: CpuTarget> Target for T {
                         let spec_shape = &basics.spec_shape;
                         let dtype = basics.dtypes[0];
 
-                        for level in Self::levels() {
+                        for memory in Self::memories() {
                             for layout in Self::move_destination_layouts(spec_shape, dtype) {
-                                gen_vector_sizes_opt(dtype, level.vector_bytes()).for_each(
+                                gen_vector_sizes_opt(dtype, memory.vector_bytes()).for_each(
                                     |vector_size| {
                                         unscaled_actions.push(Action::ToMaxAndUnscaled(
                                             ToMaxAndUnscaled {
-                                                max_level: level,
+                                                max_level: memory,
                                                 max_layout: layout.clone(),
                                                 max_vector_size: vector_size,
                                             },
@@ -665,7 +653,7 @@ impl CpuKernel {
             CpuKernel::MultAdd => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
                     && operands.iter().all(|o| {
-                        o.level() == CpuMemoryLevel::RF && o.shape().iter().all(|&d| d == nz!(1u32))
+                        o.memory() == CpuMemory::RF && o.shape().iter().all(|&d| d == nz!(1u32))
                     })
                     && operands.iter().map(|o| o.dtype()).all_equal()
             }
@@ -731,9 +719,9 @@ impl CpuKernel {
                           && rhs.layout() == &batched_col_major(rhs_shape)
                           && out.layout().is_row_major()
                           && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
-                          && lhs.level() == CpuMemoryLevel::L1
-                          && rhs.level() == CpuMemoryLevel::VRF
-                          && out.level() == CpuMemoryLevel::VRF
+                          && lhs.memory() == CpuMemory::L1
+                          && rhs.memory() == CpuMemory::VRF
+                          && out.memory() == CpuMemory::VRF
                     )
             }
             CpuKernel::DotProductLoop => {
@@ -755,7 +743,7 @@ impl CpuKernel {
                                 shape: out_shape,
                                 dtype: Dtype::Float32,
                                 aux: TensorSpecAux {
-                                    level: out_level,
+                                    memory: out_level,
                                     ..
                                 },
                             }
@@ -769,11 +757,11 @@ impl CpuKernel {
                           && lhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
                           && rhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
                           // If lhs is already in VRF, require a full vector so we don't need pointer arithmetic.
-                          && (lhs.level() == CpuMemoryLevel::L1
-                              || (lhs.level() == CpuMemoryLevel::VRF
+                          && (lhs.memory() == CpuMemory::L1
+                              || (lhs.memory() == CpuMemory::VRF
                                   && lhs.vector_size() == Some(DOT_PRODUCT_STRIP_SIZE)))
-                          && rhs.level() == CpuMemoryLevel::L1
-                          && *out_level == CpuMemoryLevel::RF
+                          && rhs.memory() == CpuMemory::L1
+                          && *out_level == CpuMemory::RF
                     )
             }
             CpuKernel::DotProductLoopF32Bf16F32 => {
@@ -820,7 +808,7 @@ impl CpuKernel {
                             shape: src_shape,
                             dtype: Dtype::Bfloat16,
                             aux: TensorSpecAux {
-                                level: _,
+                                memory: _,
                                 layout: src_layout,
                                 vector_size: src_vs,
                             },
@@ -829,7 +817,7 @@ impl CpuKernel {
                             shape: dest_shape,
                             dtype: Dtype::Float32,
                             aux: TensorSpecAux {
-                                level: _,
+                                memory: _,
                                 layout: dest_layout,
                                 vector_size: dest_vs,
                             },
@@ -843,8 +831,8 @@ impl CpuKernel {
                       && src_layout.is_row_major()
                       && dest_layout.dims.iter().all(|(_, pd)| pd == &PhysDim::Dynamic || pd == &leaved)
                       && dest_layout.dims.iter().filter(|(_, pd)| pd == &leaved).count() == 1
-                      && src.level() == CpuMemoryLevel::VRF
-                      && dest.level() == CpuMemoryLevel::VRF
+                      && src.memory() == CpuMemory::VRF
+                      && dest.memory() == CpuMemory::VRF
                 )
             }
             CpuKernel::VectorDeinterleaveF32Bf16 => {
@@ -871,7 +859,7 @@ impl CpuKernel {
                     if o.dtype() != Dtype::Float32 {
                         return false;
                     }
-                    if o.level() != CpuMemoryLevel::RF {
+                    if o.memory() != CpuMemory::RF {
                         return false;
                     }
                 }
@@ -883,16 +871,16 @@ impl CpuKernel {
                     return false;
                 }
 
-                if operands[0].level() != CpuMemoryLevel::L1 {
+                if operands[0].memory() != CpuMemory::L1 {
                     return false;
                 }
-                if operands[1].level() != CpuMemoryLevel::RF {
+                if operands[1].memory() != CpuMemory::RF {
                     return false;
                 }
-                if operands[2].level() != CpuMemoryLevel::RF {
+                if operands[2].memory() != CpuMemory::RF {
                     return false;
                 }
-                if operands[3].level() != CpuMemoryLevel::L1 {
+                if operands[3].memory() != CpuMemory::L1 {
                     return false;
                 }
 
@@ -931,7 +919,7 @@ impl CpuKernel {
                     if o.dtype() != Dtype::Float32 {
                         return false;
                     }
-                    if o.level() != CpuMemoryLevel::RF {
+                    if o.memory() != CpuMemory::RF {
                         return false;
                     }
                 }
@@ -967,7 +955,7 @@ impl CpuKernel {
                         return false;
                     }
 
-                    if operand.level() != CpuMemoryLevel::VRF {
+                    if operand.memory() != CpuMemory::VRF {
                         return false;
                     }
                     if operand.vector_size().unwrap().get() != 8 {
@@ -981,7 +969,7 @@ impl CpuKernel {
                     if operands[i].shape().iter().any(|d| d.get() != 1) {
                         return false;
                     }
-                    if operands[i].level() != CpuMemoryLevel::RF {
+                    if operands[i].memory() != CpuMemory::RF {
                         return false;
                     }
                 }
@@ -1005,9 +993,9 @@ impl CpuKernel {
                         }
                     }
                 }
-                if operands[0].level() != CpuMemoryLevel::VRF
-                    || operands[1].level() != CpuMemoryLevel::RF
-                    || operands[2].level() != CpuMemoryLevel::RF
+                if operands[0].memory() != CpuMemory::VRF
+                    || operands[1].memory() != CpuMemory::RF
+                    || operands[2].memory() != CpuMemory::RF
                 {
                     return false;
                 }
@@ -1041,7 +1029,7 @@ impl CpuKernel {
                     if o.dtype() != Dtype::Float32 {
                         return false;
                     }
-                    if o.level() != CpuMemoryLevel::RF {
+                    if o.memory() != CpuMemory::RF {
                         return false;
                     }
                 }
@@ -1052,10 +1040,10 @@ impl CpuKernel {
                 if !matches!(typ, PrimitiveSpecType::Max { accum: true, .. }) {
                     return false;
                 }
-                if operands[0].level() != CpuMemoryLevel::VRF {
+                if operands[0].memory() != CpuMemory::VRF {
                     return false;
                 }
-                if operands[1].level() != CpuMemoryLevel::RF {
+                if operands[1].memory() != CpuMemory::RF {
                     return false;
                 }
                 if operands[0].dtype() != Dtype::Float32 {
@@ -1095,10 +1083,10 @@ impl CpuKernel {
                     return false;
                 }
 
-                if operands[0].level() != CpuMemoryLevel::RF {
+                if operands[0].memory() != CpuMemory::RF {
                     return false;
                 }
-                if operands[1].level() != CpuMemoryLevel::VRF {
+                if operands[1].memory() != CpuMemory::VRF {
                     return false;
                 }
 
@@ -1142,13 +1130,13 @@ impl CpuKernel {
                     return false;
                 }
 
-                if operands[0].level() != CpuMemoryLevel::VRF {
+                if operands[0].memory() != CpuMemory::VRF {
                     return false;
                 }
-                if operands[1].level() != CpuMemoryLevel::VRF {
+                if operands[1].memory() != CpuMemory::VRF {
                     return false;
                 }
-                if operands[2].level() != CpuMemoryLevel::VRF {
+                if operands[2].memory() != CpuMemory::VRF {
                     return false;
                 }
 
@@ -1193,10 +1181,10 @@ impl CpuKernel {
                         }
                     }
 
-                    return operands.iter().any(|o| o.level() == CpuMemoryLevel::RF)
-                        && operands.iter().all(|o| {
-                            o.level() == CpuMemoryLevel::RF || o.level() == CpuMemoryLevel::L1
-                        });
+                    return operands.iter().any(|o| o.memory() == CpuMemory::RF)
+                        && operands
+                            .iter()
+                            .all(|o| o.memory() == CpuMemory::RF || o.memory() == CpuMemory::L1);
                 }
 
                 if operands.iter().any(|o| !o.is_contiguous()) {
@@ -1214,7 +1202,7 @@ impl CpuKernel {
 
                 let mut has_vrf = false;
                 for o in operands {
-                    if o.level().vector_rf() {
+                    if o.memory().vector_rf() {
                         has_vrf = true;
                         match o.vector_size() {
                             Some(vector_size) => {
@@ -1223,7 +1211,7 @@ impl CpuKernel {
                                 }
                             }
                             None => {
-                                panic!("No vector_size on operand in level {:?}", o.level());
+                                panic!("No vector_size on operand in memory {:?}", o.memory());
                             }
                         }
                     }
@@ -1239,7 +1227,7 @@ impl CpuKernel {
                                 shape: lhs_shape,
                                 dtype: Dtype::Bfloat16,
                                 aux: TensorSpecAux {
-                                    level: lhs_level,
+                                    memory: lhs_level,
                                     vector_size: None,
                                     ..
                                 },
@@ -1248,15 +1236,15 @@ impl CpuKernel {
                                 shape: rhs_shape,
                                 dtype: Dtype::Float32,
                                 aux: TensorSpecAux {
-                                    level: rhs_level,
+                                    memory: rhs_level,
                                     vector_size: None,
                                     ..
                                 },
                             }
                         ] if lhs_shape.iter().all(|d| d.get() == 1)
                           && rhs_shape.iter().all(|d| d.get() == 1)
-                          && *lhs_level == CpuMemoryLevel::RF
-                          && *rhs_level == CpuMemoryLevel::RF
+                          && *lhs_level == CpuMemory::RF
+                          && *rhs_level == CpuMemory::RF
                     )
             }
             CpuKernel::VectorCastBf16F32 => {
@@ -1268,7 +1256,7 @@ impl CpuKernel {
                                 shape: lhs_shape,
                                 dtype: Dtype::Bfloat16,
                                 aux: TensorSpecAux {
-                                    level: lhs_level,
+                                    memory: lhs_level,
                                     layout: lhs_layout,
                                     vector_size: Some(lhs_vector_size),
                                     ..
@@ -1278,7 +1266,7 @@ impl CpuKernel {
                                 shape: rhs_shape,
                                 dtype: Dtype::Float32,
                                 aux: TensorSpecAux {
-                                    level: rhs_level,
+                                    memory: rhs_level,
                                     layout: rhs_layout,
                                     vector_size: Some(rhs_vector_size),
                                     ..
@@ -1290,8 +1278,8 @@ impl CpuKernel {
                           && lhs_vector_size.get() == 16
                           && rhs_vector_size.get() == 8
                           && lhs_layout == rhs_layout
-                          && *lhs_level == CpuMemoryLevel::VRF
-                          && *rhs_level == CpuMemoryLevel::VRF
+                          && *lhs_level == CpuMemory::VRF
+                          && *rhs_level == CpuMemory::VRF
                     )
             }
             CpuKernel::MemsetZero => {
@@ -1300,7 +1288,7 @@ impl CpuKernel {
                     PrimitiveSpecType::Fill {
                         value: FillValue::Zero
                     }
-                ) && operands[0].level() == CpuMemoryLevel::RF
+                ) && operands[0].memory() == CpuMemory::RF
                     && operands[0].is_contiguous()
             }
             CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
@@ -1317,7 +1305,7 @@ impl CpuKernel {
                 if !operands[0].is_contiguous() {
                     return false;
                 }
-                if operands[0].level() != CpuMemoryLevel::VRF {
+                if operands[0].memory() != CpuMemory::VRF {
                     return false;
                 }
                 match operands[0].vector_size() {
@@ -1334,7 +1322,7 @@ impl CpuKernel {
                         value: FillValue::NegInf
                     }
                 ) && operands[0].volume().get() == 1
-                    && operands[0].level() == CpuMemoryLevel::RF
+                    && operands[0].memory() == CpuMemory::RF
                     && operands[0].is_contiguous()
                     && operands[0].dtype() == Dtype::Float32
             }
@@ -1346,7 +1334,7 @@ impl CpuKernel {
                         value: FillValue::Min
                     }
                 ) && operands[0].volume().get() == 1
-                    && operands[0].level() == CpuMemoryLevel::RF
+                    && operands[0].memory() == CpuMemory::RF
                     && operands[0].is_contiguous()
             }
         }
@@ -1358,9 +1346,9 @@ impl CpuKernel {
             CpuKernel::BroadcastVecMultAdd => {
                 // BroadcastVecMult applies to 1x1xn Matmuls. It broadcasts into a single
                 // vector register which is reused across all n-axis vectors.
-                MemoryAllocation::Simple(CPU_LEVELS.map(
-                    |level| {
-                        if level.vector_rf() {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(
+                    |memory| {
+                        if memory.vector_rf() {
                             1
                         } else {
                             0
@@ -1373,8 +1361,8 @@ impl CpuKernel {
                 let regs = u64::from(
                     vec_tensor_spec.volume().get() / vec_tensor_spec.vector_size().unwrap().get(),
                 );
-                MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
-                    if level.vector_rf() {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
+                    if memory.vector_rf() {
                         regs * 2
                     } else {
                         0
@@ -1386,18 +1374,18 @@ impl CpuKernel {
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
             | CpuKernel::DotProductLoopF32Bf16F32 => {
                 // TODO: Count any additional peak memory from sum8.
-                MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
                     let mut used = 0;
-                    if level.vector_rf() {
+                    if memory.vector_rf() {
                         used = 1;
                         // TODO: Add intermediate consumption
                     }
                     used
                 }))
             }
-            CpuKernel::PhysicalTransposeByte256 => MemoryAllocation::Simple(CPU_LEVELS.map(
-                |level| {
-                    if level.vector_rf() {
+            CpuKernel::PhysicalTransposeByte256 => MemoryAllocation::Simple(CPU_MEMORIES.map(
+                |memory| {
+                    if memory.vector_rf() {
                         2
                     } else {
                         0
@@ -1405,13 +1393,13 @@ impl CpuKernel {
                 },
             )),
             CpuKernel::VectorInterleaveBf16F32 | CpuKernel::VectorDeinterleaveF32Bf16 => {
-                MemoryAllocation::Simple(CPU_LEVELS.map(|_| {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(|_| {
                     // TODO: Count any intermediate vectors.
                     0
                 }))
             }
-            CpuKernel::VectorMax => MemoryAllocation::Simple(CPU_LEVELS.map(|level| {
-                if level.vector_rf() {
+            CpuKernel::VectorMax => MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
+                if memory.vector_rf() {
                     1 // one __m128 allocated by horizontal_max_f32
                 } else {
                     0
@@ -1419,9 +1407,9 @@ impl CpuKernel {
             })),
             CpuKernel::VectorSoftmaxDenominator => {
                 // TODO: Check if VectorSoftmaxDenominator allocates more than 2 vectors.
-                MemoryAllocation::Simple(CPU_LEVELS.map(
-                    |level| {
-                        if level.vector_rf() {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(
+                    |memory| {
+                        if memory.vector_rf() {
                             2
                         } else {
                             0
@@ -1430,7 +1418,7 @@ impl CpuKernel {
                 ))
             }
             CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => MemoryAllocation::Simple(
-                CPU_LEVELS.map(|level| if level.vector_rf() { 4 } else { 0 }),
+                CPU_MEMORIES.map(|memory| if memory.vector_rf() { 4 } else { 0 }),
             ),
             _ => MemoryAllocation::none(),
         }
@@ -1456,7 +1444,7 @@ impl CpuKernel {
                 // TwoVecBroadcastVecMultAdd takes an input from L1.
                 if matches!(self, CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) {
                     // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
-                    let mut l1_hit_cost = CpuMemoryLevel::L1.cache_hit_cost();
+                    let mut l1_hit_cost = CpuMemory::L1.cache_hit_cost();
                     if !parameters[0].spec().is_contiguous() {
                         l1_hit_cost *= 2;
                     }
@@ -1612,125 +1600,125 @@ fn dotproductloop_bf16_applies<const N: usize, Tgt: CpuTarget>(
                .filter_map(|l| l.canonicalize(lhs_shape).ok())
                .contains(lhs.layout())
           && rhs.layout() == &expected_rhs_layout
-          && lhs.level() == CpuMemoryLevel::L1
-          && rhs.level() == CpuMemoryLevel::L1
-          && out.level() == CpuMemoryLevel::RF
+          && lhs.memory() == CpuMemory::L1
+          && rhs.memory() == CpuMemory::L1
+          && out.memory() == CpuMemory::RF
     )
 }
 
-impl MemoryLevel for CpuMemoryLevel {
+impl Memory for CpuMemory {
     fn is_addressed(&self) -> bool {
         match &self {
-            CpuMemoryLevel::RF => true,
-            CpuMemoryLevel::VRF => true,
-            CpuMemoryLevel::L1 => false,
-            CpuMemoryLevel::GL => true,
+            CpuMemory::RF => true,
+            CpuMemory::VRF => true,
+            CpuMemory::L1 => false,
+            CpuMemory::GL => true,
         }
     }
 
     fn can_parallel_tile(&self) -> bool {
         match self {
-            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => false,
-            CpuMemoryLevel::GL | CpuMemoryLevel::L1 => true,
+            CpuMemory::RF | CpuMemory::VRF => false,
+            CpuMemory::GL | CpuMemory::L1 => true,
         }
     }
 
     fn cache_hit_cost(&self) -> MainCost {
         match &self {
-            CpuMemoryLevel::RF => 0,
-            CpuMemoryLevel::VRF => 0,
-            CpuMemoryLevel::L1 => 2,
+            CpuMemory::RF => 0,
+            CpuMemory::VRF => 0,
+            CpuMemory::L1 => 2,
             #[cfg(feature = "l2-speed-gl")]
-            CpuMemoryLevel::GL => 10,
+            CpuMemory::GL => 10,
             #[cfg(not(feature = "l2-speed-gl"))]
-            CpuMemoryLevel::GL => 20,
+            CpuMemory::GL => 20,
         }
     }
 
     fn vector_bytes(&self) -> &'static [u32] {
         match &self {
-            CpuMemoryLevel::VRF => &[16, 32],
+            CpuMemory::VRF => &[16, 32],
             _ => &[],
         }
     }
 
     fn counts_registers(&self) -> bool {
         match self {
-            CpuMemoryLevel::RF | CpuMemoryLevel::VRF => true,
-            CpuMemoryLevel::L1 | CpuMemoryLevel::GL => false,
+            CpuMemory::RF | CpuMemory::VRF => true,
+            CpuMemory::L1 | CpuMemory::GL => false,
         }
     }
 
     fn has_layout(&self) -> bool {
-        !matches!(self, CpuMemoryLevel::RF)
+        !matches!(self, CpuMemory::RF)
     }
 }
 
-impl PartialOrd for CpuMemoryLevel {
+impl PartialOrd for CpuMemory {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         if self == other {
             return Some(Ordering::Equal);
         }
 
         match (self, other) {
-            (CpuMemoryLevel::RF, CpuMemoryLevel::VRF) => None,
-            (CpuMemoryLevel::VRF, CpuMemoryLevel::RF) => None,
-            (CpuMemoryLevel::RF, _) => Some(Ordering::Less),
-            (CpuMemoryLevel::VRF, _) => Some(Ordering::Less),
-            (_, CpuMemoryLevel::RF) => Some(Ordering::Greater),
-            (_, CpuMemoryLevel::VRF) => Some(Ordering::Greater),
-            (CpuMemoryLevel::L1, CpuMemoryLevel::GL) => Some(Ordering::Less),
-            (CpuMemoryLevel::GL, CpuMemoryLevel::L1) => Some(Ordering::Greater),
-            (CpuMemoryLevel::L1, CpuMemoryLevel::L1) => unreachable!(),
-            (CpuMemoryLevel::GL, CpuMemoryLevel::GL) => unreachable!(),
+            (CpuMemory::RF, CpuMemory::VRF) => None,
+            (CpuMemory::VRF, CpuMemory::RF) => None,
+            (CpuMemory::RF, _) => Some(Ordering::Less),
+            (CpuMemory::VRF, _) => Some(Ordering::Less),
+            (_, CpuMemory::RF) => Some(Ordering::Greater),
+            (_, CpuMemory::VRF) => Some(Ordering::Greater),
+            (CpuMemory::L1, CpuMemory::GL) => Some(Ordering::Less),
+            (CpuMemory::GL, CpuMemory::L1) => Some(Ordering::Greater),
+            (CpuMemory::L1, CpuMemory::L1) => unreachable!(),
+            (CpuMemory::GL, CpuMemory::GL) => unreachable!(),
         }
     }
 }
 
-impl Display for CpuMemoryLevel {
+impl Display for CpuMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}",
             match &self {
-                CpuMemoryLevel::RF => "RF",
-                CpuMemoryLevel::VRF => "VRF",
-                CpuMemoryLevel::L1 => "L1",
-                CpuMemoryLevel::GL => "GL",
+                CpuMemory::RF => "RF",
+                CpuMemory::VRF => "VRF",
+                CpuMemory::L1 => "L1",
+                CpuMemory::GL => "GL",
             }
         )
     }
 }
 
-impl BiMap for CpuMemoryLevelBimap {
-    type Domain = CpuMemoryLevel;
+impl BiMap for CpuMemoryBimap {
+    type Domain = CpuMemory;
     type Codomain = u8;
 
-    fn apply(&self, level: &CpuMemoryLevel) -> u8 {
-        match level {
-            CpuMemoryLevel::RF => 0,
-            CpuMemoryLevel::VRF => 1,
-            CpuMemoryLevel::L1 => 2,
-            CpuMemoryLevel::GL => 3,
+    fn apply(&self, memory: &CpuMemory) -> u8 {
+        match memory {
+            CpuMemory::RF => 0,
+            CpuMemory::VRF => 1,
+            CpuMemory::L1 => 2,
+            CpuMemory::GL => 3,
         }
     }
 
-    fn apply_inverse(&self, i: &u8) -> CpuMemoryLevel {
+    fn apply_inverse(&self, i: &u8) -> CpuMemory {
         match *i {
-            0 => CpuMemoryLevel::RF,
-            1 => CpuMemoryLevel::VRF,
-            2 => CpuMemoryLevel::L1,
-            3 => CpuMemoryLevel::GL,
+            0 => CpuMemory::RF,
+            1 => CpuMemory::VRF,
+            2 => CpuMemory::L1,
+            3 => CpuMemory::GL,
             _ => panic!("Invalid index: {i}"),
         }
     }
 }
 
-impl CanonicalBimap for CpuMemoryLevel {
-    type Bimap = CpuMemoryLevelBimap;
+impl CanonicalBimap for CpuMemory {
+    type Bimap = CpuMemoryBimap;
 
     fn bimap() -> Self::Bimap {
-        CpuMemoryLevelBimap
+        CpuMemoryBimap
     }
 }
 
@@ -1741,7 +1729,7 @@ fn physicaltransposebyte_applies_to_operands<Tgt>(
 ) -> bool
 where
     Tgt: Target,
-    Tgt::Level: PartialEq<CpuMemoryLevel>,
+    Tgt::Memory: PartialEq<CpuMemory>,
 {
     if !matches!(typ, PrimitiveSpecType::Move) {
         return false;
@@ -1754,14 +1742,14 @@ where
                 dtype: Dtype::Uint8 | Dtype::Sint8,
                 aux:
                     TensorSpecAux {
-                        level: rhs_level,
+                        memory: rhs_level,
                         layout,
                         vector_size: Some(v),
                     },
             } if shape[..] == *shape![2, vector_values]
                 && layout.is_fully_contiguous()
                 && v.get() == vector_values
-                && *rhs_level == CpuMemoryLevel::VRF => {}
+                && *rhs_level == CpuMemory::VRF => {}
             _ => return false,
         };
     }
@@ -1778,14 +1766,14 @@ where
 pub fn broadcastvecmult_side<Tgt>(operands: &[TensorSpec<Tgt>]) -> Option<(usize, usize)>
 where
     Tgt: Target,
-    Tgt::Level: PartialEq<CpuMemoryLevel>,
+    Tgt::Memory: PartialEq<CpuMemory>,
 {
     debug_assert_eq!(operands.len(), 3);
 
     let out = &operands[2];
 
     // Output must live in VRF and be vector-aligned/contiguous.
-    if out.level() != CpuMemoryLevel::VRF || !out.is_contiguous() {
+    if out.memory() != CpuMemory::VRF || !out.is_contiguous() {
         return None;
     }
 
@@ -1818,9 +1806,9 @@ where
         let scalar = &operands[scalar_idx];
         let broadcast = &operands[broadcast_idx];
 
-        if !(scalar.level() == CpuMemoryLevel::RF || scalar.level() == CpuMemoryLevel::L1)
+        if !(scalar.memory() == CpuMemory::RF || scalar.memory() == CpuMemory::L1)
             || !scalar.is_contiguous()
-            || broadcast.level() != CpuMemoryLevel::VRF
+            || broadcast.memory() != CpuMemory::VRF
             || !broadcast.is_contiguous()
         {
             continue;
@@ -1869,19 +1857,19 @@ where
 pub fn broadcastvecmult_bf16_applies_to_operands<Tgt>(operands: &[TensorSpec<Tgt>]) -> bool
 where
     Tgt: Target,
-    Tgt::Level: PartialEq<CpuMemoryLevel>,
+    Tgt::Memory: PartialEq<CpuMemory>,
 {
     debug_assert_eq!(operands.len(), 3);
 
-    let scalar_level = operands[0].level();
-    if scalar_level != CpuMemoryLevel::RF && scalar_level != CpuMemoryLevel::L1 {
+    let scalar_level = operands[0].memory();
+    if scalar_level != CpuMemory::RF && scalar_level != CpuMemory::L1 {
         return false;
     }
 
     // Second and third parameters must be in VRF, vector size multiples, aligned, contig., and
     // have the same dtype as the first parameter.
     for o in &operands[1..] {
-        if o.level() != CpuMemoryLevel::VRF {
+        if o.memory() != CpuMemory::VRF {
             return false;
         }
         if !o.is_contiguous() {
@@ -2199,9 +2187,9 @@ mod tests {
     fn test_twovecbroadcastvecmult_applies_to_operands() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 2, 16],
-            (u8, CpuMemoryLevel::L1, row_major),
-            (i8, CpuMemoryLevel::VRF, batched_col_major, 32),
-            (i16, CpuMemoryLevel::VRF, row_major, 16),
+            (u8, CpuMemory::L1, row_major),
+            (i8, CpuMemory::VRF, batched_col_major, 32),
+            (i16, CpuMemory::VRF, row_major, 16),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2212,9 +2200,9 @@ mod tests {
     fn test_dotproductloop_applies_to_vrf_lhs_strip() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 8, 1],
-            (f32, CpuMemoryLevel::VRF, row_major, 8),
-            (f32, CpuMemoryLevel::L1, col_major),
-            (f32, CpuMemoryLevel::RF, row_major),
+            (f32, CpuMemory::VRF, row_major, 8),
+            (f32, CpuMemory::L1, col_major),
+            (f32, CpuMemory::RF, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2225,9 +2213,9 @@ mod tests {
     fn test_dotproductloop_applies_to_longer_k() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 32, 1],
-            (f32, CpuMemoryLevel::VRF, row_major, 8),
-            (f32, CpuMemoryLevel::L1, col_major),
-            (f32, CpuMemoryLevel::RF, row_major),
+            (f32, CpuMemory::VRF, row_major, 8),
+            (f32, CpuMemory::L1, col_major),
+            (f32, CpuMemory::RF, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2238,9 +2226,9 @@ mod tests {
     fn test_dotproductloop_rejects_wrong_vector_size() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 8, 1],
-            (f32, CpuMemoryLevel::VRF, row_major, 4),
-            (f32, CpuMemoryLevel::L1, col_major),
-            (f32, CpuMemoryLevel::RF, row_major),
+            (f32, CpuMemory::VRF, row_major, 4),
+            (f32, CpuMemory::L1, col_major),
+            (f32, CpuMemory::RF, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2279,9 +2267,9 @@ mod tests {
         let spec: Spec<Avx2Target> = spec!(
             MatmulAccum(
                 [1, 1, 1, 16],
-                (u8, CpuMemoryLevel::RF, row_major),
-                (u8, CpuMemoryLevel::VRF, row_major, 16),
-                (u8, CpuMemoryLevel::VRF, row_major, 16),
+                (u8, CpuMemory::RF, row_major),
+                (u8, CpuMemory::VRF, row_major, 16),
+                (u8, CpuMemory::VRF, row_major, 16),
                 serial
             ),
             MemoryLimits::Standard(MemVec::zero::<Avx2Target>())
@@ -2315,9 +2303,9 @@ mod tests {
     fn test_broadcastvecmultadd_rhs_broadcast_param_order() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 8, 1, 1],
-            (f32, CpuMemoryLevel::VRF, row_major, 8),
-            (f32, CpuMemoryLevel::L1, row_major),
-            (f32, CpuMemoryLevel::VRF, row_major, 8),
+            (f32, CpuMemory::VRF, row_major, 8),
+            (f32, CpuMemory::L1, row_major),
+            (f32, CpuMemory::VRF, row_major, 8),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2329,17 +2317,12 @@ mod tests {
         let arg0 = TensorSpec::new_canon(
             shape![2, 32],
             Dtype::Uint32,
-            CpuMemoryLevel::VRF,
+            CpuMemory::VRF,
             row_major,
             Some(nz!(8u32)),
         );
-        let arg1 = TensorSpec::new_canon(
-            shape![2, 32],
-            Dtype::Uint32,
-            CpuMemoryLevel::L1,
-            row_major,
-            None,
-        );
+        let arg1 =
+            TensorSpec::new_canon(shape![2, 32], Dtype::Uint32, CpuMemory::L1, row_major, None);
         let parameter0: Param<Avx2Target> = Param::new(0, arg0);
         let parameter1: Param<Avx2Target> = Param::new(1, arg1);
         let cost = CpuKernel::Assign.main_cost(&[parameter0, parameter1]);

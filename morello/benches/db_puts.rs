@@ -17,9 +17,9 @@ fn mk_specs_set() -> Vec<Spec<Avx2Target>> {
                 for &n in &SIZES {
                     specs.push(morello::spec!(Matmul(
                         [b, m, k, n],
-                        (u32, Avx2Target::default_level(), row_major),
-                        (u32, Avx2Target::default_level(), row_major),
-                        (u32, Avx2Target::default_level(), row_major),
+                        (u32, Avx2Target::default_memory(), row_major),
+                        (u32, Avx2Target::default_memory(), row_major),
+                        (u32, Avx2Target::default_memory(), row_major),
                         serial
                     )));
                 }

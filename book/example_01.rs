@@ -4,7 +4,7 @@ use morello::lspec;
 use morello::spec::Spec;
 use morello::target::{
     Avx2Target,
-    CpuMemoryLevel::{self, RF},
+    CpuMemory::{self, RF},
     Target,
 };
 // ANCHOR_END: specdef_use

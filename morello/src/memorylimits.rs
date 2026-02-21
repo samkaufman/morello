@@ -2,7 +2,7 @@ use crate::grid::general::BiMap;
 use crate::grid::linear::BimapInt;
 use crate::utils::{bit_length, bit_length_inverse, next_binary_power};
 use crate::{
-    target::{MemoryLevel, Target, LEVEL_COUNT},
+    target::{Memory, Target, MEMORY_COUNT},
     utils::prev_power_of_two,
 };
 
@@ -13,11 +13,11 @@ use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
 use std::{iter, ops::Sub};
 
-/// MemoryLimits are bounds on available memory for each level of a target.
+/// MemoryLimits are bounds on available capacity in each memory.
 ///
 /// There are two variants. `MemoryLimits::Standard` counts the number of registers for
-/// register-counting levels and the number of cache lines (with size
-/// [Target::line_size]) for all other levels. No Spec satisfying the MemoryLimits
+/// register-counting memories and the number of cache lines (with size
+/// [Target::line_size]) for all other memories. No Spec satisfying the MemoryLimits
 /// should have a peak exceeding those. `MemoryLimits::Pipeline` counts separately the
 /// memory used by intermediate tensors just before or after a stage. This expands the
 /// set of `ImplNode::Pipeline`s which might satisfy a Spec, because it is valid for
@@ -40,16 +40,16 @@ pub enum MemoryLimits {
 /// ignoring children.
 #[derive(Debug, Clone)]
 pub enum MemoryAllocation {
-    Simple([u64; LEVEL_COUNT]),
-    Inner(Vec<[u64; LEVEL_COUNT]>),
+    Simple([u64; MEMORY_COUNT]),
+    Inner(Vec<[u64; MEMORY_COUNT]>),
     Pipeline {
-        intermediate_consumption: Vec<[u64; LEVEL_COUNT]>,
+        intermediate_consumption: Vec<[u64; MEMORY_COUNT]>,
     },
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
-pub struct MemVec([u8; LEVEL_COUNT]);
+pub struct MemVec([u8; MEMORY_COUNT]);
 
 pub struct MemVecIter<'a> {
     mem_vec: &'a MemVec,
@@ -74,11 +74,11 @@ impl MemoryLimits {
     pub fn discretize<Tgt: Target>(&mut self) {
         match self {
             MemoryLimits::Standard(mem_vec) => {
-                Tgt::levels()
+                Tgt::memories()
                     .into_iter()
                     .enumerate()
-                    .for_each(|(i, level)| {
-                        if !level.counts_registers() {
+                    .for_each(|(i, memory)| {
+                        if !memory.counts_registers() {
                             mem_vec.set_bit_length(i, prev_power_of_two(mem_vec.get_unscaled(i)));
                         }
                     });
@@ -176,18 +176,18 @@ impl Display for MemoryLimits {
 
 impl MemoryAllocation {
     pub fn none() -> Self {
-        MemoryAllocation::Simple([0; LEVEL_COUNT])
+        MemoryAllocation::Simple([0; MEMORY_COUNT])
     }
 
     // TODO: Document.
     pub fn peak_memory_from_child_peaks<Tgt: Target>(&self, child_peaks: &[MemVec]) -> MemVec {
-        let levels = Tgt::levels();
+        let memories = Tgt::memories();
         let mut peak = MemVec::zero::<Tgt>();
         match self {
             MemoryAllocation::Simple(own) if child_peaks.is_empty() => {
                 for (i, o) in own.iter().enumerate() {
                     let mut computed_peak = *o;
-                    if !levels[i].counts_registers() {
+                    if !memories[i].counts_registers() {
                         computed_peak = next_binary_power(computed_peak);
                     }
                     peak.set_snap_up(i, computed_peak);
@@ -199,7 +199,7 @@ impl MemoryAllocation {
                     for (i, o) in own.iter().enumerate() {
                         let mut computed_peak =
                             peak.get_unscaled(i).max(o + child_peak.get_unscaled(i));
-                        if !levels[i].counts_registers() {
+                        if !memories[i].counts_registers() {
                             computed_peak = next_binary_power(computed_peak);
                         }
                         peak.set_snap_up(i, computed_peak);
@@ -212,7 +212,7 @@ impl MemoryAllocation {
                     for (i, o) in own_child_alloc.iter().enumerate() {
                         let mut computed_peak =
                             peak.get_unscaled(i).max(child_peak.get_unscaled(i) + *o);
-                        if !levels[i].counts_registers() {
+                        if !memories[i].counts_registers() {
                             computed_peak = next_binary_power(computed_peak);
                         }
                         peak.set_snap_up(i, computed_peak);
@@ -223,7 +223,7 @@ impl MemoryAllocation {
                 intermediate_consumption,
             } => {
                 debug_assert_eq!(child_peaks.len(), intermediate_consumption.len() + 1);
-                let z = [0; LEVEL_COUNT];
+                let z = [0; MEMORY_COUNT];
                 let mut preceding_consumption = &z;
                 let mut following_consumption = &intermediate_consumption[0];
                 for (child_idx, child_peak) in child_peaks.iter().enumerate() {
@@ -233,7 +233,7 @@ impl MemoryAllocation {
                                 + child_peak.get_unscaled(i)
                                 + following_consumption[i],
                         );
-                        if !levels[i].counts_registers() {
+                        if !memories[i].counts_registers() {
                             raw_peak = next_binary_power(raw_peak);
                         }
                         peak.set_snap_up(i, raw_peak);
@@ -249,29 +249,29 @@ impl MemoryAllocation {
 }
 
 impl MemVec {
-    pub fn new(contents: [u64; LEVEL_COUNT]) -> Self {
-        let mut result = MemVec([0; LEVEL_COUNT]);
+    pub fn new(contents: [u64; MEMORY_COUNT]) -> Self {
+        let mut result = MemVec([0; MEMORY_COUNT]);
         for (i, &value) in contents.iter().enumerate() {
             result.set(i, value);
         }
         result
     }
 
-    pub fn new_for_target<Tgt: Target>(limits_arr: [u64; LEVEL_COUNT]) -> Self {
-        let levels = Tgt::levels();
+    pub fn new_for_target<Tgt: Target>(limits_arr: [u64; MEMORY_COUNT]) -> Self {
+        let memories = Tgt::memories();
         let mut corrected_limits = limits_arr;
 
-        // For levels that don't count registers (use bit-length encoding),
+        // For memories that don't count registers (use bit-length encoding),
         // we need to ensure values are powers of two
-        for (i, level) in levels.iter().enumerate() {
-            if !level.counts_registers() {
+        for (i, memory) in memories.iter().enumerate() {
+            if !memory.counts_registers() {
                 corrected_limits[i] = next_binary_power(corrected_limits[i]);
             }
         }
 
         Self::new_mixed(
             corrected_limits,
-            levels.map(|level| level.counts_registers()),
+            memories.map(|memory| memory.counts_registers()),
         )
     }
 
@@ -279,9 +279,9 @@ impl MemVec {
     ///
     /// `values`: The actual values to store
     /// `use_raw_encoding`: true for raw encoding, false for bit-length encoding
-    pub fn new_mixed(values: [u64; LEVEL_COUNT], use_raw_encoding: [bool; LEVEL_COUNT]) -> Self {
-        let mut result = [0u8; LEVEL_COUNT];
-        for i in 0..LEVEL_COUNT {
+    pub fn new_mixed(values: [u64; MEMORY_COUNT], use_raw_encoding: [bool; MEMORY_COUNT]) -> Self {
+        let mut result = [0u8; MEMORY_COUNT];
+        for i in 0..MEMORY_COUNT {
             if use_raw_encoding[i] {
                 result[i] = Self::encode_raw(values[i]);
             } else {
@@ -292,8 +292,8 @@ impl MemVec {
     }
 
     pub fn zero<Tgt: Target>() -> Self {
-        debug_assert_eq!(Tgt::levels().len(), LEVEL_COUNT);
-        MemVec([0; LEVEL_COUNT])
+        debug_assert_eq!(Tgt::memories().len(), MEMORY_COUNT);
+        MemVec([0; MEMORY_COUNT])
     }
 
     #[inline]
@@ -403,7 +403,7 @@ impl MemVec {
         self.0[idx] = Self::encode_bit_length(value);
     }
 
-    pub fn checked_sub_snap_down(self, rhs: &[u64; LEVEL_COUNT]) -> Result<MemVec, usize> {
+    pub fn checked_sub_snap_down(self, rhs: &[u64; MEMORY_COUNT]) -> Result<MemVec, usize> {
         let mut result = self;
         for (i, (result_entry, &r)) in result.0.iter_mut().zip(rhs).enumerate() {
             let value = *result_entry;
@@ -448,12 +448,12 @@ impl MemVec {
 
     /// Snaps memory values up to the next power of two.
     ///
-    /// Only applies to non-register-counting levels.
+    /// Only applies to non-register-counting memories.
     pub fn snap_up_for_target<Tgt: Target>(self) -> MemVec {
-        let levels = Tgt::levels();
+        let memories = Tgt::memories();
         let mut result = self;
-        for (i, level) in levels.iter().enumerate() {
-            if !level.counts_registers() {
+        for (i, memory) in memories.iter().enumerate() {
+            if !memory.counts_registers() {
                 let current = result.get_unscaled(i);
                 if current != 0 {
                     result.set_bit_length(i, current.next_power_of_two());
@@ -478,7 +478,7 @@ impl MemVec {
         F: Fn(u64, u64) -> u64,
         G: Fn(u8, u8) -> u8,
     {
-        let mut result = [0u8; LEVEL_COUNT];
+        let mut result = [0u8; MEMORY_COUNT];
         for (&self_encoded, &other_encoded, r) in izip!(&self.0, &other.0, &mut result) {
             if (self_encoded & 0x80) == (other_encoded & 0x80) {
                 // Same encoding, can compare directly. Leading bit won't affect result.
@@ -689,11 +689,11 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         match t {
-            MemoryLimits::Standard(limits_vec) => Tgt::levels()
+            MemoryLimits::Standard(limits_vec) => Tgt::memories()
                 .into_iter()
                 .enumerate()
-                .map(|(i, level)| {
-                    if level.counts_registers() {
+                .map(|(i, memory)| {
+                    if memory.counts_registers() {
                         BimapInt::try_from(limits_vec.get_unscaled(i)).unwrap()
                     } else {
                         BimapInt::from(limits_vec.get_binary_scaled(i))
@@ -704,10 +704,10 @@ impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        let levels = Tgt::levels();
-        let mut values = [0u64; LEVEL_COUNT];
-        for idx in 0..LEVEL_COUNT {
-            if levels[idx].counts_registers() {
+        let memories = Tgt::memories();
+        let mut values = [0u64; MEMORY_COUNT];
+        for idx in 0..MEMORY_COUNT {
+            if memories[idx].counts_registers() {
                 values[idx] = i[idx].into();
             } else {
                 values[idx] = bit_length_inverse(i[idx]);
@@ -732,14 +732,14 @@ pub fn arb_memorylimits_ext<Tgt: Target>(
     use proptest::prelude::*;
     use proptest::strategy::BoxedStrategy;
 
-    let levels = Tgt::levels();
-    let component_ranges = (0..LEVEL_COUNT)
+    let memories = Tgt::memories();
+    let component_ranges = (0..MEMORY_COUNT)
         .map(|i| -> BoxedStrategy<u64> {
-            if levels[i].counts_registers() {
-                // For register-counting levels, use raw integer ranges
+            if memories[i].counts_registers() {
+                // For register-counting memories, use raw integer ranges
                 (minimum_memory.get_unscaled(i)..=maximum_memory.get_unscaled(i)).boxed()
             } else {
-                // For non-register levels, use binary scaling (power-of-two ranges)
+                // For non-register memories, use binary scaling (power-of-two ranges)
                 (minimum_memory.get_binary_scaled(i)..=maximum_memory.get_binary_scaled(i))
                     .prop_map(|bit_len| bit_length_inverse(bit_len.into()))
                     .boxed()
@@ -748,11 +748,11 @@ pub fn arb_memorylimits_ext<Tgt: Target>(
         .collect::<Vec<_>>();
 
     component_ranges.prop_map(move |v| {
-        let mut values = [0u64; LEVEL_COUNT];
-        let mut use_raw_encoding = [false; LEVEL_COUNT];
-        for i in 0..LEVEL_COUNT {
+        let mut values = [0u64; MEMORY_COUNT];
+        let mut use_raw_encoding = [false; MEMORY_COUNT];
+        for i in 0..MEMORY_COUNT {
             values[i] = v[i];
-            use_raw_encoding[i] = levels[i].counts_registers();
+            use_raw_encoding[i] = memories[i].counts_registers();
         }
         MemoryLimits::Standard(MemVec::new_mixed(values, use_raw_encoding))
     })
@@ -905,10 +905,10 @@ mod tests {
             allocation in any_with::<MemoryAllocation>(MemoryAllocationArbConfig(true)),
         ) {
             let peaks = allocation.peak_memory_from_child_peaks::<Avx2Target>(&[]);
-            for (i, level) in Avx2Target::levels().iter().enumerate() {
+            for (i, memory) in Avx2Target::memories().iter().enumerate() {
                 let allocated = match &allocation {
                     MemoryAllocation::Simple(own) => {
-                        if level.counts_registers() {
+                        if memory.counts_registers() {
                             own[i]
                         } else {
                             next_binary_power(own[i])

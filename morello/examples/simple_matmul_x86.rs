@@ -11,7 +11,7 @@ use morello::spec::Spec;
 use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
-    CpuMemoryLevel::{self, GL},
+    CpuMemory::{self, GL},
     Target,
 };
 use morello::utils::ToWriteFmt;
@@ -46,9 +46,9 @@ fn main() {
     // changing the Spec, allow the remainder of the schedule to assume tensors are in L1.
     let implementation_l1 = spec
         .tile_out(&[1, 16, 16])
-        .move_param(0, CpuMemoryLevel::L1)
-        .move_param(1, CpuMemoryLevel::L1)
-        .move_param(2, CpuMemoryLevel::L1);
+        .move_param(0, CpuMemory::L1)
+        .move_param(1, CpuMemory::L1)
+        .move_param(2, CpuMemory::L1);
 
     // This results in the following Impl:
     // ```
@@ -91,15 +91,15 @@ fn main() {
         .split(4)
         // Move the 1x4 left-hand input tensor into the register. This results in two
         // sub-Specs---a Move from L1 into RF and the continuation of the MatrmulAccum.
-        .move_param(0, CpuMemoryLevel::RF)
+        .move_param(0, CpuMemory::RF)
         // Let's schedule the introduced Move sub-Spec with `move_schedule` (defined below).
         .subschedule(&[1, 0], move_schedule)
         // Move the 4x1 right-hand input tensor into registers as well.
-        .move_param(1, CpuMemoryLevel::RF)
+        .move_param(1, CpuMemory::RF)
         .subschedule(&[1, 1, 0], move_schedule)
         // And, finally, move the 1x1 output tensor into RF, scheduling
         // the load and store sub-Specs...
-        .move_param(2, CpuMemoryLevel::RF)
+        .move_param(2, CpuMemory::RF)
         .subschedule(&[1, 1, 1, 0], move_schedule)
         .subschedule(&[1, 1, 1, 2], move_schedule)
         // ...and compute the 1x1x1 matix multiply with `+= a * b`.
@@ -214,7 +214,7 @@ fn main() {
 //  l1_tile[index] = v;
 /// ```
 fn zero_schedule(zero: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
-    zero.move_param(0, CpuMemoryLevel::RF)
+    zero.move_param(0, CpuMemory::RF)
         .subschedule(&[0], |z| z.select(CpuKernel::MemsetZero))
         .subschedule(&[1], |move_back| move_back.select(CpuKernel::Assign))
 }

@@ -18,7 +18,7 @@ use morello::memorylimits::{MemVec, MemoryLimits};
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::smallvec::smallvec;
 use morello::target::{
-    ArmTarget, Avx2Target, Avx512Target, CpuMemoryLevel::GL, CpuTarget, TargetId, LEVEL_COUNT,
+    ArmTarget, Avx2Target, Avx512Target, CpuMemory::GL, CpuTarget, TargetId, MEMORY_COUNT,
 };
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
@@ -63,7 +63,7 @@ struct Args {
     #[arg(long, value_enum, hide_default_value = true, default_value_t = TargetId::default())]
     target: TargetId,
 
-    /// Override memory limits per level (comma-separated integers)
+    /// Override memory limits for each memory (comma-separated integers)
     #[arg(long, value_name = "RF,VRF,...")]
     memory: Option<String>,
 
@@ -164,8 +164,8 @@ fn main() -> Result<()> {
 fn main_per_db<Tgt>(args: &Args) -> Result<()>
 where
     Tgt: CpuTarget,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new::<Tgt>(
@@ -254,7 +254,7 @@ where
                     .map(|layout| {
                         debug_assert!(layout.is_fully_contiguous()); // row_major should be contig.
                         TensorSpecAux::<Tgt> {
-                            level: GL.into(),
+                            memory: GL.into(),
                             layout,
                             vector_size: None,
                         }
@@ -277,12 +277,12 @@ where
             })
             .collect::<Result<Vec<_>>>()?;
         ensure!(
-            parsed.len() == LEVEL_COUNT,
-            "Expected {LEVEL_COUNT} memory levels but parsed {} from `{}`",
+            parsed.len() == MEMORY_COUNT,
+            "Expected {MEMORY_COUNT} memories but parsed {} from `{}`",
             parsed.len(),
             mem_override
         );
-        let values: [u64; LEVEL_COUNT] = parsed.try_into().unwrap();
+        let values: [u64; MEMORY_COUNT] = parsed.try_into().unwrap();
         MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(values))
     } else {
         Tgt::max_mem()

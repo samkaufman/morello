@@ -114,7 +114,7 @@ action_dispatch! {
     /// Tile the output tensor and its inputs to respect the updated inputs.
     (TileOut, TileOut),
     (Split, Split),
-    /// Move a tensor to a different memory level, layout, and/or dtype.
+    /// Move a tensor to a different memory, layout, and/or dtype.
     (Move, Move<Tgt>),
     /// Allocate an output tensor, a Zero sub-Spec, and an accumulating variant of the receiver.
     (ToAccum, ToAccum),
@@ -306,7 +306,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
     //         for param_idx in 0..original_spec.0.operand_count() {
     //             if !original_spec
     //                 .0
-    //                 .parameter_level(param_idx)
+    //                 .parameter_memory(param_idx)
     //                 .can_parallel_tile()
     //             {
     //                 todo!("Return an error");
@@ -348,7 +348,7 @@ impl<Tgt: Target> ActionSolver<Tgt> {
     //                 NotApplicableReason::TileShapeInvalid,
     //             ));
     //         }
-    //         if outer.level().has_layout() {
+    //         if outer.memory().has_layout() {
     //             match outer
     //                 .layout()
     //                 .update_for_tiling(outer.shape(), inner.shape())
@@ -416,7 +416,7 @@ impl Display for NotApplicableReason {
                 write!(f, "Cannot implement serial-only Spec with parallel tile")
             }
             NotApplicableReason::LevelPreventedParallel => {
-                write!(f, "Spec has a non-parallel-tileable level")
+                write!(f, "Spec has a non-parallel-tileable memory")
             }
             NotApplicableReason::LayoutIncompatible => {
                 write!(f, "Layout does not apply to tile size")

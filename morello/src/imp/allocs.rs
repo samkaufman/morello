@@ -3,7 +3,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
 use crate::spec::Spec;
-use crate::target::{MemoryLevel, Target};
+use crate::target::{Memory, Target};
 use crate::tensorspec::TensorSpec;
 use crate::views::{View, ViewE};
 use std::iter;
@@ -154,9 +154,9 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
 }
 
 pub(crate) fn move_cost<Tgt: Target>(accessed: &TensorSpec<Tgt>) -> MainCost {
-    let hit_cost = accessed.level().cache_hit_cost();
+    let hit_cost = accessed.memory().cache_hit_cost();
     let mut cost = 0;
-    if accessed.level().has_layout() {
+    if accessed.memory().has_layout() {
         let src_cache_lines = MainCost::from(
             accessed
                 .layout()
@@ -175,8 +175,8 @@ pub(crate) fn move_cost<Tgt: Target>(accessed: &TensorSpec<Tgt>) -> MainCost {
 pub(crate) fn alloc_memory_allocation<Tgt: Target>(
     introduced_spec: &TensorSpec<Tgt>,
 ) -> MemoryAllocation {
-    MemoryAllocation::Simple(Tgt::levels().map(|level| {
-        if introduced_spec.level() == level {
+    MemoryAllocation::Simple(Tgt::memories().map(|memory| {
+        if introduced_spec.memory() == memory {
             introduced_spec.memory_units()
         } else {
             0u64

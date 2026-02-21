@@ -25,7 +25,7 @@ use crate::target::{
         broadcastvecmult_side, dotproduct_accum_count, DOT_PRODUCT_ACCUM_COUNT,
         DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE,
     },
-    CpuKernel, CpuMemoryLevel, CpuTarget, Kernel, Target,
+    CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
 };
 use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
@@ -247,8 +247,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let mut parameter_buf_names = vec![];
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
-            let buf =
-                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
+            let buf = self.make_buffer(
+                spec.shape(),
+                spec.vector_size(),
+                spec.dtype(),
+                spec.memory(),
+            );
             buf.emit(&mut main_body_str, InitType::Zero, depth)?;
             parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
             self.name_env.insert(kernel_argument.identifier(), buf);
@@ -369,8 +373,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let mut parameter_buf_names = vec![];
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
-            let buf =
-                self.make_buffer(spec.shape(), spec.vector_size(), spec.dtype(), spec.level());
+            let buf = self.make_buffer(
+                spec.shape(),
+                spec.vector_size(),
+                spec.dtype(),
+                spec.memory(),
+            );
             buf.emit(&mut main_body_str, InitType::Random, depth)?;
             parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
             self.name_env.insert(kernel_argument.identifier(), buf);
@@ -549,13 +557,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         shape: &[DimSize],
         vector_size: Option<DimSize>,
         dtype: Dtype,
-        level: Tgt::Level,
+        memory: Tgt::Memory,
     ) -> CBuffer {
-        debug_assert_eq!(vector_size.is_some(), level == CpuMemoryLevel::VRF);
+        debug_assert_eq!(vector_size.is_some(), memory == CpuMemory::VRF);
 
         let size = shape.iter().map(|d| d.get()).product::<u32>();
-        match level.into() {
-            CpuMemoryLevel::VRF => {
+        match memory.into() {
+            CpuMemory::VRF => {
                 let vector_size = vector_size.unwrap();
                 let vec_type = get_vector(Tgt::vec_types(), dtype, vector_size);
                 self.headers.vector_type_defs.insert(vec_type);
@@ -568,12 +576,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         .collect(),
                 }
             }
-            CpuMemoryLevel::RF => CBuffer::RegVars {
+            CpuMemory::RF => CBuffer::RegVars {
                 inner_vecs: (0..size)
                     .map(|_| (self.namer.fresh_name(), Either::Left(dtype)))
                     .collect(),
             },
-            CpuMemoryLevel::L1 | CpuMemoryLevel::GL => {
+            CpuMemory::L1 | CpuMemory::GL => {
                 let name = self.namer.fresh_name();
                 if size * u32::from(dtype.size()) > STACK_CUTOFF {
                     CBuffer::HeapArray { name, size, dtype }
@@ -620,7 +628,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             spec.shape(),
                             spec.vector_size(),
                             spec.dtype(),
-                            spec.level(),
+                            spec.memory(),
                         );
                         dest_buffer.emit(w, InitType::None, depth)?;
                         self.name_env.insert(tensor.identifier(), dest_buffer);
@@ -664,7 +672,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 intermediate_spec.shape(),
                                 intermediate_spec.vector_size(),
                                 intermediate_spec.dtype(),
-                                intermediate_spec.level(),
+                                intermediate_spec.memory(),
                             );
                             buffer.emit(w, InitType::None, depth)?;
                             self.name_env.insert(tensor_wiring.identifier(), buffer);
@@ -1870,7 +1878,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )
                     }
                     CpuKernel::PhysicalTransposeByte256 => {
-                        use CpuMemoryLevel::VRF;
+                        use CpuMemory::VRF;
 
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),

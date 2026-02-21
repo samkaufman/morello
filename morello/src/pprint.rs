@@ -185,7 +185,7 @@ mod tests {
     use crate::spec::{LogicalSpec, Spec};
     use crate::target::{
         Avx2Target,
-        CpuMemoryLevel::{GL, L1},
+        CpuMemory::{GL, L1},
     };
 
     #[test]

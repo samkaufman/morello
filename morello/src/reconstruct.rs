@@ -18,8 +18,8 @@ pub fn reconstruct_impls_from_actions<Tgt, F>(
 ) -> Vec<ImplNode<Tgt>>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     F: Fn(&Spec<Tgt>) -> Option<ActionCostVec>,
 {
     debug_assert!(spec.is_canonical(), "Spec must be canonical: {}", spec);
@@ -46,8 +46,8 @@ where
 fn reconstruct_children_from_optima<Tgt, F>(lookup: &F, tree: &ImplNode<Tgt>) -> ImplNode<Tgt>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     F: Fn(&Spec<Tgt>) -> Option<ActionCostVec>,
 {
     match tree {

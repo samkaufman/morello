@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct BroadcastFirst<Tgt: Target> {
-    pub broadcast_level: Tgt::Level,
+    pub broadcast_level: Tgt::Memory,
     pub broadcast_layout: Layout,
     pub broadcast_vector_size: Option<DimSize>,
 }
@@ -61,7 +61,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
 
         // Compute the memory limits for the new children.
         let new_limits = {
-            let intermediate_mem_consumed = Tgt::levels().map(|l| {
+            let intermediate_mem_consumed = Tgt::memories().map(|l| {
                 if self.broadcast_level == l {
                     broadcast_destination.spec().memory_units()
                 } else {
@@ -75,7 +75,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
                     .checked_sub_snap_down(&intermediate_mem_consumed)
                     .map_err(|oom_idx| {
                         ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
-                            Tgt::levels()[oom_idx].to_string(),
+                            Tgt::memories()[oom_idx].to_string(),
                         ))
                     })?,
             });

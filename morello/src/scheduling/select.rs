@@ -40,7 +40,7 @@ impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
                 for (i, (a, b)) in allocated.iter().zip(bounds.iter()).enumerate() {
                     if *a > b {
                         return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
-                            Tgt::levels()[i].to_string(),
+                            Tgt::memories()[i].to_string(),
                         )));
                     }
                 }

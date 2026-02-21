@@ -16,7 +16,7 @@ use std::rc::Rc;
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Bufferize<Tgt: Target> {
     pub index: usize,
-    pub level: Tgt::Level,
+    pub memory: Tgt::Memory,
     pub layout: Layout,
     pub vector_size: Option<DimSize>,
 }
@@ -52,7 +52,7 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             TensorSpec::new_canon_checked(
                 consumer.input_shape(0),
                 consumer.input_dtype(0),
-                self.level,
+                self.memory,
                 self.layout.clone(),
                 self.vector_size,
             )
@@ -64,8 +64,8 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             // Compute the amount of memory consumed by the new, intermediate
             // tensor.
             // TODO: This shouldn't need to be both here and in `memory_allocated`.
-            let intermediate_mem_consumed_nondiscrete = Tgt::levels().map(|l| {
-                if self.level == l {
+            let intermediate_mem_consumed_nondiscrete = Tgt::memories().map(|l| {
+                if self.memory == l {
                     intermediate_tensor.spec().memory_units()
                 } else {
                     0u64
@@ -80,7 +80,7 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
                     .checked_sub_snap_down(&intermediate_mem_consumed_nondiscrete)
                     .map_err(|oom_idx| {
                         ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
-                            Tgt::levels()[oom_idx].to_string(),
+                            Tgt::memories()[oom_idx].to_string(),
                         ))
                     })?,
             });
@@ -125,7 +125,7 @@ mod tests {
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::shape;
     use crate::spec::{PrimitiveBasics, PrimitiveSpecType};
-    use crate::target::{Avx2Target, CpuMemoryLevel};
+    use crate::target::{Avx2Target, CpuMemory};
     use crate::tensorspec::TensorSpecAux;
     use crate::views::{Param, ViewE};
 
@@ -149,27 +149,27 @@ mod tests {
         };
 
         let aux0_1 = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            memory: CpuMemory::GL,
             layout: row_major(&basics0.parameter_shape(1)),
             vector_size: None,
         };
         let aux1_1 = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            memory: CpuMemory::GL,
             layout: row_major(&basics1.parameter_shape(1)),
             vector_size: None,
         };
         let aux2_0 = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            memory: CpuMemory::GL,
             layout: row_major(&basics2.parameter_shape(0)),
             vector_size: None,
         };
         let aux2_1 = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            memory: CpuMemory::GL,
             layout: row_major(&basics2.parameter_shape(1)),
             vector_size: None,
         };
         let aux0_out = TensorSpecAux {
-            level: CpuMemoryLevel::GL,
+            memory: CpuMemory::GL,
             layout: row_major(&basics0.parameter_shape(2)),
             vector_size: None,
         };
@@ -182,7 +182,7 @@ mod tests {
             Avx2Target::max_mem(),
         );
         spec.canonicalize().unwrap();
-        let imp = spec.bufferize(1, CpuMemoryLevel::GL, row_major, None);
+        let imp = spec.bufferize(1, CpuMemory::GL, row_major, None);
 
         assert_eq!(imp.children().len(), 2);
         assert!(matches!(imp, ImplNode::Pipeline(_)));

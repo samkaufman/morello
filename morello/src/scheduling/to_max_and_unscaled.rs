@@ -6,7 +6,7 @@ use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{Target, LEVEL_COUNT};
+use crate::target::{Target, MEMORY_COUNT};
 use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::views::{Param, Tensor, View};
 use nonzero::nonzero as nz;
@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct ToMaxAndUnscaled<Tgt: Target> {
-    pub max_level: Tgt::Level,
+    pub max_level: Tgt::Memory,
     pub max_layout: Layout,
     pub max_vector_size: Option<DimSize>,
 }
@@ -104,7 +104,7 @@ fn scalar_tensor<Tgt: Target>(
     scan_dim: u8,
     spec_shape: &[DimSize],
     dtype: Dtype,
-    max_level: Tgt::Level,
+    max_level: Tgt::Memory,
     max_layout: Layout,
     max_vector_size: Option<DimSize>,
 ) -> Result<Tensor<Tgt>, ApplyError> {
@@ -112,7 +112,7 @@ fn scalar_tensor<Tgt: Target>(
         shape: Shape::from_slice(spec_shape),
         dtype,
         aux: TensorSpecAux {
-            level: max_level,
+            memory: max_level,
             layout: max_layout,
             vector_size: max_vector_size,
         },
@@ -140,11 +140,11 @@ fn child_limits<'a, Tgt: Target, I>(
 where
     I: IntoIterator<Item = &'a TensorSpec<Tgt>>,
 {
-    let mut new_buffer_consumption = [0u64; LEVEL_COUNT];
+    let mut new_buffer_consumption = [0u64; MEMORY_COUNT];
     for tensor_spec in live_tensors {
-        let idx = Tgt::levels()
+        let idx = Tgt::memories()
             .iter()
-            .position(|l| l == &tensor_spec.level())
+            .position(|l| l == &tensor_spec.memory())
             .unwrap();
         new_buffer_consumption[idx] += tensor_spec.memory_units();
     }
@@ -154,7 +154,7 @@ where
             .checked_sub_snap_down(&new_buffer_consumption)
             .map_err(|oom_idx| {
                 ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
-                    Tgt::levels()[oom_idx].to_string(),
+                    Tgt::memories()[oom_idx].to_string(),
                 ))
             })?,
     });

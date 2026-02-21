@@ -12,9 +12,9 @@ use morello::target::{Avx2Target, Target};
 fn matmul_spec(size: u32) -> LogicalSpec<Avx2Target> {
     lspec!(Matmul(
         [1, size, size, size],
-        (u32, Avx2Target::default_level(), row_major),
-        (u32, Avx2Target::default_level(), row_major),
-        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
         serial
     ))
 }
@@ -23,9 +23,9 @@ fn matmul_spec(size: u32) -> LogicalSpec<Avx2Target> {
 fn conv_spec(size: u32) -> LogicalSpec<Avx2Target> {
     lspec!(Conv(
         [size, size, size, 1, 1, size, size],
-        (u32, Avx2Target::default_level(), row_major),
-        (u32, Avx2Target::default_level(), row_major),
-        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
         serial
     ))
 }
@@ -34,8 +34,8 @@ fn conv_spec(size: u32) -> LogicalSpec<Avx2Target> {
 fn move_spec(size: u32) -> LogicalSpec<Avx2Target> {
     lspec!(Move(
         [size, size],
-        (u32, Avx2Target::default_level(), row_major),
-        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
         serial
     ))
 }

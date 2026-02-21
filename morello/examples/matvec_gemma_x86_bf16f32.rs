@@ -9,7 +9,7 @@ use morello::spec;
 use morello::spec::Spec;
 use morello::target::{
     Avx2Target, CpuKernel,
-    CpuMemoryLevel::{GL, L1, RF, VRF},
+    CpuMemory::{GL, L1, RF, VRF},
 };
 use morello::utils::ToWriteFmt;
 

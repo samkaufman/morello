@@ -9,7 +9,7 @@ use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
-    CpuMemoryLevel::{self, GL, L1, RF, VRF},
+    CpuMemory::{self, GL, L1, RF, VRF},
     Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -31,7 +31,7 @@ fn main() {
         },
         vec![
             TensorSpecAux {
-                level: CpuMemoryLevel::GL,
+                memory: CpuMemory::GL,
                 layout: row_major(&shape),
                 vector_size: None,
             };
@@ -79,18 +79,18 @@ fn main() {
                 })
                 .subschedule(&[1], |s| {
                     s.tile_out(&[1, 32])
-                        .move_param(0, CpuMemoryLevel::L1)
-                        .move_param(1, CpuMemoryLevel::L1)
-                        .move_param(2, CpuMemoryLevel::L1)
-                        .move_param(3, CpuMemoryLevel::L1)
-                        .move_vrf(0, CpuMemoryLevel::VRF, 8)
+                        .move_param(0, CpuMemory::L1)
+                        .move_param(1, CpuMemory::L1)
+                        .move_param(2, CpuMemory::L1)
+                        .move_param(3, CpuMemory::L1)
+                        .move_vrf(0, CpuMemory::VRF, 8)
                         .subschedule(&[0], |m| m.tile_out(&[1, 8]).select(CpuKernel::Assign))
-                        .move_param(1, CpuMemoryLevel::RF)
+                        .move_param(1, CpuMemory::RF)
                         .subschedule(&[1, 0], |m| m.select(CpuKernel::Assign))
-                        .move_param(2, CpuMemoryLevel::RF)
+                        .move_param(2, CpuMemory::RF)
                         .subschedule(&[1, 1, 0], |m| m.select(CpuKernel::Assign))
                         .subschedule(&[1, 1, 2], |m| m.select(CpuKernel::Assign))
-                        .move_vrf(3, CpuMemoryLevel::VRF, 8)
+                        .move_vrf(3, CpuMemory::VRF, 8)
                         .select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
                         .subschedule(&[1, 1, 1, 1], |move_spec| {
                             move_spec.tile_out(&[1, 8]).select(CpuKernel::Assign)
@@ -103,8 +103,8 @@ fn main() {
                 .broadcast_first(VRF, row_major, Some(4))
                 .subschedule(&[0], |broadcast| {
                     broadcast
-                        .move_param(0, CpuMemoryLevel::L1)
-                        .move_param(0, CpuMemoryLevel::RF)
+                        .move_param(0, CpuMemory::L1)
+                        .move_param(0, CpuMemory::RF)
                         .subschedule(&[0], |s| s.select(CpuKernel::Assign))
                         .select(CpuKernel::VecScalarAssign)
                 })

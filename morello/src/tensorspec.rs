@@ -11,7 +11,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::{Layout, LayoutBuilder, LayoutError, PhysDim};
-use crate::target::{MemoryLevel, Target};
+use crate::target::{Memory, Target};
 use crate::utils::join_into_string;
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash, Deserialize, Serialize)]
@@ -26,7 +26,7 @@ pub struct TensorSpec<Tgt: Target> {
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct TensorSpecAux<Tgt: Target> {
-    pub level: Tgt::Level,
+    pub memory: Tgt::Memory,
     pub layout: Layout,
     pub vector_size: Option<DimSize>, // # number of values in a vector register
 }
@@ -62,21 +62,21 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn new_canon<L: LayoutBuilder>(
         shape: Shape,
         dtype: Dtype,
-        level: Tgt::Level,
+        memory: Tgt::Memory,
         layout: L,
         vector_size: Option<DimSize>,
     ) -> Self {
-        Self::new_canon_checked(shape, dtype, level, layout, vector_size).unwrap()
+        Self::new_canon_checked(shape, dtype, memory, layout, vector_size).unwrap()
     }
 
     pub fn new_canon_checked<L: LayoutBuilder>(
         shape: Shape,
         dtype: Dtype,
-        level: Tgt::Level,
+        memory: Tgt::Memory,
         layout: L,
         vector_size: Option<DimSize>,
     ) -> Result<Self, CanonicalizeError> {
-        let mut r = Self::new_noncanon(shape, dtype, level, layout, vector_size);
+        let mut r = Self::new_noncanon(shape, dtype, memory, layout, vector_size);
         r.canonicalize()?;
         Ok(r)
     }
@@ -84,7 +84,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     pub fn new_noncanon<L: LayoutBuilder>(
         shape: Shape,
         dtype: Dtype,
-        level: Tgt::Level,
+        memory: Tgt::Memory,
         layout: L,
         vector_size: Option<DimSize>,
     ) -> Self {
@@ -93,7 +93,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
             shape,
             dtype,
             TensorSpecAux {
-                level,
+                memory,
                 layout,
                 vector_size,
             },
@@ -104,11 +104,11 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         if shape.is_empty() {
             panic!("Invalid shape: {shape:?}");
         }
-        match (aux.vector_size, aux.level.vector_bytes()) {
+        match (aux.vector_size, aux.memory.vector_bytes()) {
             (None, []) => {}
             (None, [_, ..]) | (Some(_), []) => {
                 panic!(
-                    "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.level
+                    "vector_size must be specified if and only if the bank ({:?}) is a vector register file", aux.memory
                 );
             }
             (Some(vector_size), v) => {
@@ -116,8 +116,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
                 if !v.contains(&vector_bytes) {
                     // TODO: Remove vector_bytes from panic message
                     panic!(
-                        "Invalid vector size {:?} (bytes: {}) for dtype {:?} and level {:?} (poss.: {:?})",
-                        vector_size, vector_bytes, dtype, aux.level, v
+                        "Invalid vector size {:?} (bytes: {}) for dtype {:?} and memory {:?} (poss.: {:?})",
+                        vector_size, vector_bytes, dtype, aux.memory, v
                     );
                 }
             }
@@ -138,27 +138,27 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// Returns true if this TensorSpec can be tiled to the given shape.
     pub fn is_valid_tile_shape(&self, shape: &[DimSize], parallel_loop: bool) -> bool {
         let original_shape = self.shape();
-        let level = self.level();
+        let memory = self.memory();
 
         debug_assert_eq!(original_shape.len(), shape.len());
         debug_assert!(shape.iter().zip(original_shape).all(|(i, o)| i <= o));
 
-        if parallel_loop && !level.can_parallel_tile() && original_shape != shape {
+        if parallel_loop && !memory.can_parallel_tile() && original_shape != shape {
             return false;
         }
-        !level.has_layout() || self.aux.layout.applies_to_shape(shape)
+        !memory.has_layout() || self.aux.layout.applies_to_shape(shape)
     }
 
     pub fn bytes_used(&self) -> u64 {
         u64::from(self.dtype.size()) * u64::from(self.volume().get())
     }
 
-    /// Returns the memory units consumed by this tensor based on its level's memory model.
+    /// Returns the memory units consumed by this tensor based on that memory's model.
     ///
-    /// For register-counting levels, returns register counts, possibly divided by vector size.
-    /// For other levels, returns an estimate of cache lines used.
+    /// For register-counting memories, returns register counts, possibly divided by vector size.
+    /// For other memories, returns an estimate of cache lines used.
     pub fn memory_units(&self) -> u64 {
-        if self.level().counts_registers() {
+        if self.memory().counts_registers() {
             if let Some(vector_size) = self.vector_size() {
                 u64::from(self.volume().get().div_ceil(vector_size.get()))
             } else {
@@ -198,8 +198,8 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     }
 
     #[inline]
-    pub const fn level(&self) -> <Tgt as Target>::Level {
-        self.aux.level
+    pub const fn memory(&self) -> <Tgt as Target>::Memory {
+        self.aux.memory
     }
 
     #[inline]
@@ -207,13 +207,13 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         self.aux.vector_size
     }
 
-    pub fn set_level(&mut self, level: Tgt::Level, vector_size: Option<DimSize>) {
+    pub fn set_memory(&mut self, memory: Tgt::Memory, vector_size: Option<DimSize>) {
         assert_eq!(
-            level.vector_rf(),
+            memory.vector_rf(),
             vector_size.is_some(),
-            "Cannot set level to {level:?} with vector shape {vector_size:?}"
+            "Cannot set memory to {memory:?} with vector shape {vector_size:?}"
         );
-        self.aux.level = level;
+        self.aux.memory = memory;
         self.aux.vector_size = vector_size;
     }
 
@@ -222,7 +222,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
     /// The result's layout and contiguousness abstraction will have been
     /// canonicalized for the given shape.
     pub fn shrink(&mut self, shape: &[DimSize]) -> Result<(), LayoutError> {
-        if self.aux.level.has_layout() {
+        if self.aux.memory.has_layout() {
             self.aux.layout = self.aux.layout.update_for_tiling(self.shape(), shape)?;
         } else {
             assert!(self.aux.layout.is_empty());
@@ -233,7 +233,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
 
     pub fn canonicalize(&mut self) -> Result<(), CanonicalizeError> {
         let vector_size = self.aux.vector_size;
-        check_tensor_vector_size::<Tgt>(self.shape(), self.dtype, &self.level(), vector_size)?;
+        check_tensor_vector_size::<Tgt>(self.shape(), self.dtype, &self.memory(), vector_size)?;
         self.aux.canonicalize(&self.shape)
     }
 
@@ -263,7 +263,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         Self::new_canon(
             new_shape,
             self.dtype(),
-            self.level(),
+            self.memory(),
             new_layout,
             self.vector_size(),
         )
@@ -291,7 +291,7 @@ impl<Tgt: Target> TensorSpec<Tgt> {
         Self::new_canon(
             new_shape,
             self.dtype(),
-            self.level(),
+            self.memory(),
             new_layout,
             self.vector_size(),
         )
@@ -319,7 +319,7 @@ impl<Tgt: Target> Display for TensorSpec<Tgt> {
 
 /// Implements [`proptest::arbitrary::Arbitrary`] to yield canonical [TensorSpec]s.
 ///
-/// This generates [TensorSpec]s of varying shapes, dtypes, and levels.
+/// This generates [TensorSpec]s of varying shapes, dtypes, and memories.
 /// The [Layout], vector shape, and contiguousness abstraction are constrained to be valid together
 /// and for the generated shape.
 ///
@@ -367,7 +367,7 @@ fn arb_noncanon_tensorspec<Tgt: Target>(
 
 impl<Tgt: Target> TensorSpecAux<Tgt> {
     pub(crate) fn canonicalize(&mut self, shape: &[DimSize]) -> Result<(), CanonicalizeError> {
-        if !self.level.has_layout() {
+        if !self.memory.has_layout() {
             self.layout = Layout::empty();
         } else {
             self.layout = self.layout.update_for_tiling(shape, shape)?;
@@ -376,7 +376,7 @@ impl<Tgt: Target> TensorSpecAux<Tgt> {
     }
 
     pub fn is_canonical(&self, shape: &[DimSize]) -> bool {
-        if !self.level.has_layout() {
+        if !self.memory.has_layout() {
             return self.layout.is_empty();
         }
         match self.layout.update_for_tiling(shape, shape) {
@@ -438,22 +438,22 @@ impl<Tgt: Target> TensorSpecAuxSurMap<Tgt> {
 impl<Tgt> SurMap for TensorSpecAuxSurMap<Tgt>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
     type Codomain = ((), [BimapInt; 1]);
     type DomainIter = Box<dyn Iterator<Item = Self::Domain> + 'static>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        ((), [BiMap::apply(&Tgt::Level::bimap(), &t.level).into()])
+        ((), [BiMap::apply(&Tgt::Memory::bimap(), &t.memory).into()])
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let ((), [level_int]) = i;
-        let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &(*level_int).try_into().unwrap());
+        let memory = BiMap::apply_inverse(&Tgt::Memory::bimap(), &(*level_int).try_into().unwrap());
         let dtype_bytes = u32::from(self.tensor_dtype.size());
-        let vector_bytes = level.vector_bytes();
+        let vector_bytes = memory.vector_bytes();
         let mut vector_options = vector_bytes
             .iter()
             .map(|&vb| Some(vb / dtype_bytes))
@@ -461,7 +461,7 @@ where
         if vector_options.is_empty() {
             vector_options.push(None);
         }
-        let layouts = if level.has_layout() {
+        let layouts = if memory.has_layout() {
             Tgt::all_layouts_for_shape(&self.tensor_shape, self.tensor_dtype)
         } else {
             vec![Layout::empty()]
@@ -475,7 +475,7 @@ where
                     TensorSpecAux {
                         layout: layout_with_contig,
                         vector_size: vector_size.map(|v| DimSize::new(v).unwrap()),
-                        level,
+                        memory,
                     }
                 })
             },
@@ -495,15 +495,15 @@ impl<Tgt: Target> TensorSpecAuxNonDepBimap<Tgt> {
 impl<Tgt> BiMap for TensorSpecAuxNonDepBimap<Tgt>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
     type Codomain = ((Layout,), [BimapInt; 3]);
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
-        let level_int = BiMap::apply(&Tgt::Level::bimap(), &aux.level);
-        let tgt_vector_bytes = Tgt::Level::vector_bytes(&aux.level);
+        let level_int = BiMap::apply(&Tgt::Memory::bimap(), &aux.memory);
+        let tgt_vector_bytes = Tgt::Memory::vector_bytes(&aux.memory);
         debug_assert!(
             tgt_vector_bytes.iter().tuple_windows().all(|(a, b)| a <= b),
             "target's vector_bytes must be sorted"
@@ -529,9 +529,9 @@ where
         let ((ref layout,), [level_val, contig, vector_size_idx]) = *v;
 
         // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
-        let level = BiMap::apply_inverse(&Tgt::Level::bimap(), &level_val.try_into().unwrap());
+        let memory = BiMap::apply_inverse(&Tgt::Memory::bimap(), &level_val.try_into().unwrap());
 
-        let tgt_vector_bytes = Tgt::Level::vector_bytes(&level);
+        let tgt_vector_bytes = Tgt::Memory::vector_bytes(&memory);
         let vector_size = if tgt_vector_bytes.is_empty() {
             assert_eq!(vector_size_idx, 0);
             None
@@ -545,7 +545,7 @@ where
         layout.set_contig(contig.try_into().unwrap());
         TensorSpecAux {
             layout,
-            level,
+            memory,
             vector_size,
         }
     }
@@ -586,7 +586,7 @@ pub(crate) fn gen_vector_sizes_opt(
         .chain(iter_b.into_iter().flatten())
 }
 
-/// Checks if an in-VRF tensor's shape, dtype, and chosen vector size are valid for a given level.
+/// Checks if an in-VRF tensor's shape, dtype, and chosen vector size are valid for a given memory.
 ///
 /// This checks both that the vector exists for that target and that the vector size is a multiple
 /// of the shape and dtype.
@@ -596,15 +596,15 @@ pub(crate) fn gen_vector_sizes_opt(
 pub(crate) fn check_tensor_vector_size<Tgt: Target>(
     shape: &[DimSize],
     dtype: Dtype,
-    level: &Tgt::Level,
+    memory: &Tgt::Memory,
     vector_size: Option<DimSize>,
 ) -> Result<(), CanonicalizeError> {
-    let vector_bytes_allowed = level.vector_bytes();
+    let vector_bytes_allowed = memory.vector_bytes();
     if vector_bytes_allowed.is_empty() {
         debug_assert!(vector_size.is_none());
         return Ok(());
     }
-    let vector_size = vector_size.expect("vector_size must be Some for vector level");
+    let vector_size = vector_size.expect("vector_size must be Some for vector memory");
     let vector_size_bytes = vector_size.get() * u32::from(dtype.size());
     if !vector_bytes_allowed.contains(&vector_size_bytes) {
         return Err(CanonicalizeError::VectorSizeInvalid);
@@ -626,7 +626,7 @@ pub(crate) fn check_tensor_vector_size<Tgt: Target>(
 
 fn tensorspec_aux_str<Tgt: Target>(aux: &TensorSpecAux<Tgt>) -> String {
     let mut parts = Vec::with_capacity(5);
-    parts.push(aux.level.to_string());
+    parts.push(aux.memory.to_string());
 
     if !aux.layout.is_row_major() || !aux.layout.is_fully_contiguous() {
         parts.push(aux.layout.to_string());
@@ -650,21 +650,21 @@ fn arb_tensorspecaux<Tgt: Target>(
 
     (
         any_with::<Layout>(LayoutArbRankBounds::for_shape(max_shape)),
-        select(Tgt::levels().to_vec()),
+        select(Tgt::memories().to_vec()),
     )
-        .prop_flat_map(move |(layout, level)| {
+        .prop_flat_map(move |(layout, memory)| {
             let contiguous_abs = layout.all_contiguous_abs().collect::<Vec<_>>();
             (
                 Just(layout),
-                Just(level),
+                Just(memory),
                 select(contiguous_abs),
-                select(gen_vector_sizes_opt(dtype, level.vector_bytes()).collect::<Vec<_>>()),
+                select(gen_vector_sizes_opt(dtype, memory.vector_bytes()).collect::<Vec<_>>()),
             )
         })
-        .prop_map(|(mut layout, level, contig, vector_size)| {
+        .prop_map(|(mut layout, memory, contig, vector_size)| {
             layout.set_contig(contig);
             TensorSpecAux {
-                level,
+                memory,
                 layout,
                 vector_size,
             }
@@ -677,7 +677,7 @@ mod tests {
     use super::*;
     use crate::common::Dtype;
     use crate::layout::{row_major, Layout};
-    use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel, MemoryLevel, Target};
+    use crate::target::{ArmTarget, Avx2Target, CpuMemory, Memory, Target};
     use crate::tensorspec::{arb_noncanon_tensorspec, TensorSpec, TensorSpecArbMaxShape};
     use crate::{layout, shape};
     use proptest::prelude::*;
@@ -688,7 +688,7 @@ mod tests {
         #[test]
         fn test_canonicalize_errors_if_vector_not_a_multiple_avx2(
             tspec in arb_noncanon_tensorspec::<Avx2Target>(&[nz!(16u32), nz!(16u32)])
-                .prop_filter("TensorSpec is not in VRF", |t| t.level().vector_rf())
+                .prop_filter("TensorSpec is not in VRF", |t| t.memory().vector_rf())
         ) {
             let volume = tspec.volume().get();
             let dtype = tspec.dtype();
@@ -696,7 +696,7 @@ mod tests {
             let mut can_move = true;
             // If the destination is in VRF, then the operand volume must be a multiple of at least one
             // of the vector sizes.
-            let vector_bytes = tspec.level().vector_bytes();
+            let vector_bytes = tspec.memory().vector_bytes();
             if !vector_bytes.is_empty() {
                 let bytes = volume * u32::from(dtype.size());
                 if vector_bytes.iter().all(|&vb| bytes % vb != 0) {
@@ -775,7 +775,7 @@ mod tests {
         let tensorspec = TensorSpec::<Avx2Target>::new_canon(
             shape![32, 8],
             Dtype::Uint8,
-            CpuMemoryLevel::GL,
+            CpuMemory::GL,
             layout,
             None,
         );
@@ -796,7 +796,7 @@ mod tests {
                 let mut layout = layout![0, 2, 3, 1];
                 layout.set_contig(3);
                 crate::tensorspec::TensorSpecAux {
-                    level: CpuMemoryLevel::GL,
+                    memory: CpuMemory::GL,
                     layout,
                     vector_size: None,
                 }
@@ -814,7 +814,7 @@ mod tests {
         TensorSpec::<Avx2Target>::new_canon(
             shape![1, 1, 1],
             Dtype::Uint32,
-            CpuMemoryLevel::VRF,
+            CpuMemory::VRF,
             l,
             Some(nz!(16u32)),
         );
@@ -828,7 +828,7 @@ mod tests {
         TensorSpec::<Avx2Target>::new_noncanon(
             shape![1, 1, 1],
             Dtype::Uint32,
-            CpuMemoryLevel::VRF,
+            CpuMemory::VRF,
             l,
             Some(nz!(16u32)),
         );
@@ -843,7 +843,7 @@ mod tests {
             shape![1, 1, 1],
             Dtype::Uint32,
             TensorSpecAux {
-                level: CpuMemoryLevel::VRF,
+                memory: CpuMemory::VRF,
                 layout,
                 vector_size: Some(nz!(16u32)),
             },
@@ -856,7 +856,7 @@ mod tests {
             shape: shape![1, 1, 16],
             dtype: Dtype::Uint8,
             aux: TensorSpecAux {
-                level: CpuMemoryLevel::VRF,
+                memory: CpuMemory::VRF,
                 layout: layout![0, 1, 2],
                 vector_size: Some(nz!(8u32)),
             },
@@ -872,7 +872,7 @@ mod tests {
         let mut spec = TensorSpec::<Avx2Target>::new_canon(
             shape![1, 8, 8],
             Dtype::Float32,
-            CpuMemoryLevel::L1,
+            CpuMemory::L1,
             layout![1, 2, 1 p(2)],
             None,
         );

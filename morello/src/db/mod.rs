@@ -12,7 +12,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::reconstruct::reconstruct_impls_from_actions;
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
-use crate::target::{Target, TargetId, LEVEL_COUNT};
+use crate::target::{Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use pagecontents::RTreePageContents;
 
@@ -235,8 +235,8 @@ impl FilesDatabase {
     pub fn get<Tgt>(&self, query: &Spec<Tgt>) -> Option<ActionCostVec>
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         match self.get_with_preference(query) {
             GetPreference::Hit(v) => Some(v),
@@ -247,8 +247,8 @@ impl FilesDatabase {
     pub fn get_impl<Tgt>(&self, query: &Spec<Tgt>) -> Option<Vec<ImplNode<Tgt>>>
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         Some(reconstruct_impls_from_actions(
             &|spec: &Spec<Tgt>| self.get(spec),
@@ -263,8 +263,8 @@ impl FilesDatabase {
     ) -> GetPreference<ActionCostVec, Vec<ActionNum>>
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         #[cfg(feature = "db-stats")]
         self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
@@ -289,8 +289,8 @@ impl FilesDatabase {
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let mut query = query.clone();
         query.canonicalize().unwrap();
@@ -314,8 +314,8 @@ impl FilesDatabase {
     pub fn page_id<Tgt>(&self, spec: &Spec<Tgt>) -> PageId<'_>
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         debug_assert!(spec.is_canonical());
 
@@ -332,8 +332,8 @@ impl FilesDatabase {
     pub fn put<Tgt>(&self, mut spec: Spec<Tgt>, decisions: Vec<(ActionNum, Cost)>)
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         spec.canonicalize().unwrap();
 
@@ -409,8 +409,8 @@ impl FilesDatabase {
     fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
     {
         let surmap = SpecSurMap::<Tgt, _, _, _> {
             logical_spec_surmap: LogicalSpecSurMap::new(
@@ -431,8 +431,8 @@ impl FilesDatabase {
     pub fn can_memoize<Tgt>(&self, spec: &Spec<Tgt>) -> bool
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
     {
         SurMap::defined_for(&self.spec_bimap(), spec)
     }
@@ -571,8 +571,8 @@ impl PageId<'_> {
     pub fn contains<Tgt>(&self, spec: &Spec<Tgt>) -> bool
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         debug_assert!(spec.is_canonical());
 
@@ -915,7 +915,7 @@ fn analyze_visit_dir(
 }
 
 fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
-    if dim >= dim_count - LEVEL_COUNT {
+    if dim >= dim_count - MEMORY_COUNT {
         31
     } else {
         8
@@ -941,8 +941,8 @@ fn put_range_to_fill<Tgt, B>(
 ) -> (TableKey, (Vec<BimapInt>, Vec<BimapInt>))
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
 {
     // Compute worst-case bound of solutions' memory usage. This lower bounds the range.
@@ -962,8 +962,8 @@ where
     // TODO: This computes the non-memory dimensions of the key/coordinates twice. Avoid that.
     debug_assert_eq!(upper_inclusive.0, lower_inclusive.0);
     debug_assert_eq!(
-        upper_inclusive.1[..upper_inclusive.1.len() - LEVEL_COUNT],
-        lower_inclusive.1[..lower_inclusive.1.len() - LEVEL_COUNT]
+        upper_inclusive.1[..upper_inclusive.1.len() - MEMORY_COUNT],
+        lower_inclusive.1[..lower_inclusive.1.len() - MEMORY_COUNT]
     );
 
     (upper_inclusive.0, (lower_inclusive.1, upper_inclusive.1))
@@ -1200,7 +1200,7 @@ mod tests {
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
         spec::arb_canonical_spec,
-        target::{Avx2Target, Avx512Target, CpuMemoryLevel::L1, MemoryLevel},
+        target::{Avx2Target, Avx512Target, CpuMemory::L1, Memory},
         utils::{bit_length, bit_length_inverse_u32},
     };
     use itertools::{izip, Itertools};
@@ -1353,9 +1353,9 @@ mod tests {
                 MemVec::zero::<Avx2Target>()
             };
             let expected = ActionCostVec(top_actions_costs);
-            izip!(Avx2Target::levels(), spec_limits.iter(), peaks.iter())
-                .map(|(level, l, p)| {
-                    if level.counts_registers() {
+            izip!(Avx2Target::memories(), spec_limits.iter(), peaks.iter())
+                .map(|(memory, l, p)| {
+                    if memory.counts_registers() {
                         (u32::try_from(p).unwrap()..=u32::try_from(l).unwrap()).collect::<Vec<_>>()
                     } else {
                         assert!(l == 0 || l.is_power_of_two());

@@ -11,9 +11,9 @@ use morello::target::{Avx2Target, Target};
 fn matmul_spec(size: u32) -> Spec<Avx2Target> {
     spec!(Matmul(
         [1, size, size, size],
-        (u32, Avx2Target::default_level(), row_major),
-        (u32, Avx2Target::default_level(), row_major),
-        (u32, Avx2Target::default_level(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
+        (u32, Avx2Target::default_memory(), row_major),
         serial
     ))
 }

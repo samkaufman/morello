@@ -8,7 +8,7 @@ mod x86;
 pub use arm::ArmTarget;
 pub use avx2::Avx2Target;
 pub use avx512::Avx512Target;
-pub use cpu::{CpuKernel, CpuMemoryLevel, CpuTarget};
+pub use cpu::{CpuKernel, CpuMemory, CpuTarget};
 
 use crate::common::DimSize;
 use crate::cost::MainCost;
@@ -25,21 +25,21 @@ use serde::Serialize;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
-// TODO: This should be generic per Target. Right now, all targets must have 4 levels!
-pub const LEVEL_COUNT: usize = 4;
+// TODO: This should be generic per Target. Right now, all targets must have 4 memories!
+pub const MEMORY_COUNT: usize = 4;
 
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
-    type Level: MemoryLevel;
+    type Memory: Memory;
     type Kernel: Kernel<Tgt = Self>;
     type ActionsIter<'a>: Iterator<Item = Action<Self>> + 'a;
 
     fn line_size() -> u32;
     fn max_mem() -> MemoryLimits;
     fn processors() -> u8;
-    fn default_level() -> Self::Level;
-    fn levels() -> [Self::Level; LEVEL_COUNT];
-    fn possible_destination_levels(slower: Self::Level) -> Vec<Self::Level>;
+    fn default_memory() -> Self::Memory;
+    fn memories() -> [Self::Memory; MEMORY_COUNT];
+    fn possible_destination_memories(slower: Self::Memory) -> Vec<Self::Memory>;
 
     /// Returns possible layouts for a tensor of given shape and data type.
     fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout>;
@@ -64,7 +64,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     fn vec_types() -> &'static [VecType];
 }
 
-pub trait MemoryLevel:
+pub trait Memory:
     Send + PartialOrd + Eq + Display + Debug + std::hash::Hash + Copy + DeserializeOwned + Serialize
 {
     fn is_addressed(&self) -> bool;
@@ -75,8 +75,8 @@ pub trait MemoryLevel:
         !self.vector_bytes().is_empty()
     }
     fn counts_registers(&self) -> bool;
-    /// Returns true if this memory level has (meaningful) layouts associated with it.
-    /// Some levels (e.g., RF) have no meaningful relationship beween values.
+    /// Returns true if this memory has (meaningful) layouts associated with it.
+    /// Some memories (e.g., RF) have no meaningful relationship beween values.
     fn has_layout(&self) -> bool;
 }
 

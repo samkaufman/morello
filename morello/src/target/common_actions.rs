@@ -1,6 +1,6 @@
 //! Scheduling actions shared between targets.
 
-use super::{MemoryLevel, Target};
+use super::{Memory, Target};
 use crate::{
     common::{DimSize, Shape},
     scheduling::{
@@ -194,8 +194,8 @@ pub fn bufferize_actions<Tgt: Target>(
         let intermediate_shape = comp.parameter_shape(comp_out_idx);
         let intermediate_dtype = comp.dtypes[comp_out_idx];
 
-        for level in Tgt::levels() {
-            let vector_bytes = level.vector_bytes();
+        for memory in Tgt::memories() {
+            let vector_bytes = memory.vector_bytes();
 
             for layout in Tgt::move_destination_layouts(&intermediate_shape, intermediate_dtype) {
                 // TODO: Need to implement `can_move_to`-style logic here.
@@ -204,7 +204,7 @@ pub fn bufferize_actions<Tgt: Target>(
                     for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
                         results.push(Action::Bufferize(Bufferize {
                             index,
-                            level,
+                            memory,
                             layout: layout.clone(),
                             vector_size: Some(vector_size),
                         }));
@@ -212,7 +212,7 @@ pub fn bufferize_actions<Tgt: Target>(
                 } else {
                     results.push(Action::Bufferize(Bufferize {
                         index,
-                        level,
+                        memory,
                         layout,
                         vector_size: None,
                     }));
@@ -232,7 +232,7 @@ pub fn move_actions<Tgt: Target>(
 
     for (i, operand) in spec.parameters().iter().enumerate() {
         // Yield actions for movement with register file destination, which
-        // includes relayouts in registers and movements from level 1 to RF.
+        // includes relayouts in registers and movements from memory 1 to RF.
         let i = u8::try_from(i).unwrap();
         let operand_dtype = operand.dtype();
         let destination_layouts = Tgt::move_destination_layouts(operand.shape(), operand_dtype);
@@ -243,20 +243,20 @@ pub fn move_actions<Tgt: Target>(
             if !contains_source_layout && layout == operand.layout() {
                 contains_source_layout = true;
             }
-            for level in Tgt::possible_destination_levels(operand.level()) {
+            for memory in Tgt::possible_destination_memories(operand.memory()) {
                 for &destination_dtype in
                     iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
                 {
                     results.extend(
-                        gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
+                        gen_vector_sizes_opt(destination_dtype, memory.vector_bytes()).map(
                             |vector_size| {
                                 // This may return Moves with identical source and destination
-                                // TensorSpecs (i.e., within-level copies). These will be filtered
+                                // TensorSpecs (i.e., within-memory copies). These will be filtered
                                 // in [apply_with_aux].
                                 Action::Move(Move {
                                     source_idx: i,
                                     destination_dtype,
-                                    destination_level: level,
+                                    destination_level: memory,
                                     destination_layout: layout.clone(),
                                     destination_vector_size: vector_size,
                                 })
@@ -272,19 +272,19 @@ pub fn move_actions<Tgt: Target>(
         // into cache.
         let original_layout = operand.layout();
         if !contains_source_layout {
-            for level in Tgt::possible_destination_levels(operand.level()) {
-                if !level.is_addressed() {
-                    // This is a cache level, generate a move with the original layout
+            for memory in Tgt::possible_destination_memories(operand.memory()) {
+                if !memory.is_addressed() {
+                    // This is a cache memory, generate a move with the original layout
                     for &destination_dtype in
                         iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
                     {
                         results.extend(
-                            gen_vector_sizes_opt(destination_dtype, level.vector_bytes()).map(
+                            gen_vector_sizes_opt(destination_dtype, memory.vector_bytes()).map(
                                 |vector_size| {
                                     Action::Move(Move {
                                         source_idx: i,
                                         destination_dtype,
-                                        destination_level: level,
+                                        destination_level: memory,
                                         destination_layout: original_layout.clone(),
                                         destination_vector_size: vector_size,
                                     })
@@ -691,7 +691,7 @@ mod tests {
                     }
                     prop_assert!(
                         false,
-                        "No layout-preserving move found for operand {} (layout: {:?}) to cache level {:?}.",
+                        "No layout-preserving move found for operand {} (layout: {:?}) to cache memory {:?}.",
                         operand_idx,
                         operand.layout(),
                         destination_level

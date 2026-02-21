@@ -3,7 +3,7 @@ use crate::{
     expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
     layout::{row_major, BufferVar, Layout, LayoutError},
     opaque_symbol::OpaqueSymbol,
-    target::{MemoryLevel, Target},
+    target::{Memory, Target},
     tensorspec::TensorSpec,
 };
 use smallvec::smallvec;
@@ -258,7 +258,7 @@ pub trait ViewExt: View {
         let spec = TensorSpec::new_canon(
             shape,
             self.spec().dtype(),
-            self.spec().level(),
+            self.spec().memory(),
             transposed_layout,
             self.spec().vector_size(),
         );
@@ -747,7 +747,7 @@ impl<Tgt: Target> View for Tensor<Tgt> {
 
     fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
         let logical_shape = self.shape();
-        if self.0.level().has_layout() {
+        if self.0.memory().has_layout() {
             layout.buffer_indexing_expr(self.1, logical_shape)
         } else {
             debug_assert!(self.spec().layout().is_empty());

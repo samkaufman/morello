@@ -3,7 +3,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::nameenv::NameEnv;
 use crate::spec::{LogicalSpec, PrimitiveSpecType, Spec};
-use crate::target::LEVEL_COUNT;
+use crate::target::MEMORY_COUNT;
 use crate::tensorspec::TensorSpec;
 use crate::views::{Param, View, ViewE};
 use itertools::Itertools;
@@ -72,7 +72,7 @@ impl<A: View> Impl<A::Tgt> for SpecApp<A> {
     }
 
     fn memory_allocated(&self) -> MemoryAllocation {
-        MemoryAllocation::Simple([0; LEVEL_COUNT])
+        MemoryAllocation::Simple([0; MEMORY_COUNT])
     }
 
     fn compute_main_cost(&self, _child_costs: &[MainCost]) -> MainCost {

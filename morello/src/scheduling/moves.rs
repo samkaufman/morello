@@ -6,7 +6,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits};
 use crate::scheduling::{ActionSolver, ActionT, ApplyError, MoveActionSolver, NotApplicableReason};
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{MemoryLevel, Target, LEVEL_COUNT};
+use crate::target::{Memory, Target, MEMORY_COUNT};
 use crate::tensorspec::{self, TensorSpec};
 use crate::utils::prev_power_of_two;
 use crate::views::{CacheView, Param, Tensor, ViewE};
@@ -17,7 +17,7 @@ use std::mem;
 pub struct Move<Tgt: Target> {
     pub source_idx: u8,
     pub destination_dtype: Dtype,
-    pub destination_level: Tgt::Level,
+    pub destination_level: Tgt::Memory,
     pub destination_layout: Layout,
     pub destination_vector_size: Option<DimSize>,
 }
@@ -131,7 +131,7 @@ fn plan_alloc<'a, Tgt: Target>(
     operands: &'a [TensorSpec<Tgt>],
     source_idx: u8,
     destination_dtype: Dtype,
-    destination_level: Tgt::Level,
+    destination_level: Tgt::Memory,
     destination_layout: &Layout,
     destination_vector_size: Option<DimSize>,
 ) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
@@ -193,36 +193,39 @@ fn plan_alloc<'a, Tgt: Target>(
     }
 
     assert!(
-        !new_spec.level().has_layout() || new_spec.layout().applies_to_shape(new_spec.shape()),
+        !new_spec.memory().has_layout() || new_spec.layout().applies_to_shape(new_spec.shape()),
         "Destination layout {:?} does not apply to shape {:?}",
         new_spec.layout(),
         new_spec.shape()
     );
 
     // Filter cases where, after canonicalization, the source and destination
-    // TensorSpecs match (i.e., within-level copies).
+    // TensorSpecs match (i.e., within-memory copies).
     if outer_moved_operand_spec == &new_spec {
         return Err(ApplyError::NotApplicable(NotApplicableReason::SelfMove));
     }
 
     let lower_limits: MemoryLimits = {
-        let levels = Tgt::levels();
-        let updated_level_idx = levels.iter().position(|l| l == &destination_level).unwrap();
+        let memories = Tgt::memories();
+        let updated_level_idx = memories
+            .iter()
+            .position(|l| l == &destination_level)
+            .unwrap();
         let additional = new_spec.memory_units();
         match &spec.1 {
             MemoryLimits::Standard(base) => {
-                let mut new_values: [u64; LEVEL_COUNT] =
+                let mut new_values: [u64; MEMORY_COUNT] =
                     base.iter().collect::<Vec<_>>().try_into().unwrap();
 
                 let Some(level_updated) = new_values[updated_level_idx].checked_sub(additional)
                 else {
                     return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
-                        levels[updated_level_idx].to_string(),
+                        memories[updated_level_idx].to_string(),
                     )));
                 };
 
-                // Update the specific level with correct value based on whether it counts registers
-                if levels[updated_level_idx].counts_registers() {
+                // Update the specific memory with correct value based on whether it counts registers
+                if memories[updated_level_idx].counts_registers() {
                     new_values[updated_level_idx] = level_updated;
                 } else {
                     new_values[updated_level_idx] = prev_power_of_two(level_updated);
@@ -309,7 +312,7 @@ fn move_gens_epilogue<Tgt: Target>(
 fn move_is_cache_miss<Tgt: Target>(
     operand: &TensorSpec<Tgt>,
     destination_dtype: Dtype,
-    destination_level: &Tgt::Level,
+    destination_level: &Tgt::Memory,
     destination_layout: &Layout,
 ) -> bool {
     !destination_level.is_addressed()
@@ -325,7 +328,7 @@ mod tests {
     use crate::layout::{batched_col_major, row_major};
     use crate::scheduling::Action;
     use crate::spec;
-    use crate::target::{Avx2Target, CpuMemoryLevel};
+    use crate::target::{Avx2Target, CpuMemory};
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
@@ -353,9 +356,9 @@ mod tests {
     fn test_move_planning_into_cache_with_extra_degenerate_dims_preserves_layout_and_contig() {
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
-            (f32, CpuMemoryLevel::GL, batched_col_major),
-            (f32, CpuMemoryLevel::GL, row_major),
-            (f32, CpuMemoryLevel::GL, row_major)
+            (f32, CpuMemory::GL, batched_col_major),
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major)
         ));
         let parameters = spec.0.parameters();
         let plan = plan_alloc(
@@ -363,7 +366,7 @@ mod tests {
             &parameters,
             0,
             Dtype::Float32,
-            CpuMemoryLevel::L1,
+            CpuMemory::L1,
             &layout![0, 1, 2, 1 p(8)],
             None,
         )
@@ -395,14 +398,14 @@ mod tests {
     ) {
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
             [1, 8, 128, 8],
-            (f32, CpuMemoryLevel::GL, batched_col_major),
-            (f32, CpuMemoryLevel::GL, row_major),
-            (f32, CpuMemoryLevel::GL, row_major)
+            (f32, CpuMemory::GL, batched_col_major),
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major)
         ));
         let action = Action::Move(Move {
             source_idx: 0,
             destination_dtype: Dtype::Float32,
-            destination_level: CpuMemoryLevel::L1,
+            destination_level: CpuMemory::L1,
             destination_layout: layout![0, 1, 2, 1 p(8)],
             destination_vector_size: None,
         });

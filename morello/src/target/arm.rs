@@ -3,7 +3,7 @@ use crate::common::Dtype;
 use crate::cost::MainCost;
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::spec::LogicalSpec;
-use crate::target::CpuMemoryLevel;
+use crate::target::CpuMemory;
 use crate::{codegen::c_utils::VecType, views::View};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -116,7 +116,7 @@ pub struct ArmKernel(CpuKernel);
 
 impl CpuTarget for ArmTarget {
     type Kernel = ArmKernel;
-    type Level = CpuMemoryLevel;
+    type Memory = CpuMemory;
 
     fn target_id() -> TargetId {
         TargetId::Arm

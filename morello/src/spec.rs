@@ -5,7 +5,7 @@ use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
 use crate::layout::row_major;
 use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
-use crate::target::{MemoryLevel, Target};
+use crate::target::{Memory, Target};
 use crate::tensorspec::{self, check_tensor_vector_size, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
 use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
@@ -1424,19 +1424,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
-    pub fn parameter_levels(&self) -> Vec<Tgt::Level> {
+    pub fn parameter_memories(&self) -> Vec<Tgt::Memory> {
         match self {
-            LogicalSpec::Primitive(_, auxes, _) => auxes.iter().map(|aux| aux.level).collect(),
+            LogicalSpec::Primitive(_, auxes, _) => auxes.iter().map(|aux| aux.memory).collect(),
             LogicalSpec::Compose { operand_auxes, .. } => {
-                operand_auxes.iter().map(|aux| aux.level).collect()
+                operand_auxes.iter().map(|aux| aux.memory).collect()
             }
         }
     }
 
-    pub fn parameter_level(&self, idx: usize) -> Tgt::Level {
+    pub fn parameter_memory(&self, idx: usize) -> Tgt::Memory {
         match self {
-            LogicalSpec::Primitive(_, auxes, _) => auxes[idx].level,
-            LogicalSpec::Compose { operand_auxes, .. } => operand_auxes[idx].level,
+            LogicalSpec::Primitive(_, auxes, _) => auxes[idx].memory,
+            LogicalSpec::Compose { operand_auxes, .. } => operand_auxes[idx].memory,
         }
     }
 
@@ -1642,7 +1642,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let shape = &basics.spec_shape;
                     for (aux, dtype) in primitive_aux.iter_mut().zip(&basics.dtypes) {
                         let vs = aux.vector_size;
-                        check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs)
+                        check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.memory, vs)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
 
                         aux.canonicalize(shape)
@@ -1662,7 +1662,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                             .all(|aux| aux.layout.is_fully_contiguous())
                     {
                         for aux in primitive_aux.iter_mut() {
-                            if aux.level.has_layout() {
+                            if aux.memory.has_layout() {
                                 aux.layout = row_major(shape);
                             }
                         }
@@ -1673,7 +1673,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
                     {
                         let vs = aux.vector_size;
-                        check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs)
+                        check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.memory, vs)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
 
                         aux.canonicalize(&shp)
@@ -1713,9 +1713,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
 
                     let dtype = component.parameter_dtype(parameter_idx);
-                    let level = &aux.level;
+                    let memory = &aux.memory;
                     let vs = aux.vector_size;
-                    if let Err(e) = check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs) {
+                    if let Err(e) = check_tensor_vector_size::<Tgt>(&shape, dtype, memory, vs) {
                         status_to_return =
                             Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(e));
                     }
@@ -1734,7 +1734,8 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let shape = &basics.spec_shape;
                     for (aux, dtype) in primitive_aux.iter().zip(&basics.dtypes) {
                         let vs = aux.vector_size;
-                        if check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.level, vs).is_err() {
+                        if check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.memory, vs).is_err()
+                        {
                             return false;
                         }
 
@@ -1761,7 +1762,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
                     {
                         let vs = aux.vector_size;
-                        if check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.level, vs).is_err() {
+                        if check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.memory, vs).is_err() {
                             return false;
                         }
 
@@ -1804,9 +1805,9 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     }
 
                     let dtype = component.parameter_dtype(parameter_idx);
-                    let level = &aux.level;
+                    let memory = &aux.memory;
                     let vs = aux.vector_size;
-                    if check_tensor_vector_size::<Tgt>(&shape, dtype, level, vs).is_err() {
+                    if check_tensor_vector_size::<Tgt>(&shape, dtype, memory, vs).is_err() {
                         status_to_return = false;
                     }
                 });
@@ -2122,8 +2123,8 @@ impl<Tgt: Target> Display for LogicalSpec<Tgt> {
 impl<Tgt, F, A, Aa, const N: usize> SurMap for SpecSurMap<Tgt, F, A, Aa>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
     F: Fn(&[DimSize], Dtype) -> A,
     A: SurMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, [BimapInt; N])>,
     A::DomainIter: 'static,
@@ -2143,7 +2144,7 @@ where
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let (left, right) = i;
-        let (inner_right, memory_right) = right.split_at(i.1.len() - Tgt::levels().len());
+        let (inner_right, memory_right) = right.split_at(i.1.len() - Tgt::memories().len());
 
         let remaining_value = (
             left.clone(),
@@ -2175,8 +2176,8 @@ impl<Tgt, F, A, Aa> LogicalSpecSurMap<Tgt, F, A, Aa> {
 impl<Tgt, F, A, Aa, const N: usize> SurMap for LogicalSpecSurMap<Tgt, F, A, Aa>
 where
     Tgt: Target,
-    Tgt::Level: CanonicalBimap,
-    <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
     F: Fn(&[DimSize], Dtype) -> A,
     A: SurMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, [BimapInt; N])>,
     A::DomainIter: 'static,
@@ -3209,25 +3210,25 @@ pub mod macros {
             $crate::lspec!(@dt_convert $dt)
         };
 
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, c0 ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, false)
+        ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr, c0 ) => {
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, None, false)
         };
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, None, true)
+        ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr ) => {
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, None, true)
         };
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr, c0 ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), false)
+        ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr, $vs:expr, c0 ) => {
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, Some($vs), false)
         };
-        ( @tensorspecaux $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $level, $layout, Some($vs), true)
+        ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr, $vs:expr ) => {
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, Some($vs), true)
         };
 
         // TODO: Accept contiguousnesses other than fully contig. or not at all.
-        ( @tensorspecaux_inner $shp:expr, $dt:tt, $level:expr, $layout:expr, $vs:expr,
+        ( @tensorspecaux_inner $shp:expr, $dt:tt, $memory:expr, $layout:expr, $vs:expr,
           $c:literal ) =>
         {{
             let mut layout;
-            if !$crate::target::MemoryLevel::has_layout(&($level)) {
+            if !$crate::target::Memory::has_layout(&($memory)) {
                 let _ = $shp; // make sure to evaluate $shp in case its a pop()
                 layout = $crate::layout::Layout::empty();
             } else {
@@ -3237,7 +3238,7 @@ pub mod macros {
                 }
             }
             $crate::tensorspec::TensorSpecAux {
-                level: ($level).into(),
+                memory: ($memory).into(),
                 layout,
                 vector_size: ($vs).map(|x: u32| {
                     $crate::common::DimSize::try_from(x).unwrap()
@@ -3310,7 +3311,7 @@ pub mod macros {
         // Literal limits array: build a Standard MemoryLimits
         ( $typ:ident $args:tt , [ $($limits:expr),* $(,)? ] ) => {{
             let logical_spec = $crate::lspec!($typ $args);
-            let limits_arr: [u64; $crate::target::LEVEL_COUNT] = [ $( $limits as u64 ),* ];
+            let limits_arr: [u64; $crate::target::MEMORY_COUNT] = [ $( $limits as u64 ),* ];
             $crate::spec::__private::new_with_standard_memory(logical_spec, limits_arr)
         }};
         // Dynamic limits expression: wrap directly with provided MemoryLimits
@@ -3331,20 +3332,20 @@ pub mod macros {
 pub mod __private {
     use super::{LogicalSpec, Spec};
     use crate::memorylimits::{MemVec, MemoryLimits};
-    use crate::target::{MemoryLevel, Target, LEVEL_COUNT};
+    use crate::target::{Memory, Target, MEMORY_COUNT};
 
     /// A helper constructor for the `spec!` macro. This exists so that the inferred `Tgt` can be
     /// given to [MemVec::new_for_target].
     pub fn new_with_standard_memory<Tgt: Target>(
         logical_spec: LogicalSpec<Tgt>,
-        mut limits_arr: [u64; LEVEL_COUNT],
+        mut limits_arr: [u64; MEMORY_COUNT],
     ) -> Spec<Tgt> {
-        // Since `spec!` takes bytes for non-register-file levels, convert those
+        // Since `spec!` takes bytes for non-register-file memories, convert those
         // to cache lines.
         let line_size = u64::from(Tgt::line_size());
         debug_assert!(line_size > 0);
-        for (idx, level) in Tgt::levels().iter().enumerate() {
-            if !level.counts_registers() {
+        for (idx, memory) in Tgt::memories().iter().enumerate() {
+            if !memory.counts_registers() {
                 let bytes = limits_arr[idx];
                 if !bytes.is_multiple_of(line_size) {
                     panic!("Bytes ({bytes}) must be a multiple of line size ({line_size})");
@@ -3370,8 +3371,8 @@ mod tests {
     use crate::scheduling::tiling::TileOut;
     use crate::scheduling::{Action, ActionT as _, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
-    use crate::target::CpuMemoryLevel::{GL, L1, RF};
-    use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel, MemoryLevel, Target, LEVEL_COUNT};
+    use crate::target::CpuMemory::{GL, L1, RF};
+    use crate::target::{ArmTarget, Avx2Target, CpuMemory, Memory, Target, MEMORY_COUNT};
     use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::views::View;
@@ -3393,19 +3394,19 @@ mod tests {
             serial
         ));
         let lhs = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: row_major(&shape![32, 2, 3]),
             vector_size: None,
         };
         let mut rhs_layout = row_major(&shape![32, 3, 3]);
         rhs_layout.set_contiguous_none();
         let rhs = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: rhs_layout,
             vector_size: None,
         };
         let out = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: row_major(&shape![32, 2, 3]),
             vector_size: None,
         };
@@ -3682,30 +3683,30 @@ mod tests {
         }
 
         #[test]
-        fn test_parameter_levels_matches_parameters_levels(
+        fn test_parameter_memories_matches_parameters_memories(
             spec in any::<LogicalSpec<Avx2Target>>()
         ) {
-            let levels_from_parameter_levels = spec.parameter_levels();
-            let levels_from_parameters = spec.parameters().iter().map(|p| p.level()).collect::<Vec<_>>();
-            prop_assert_eq!(levels_from_parameter_levels, levels_from_parameters);
+            let memories_from_parameter_memories = spec.parameter_memories();
+            let memories_from_parameters = spec.parameters().iter().map(|p| p.memory()).collect::<Vec<_>>();
+            prop_assert_eq!(memories_from_parameter_memories, memories_from_parameters);
         }
 
         #[test]
-        fn test_parameter_levels_matches_parameters_levels_arm(
+        fn test_parameter_memories_matches_parameters_memories_arm(
             spec in any::<LogicalSpec<ArmTarget>>()
         ) {
-            let levels_from_parameter_levels = spec.parameter_levels();
-            let levels_from_parameters = spec.parameters().iter().map(|p| p.level()).collect::<Vec<_>>();
-            prop_assert_eq!(levels_from_parameter_levels, levels_from_parameters);
+            let memories_from_parameter_memories = spec.parameter_memories();
+            let memories_from_parameters = spec.parameters().iter().map(|p| p.memory()).collect::<Vec<_>>();
+            prop_assert_eq!(memories_from_parameter_memories, memories_from_parameters);
         }
 
         // TODO: Add ARM variant
         #[test]
-        fn test_parameter_level_matches_parameter_levels_avx2(
+        fn test_parameter_memory_matches_parameter_memories_avx2(
             spec in any::<LogicalSpec<Avx2Target>>()
         ) {
-            for (i, level) in spec.parameter_levels().into_iter().enumerate() {
-                prop_assert_eq!(level, spec.parameter_level(i));
+            for (i, memory) in spec.parameter_memories().into_iter().enumerate() {
+                prop_assert_eq!(memory, spec.parameter_memory(i));
             }
         }
 
@@ -3826,7 +3827,7 @@ mod tests {
                         (Just(basics), auxes_strategy, any::<bool>())
                     })
                     .prop_filter("No operand should be in a vector register file", |(_, auxes, _)| {
-                        auxes.iter().all(|aux| !aux.level.vector_rf())
+                        auxes.iter().all(|aux| !aux.memory.vector_rf())
                     })
                     .prop_filter_map("Spec should be canonical", |(basics, auxes, serial_only)| {
                         let s = Spec(LogicalSpec::Primitive(basics, auxes, serial_only), Avx2Target::max_mem());
@@ -3932,7 +3933,7 @@ mod tests {
                     if let ImplNode::SpecApp(SpecApp(spec, args)) = leaf {
                         let chained_tensorspecs = spec.0.parameters().into_iter().chain(args.iter().map(|a| a.spec()).cloned());
                         for tspec in chained_tensorspecs {
-                            if tspec.level().has_layout() {
+                            if tspec.memory().has_layout() {
                                 assert!(!tspec.layout().is_empty() || tspec.shape().iter().all(|d| d.get() == 1));
                             } else {
                                 assert!(tspec.layout().is_empty());
@@ -4030,7 +4031,7 @@ mod tests {
                     let value_size = u32::from(components[*index].dtypes[0].size());
                     let bytes_needed = buf_volume * value_size;
                     let rf_idx =
-                        Avx2Target::levels().iter().position(|l| l == &CpuMemoryLevel::RF).unwrap();
+                        Avx2Target::memories().iter().position(|l| l == &CpuMemory::RF).unwrap();
                     let remaining_in_rf = match s.1.clone().into_standard() {
                         MemoryLimits::Standard(standard) => standard.get_unscaled(rf_idx),
                     };
@@ -4044,7 +4045,7 @@ mod tests {
 
             let pipeline = compose_spec.bufferize(
                 index,
-                CpuMemoryLevel::RF,
+                CpuMemory::RF,
                 row_major,
                 None
             );
@@ -4057,8 +4058,8 @@ mod tests {
     fn shared_test_specbimap_is_invertible<Tgt>(spec: Spec<Tgt>, binary_scale_shapes: bool)
     where
         Tgt: Target,
-        Tgt::Level: CanonicalBimap,
-        <Tgt::Level as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Level, Codomain = u8>,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
     {
         let surmap = SpecSurMap::<Tgt, _, _, _> {
             logical_spec_surmap: LogicalSpecSurMap::new(
@@ -4103,7 +4104,7 @@ mod tests {
         let operand_auxes: Vec<_> = operand_shapes
             .iter()
             .map(|shape| TensorSpecAux {
-                level: GL,
+                memory: GL,
                 layout: row_major(shape),
                 vector_size: None,
             })
@@ -4184,8 +4185,8 @@ mod tests {
             let mut empty = true;
             for pt in sum_seqs(&maxes, diagonal_idx) {
                 empty = false;
-                let Ok(pt_arr): Result<[u64; LEVEL_COUNT], _> = pt.try_into() else {
-                    panic!("Expected length {LEVEL_COUNT}");
+                let Ok(pt_arr): Result<[u64; MEMORY_COUNT], _> = pt.try_into() else {
+                    panic!("Expected length {MEMORY_COUNT}");
                 };
                 shared_spec.1 = MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(pt_arr));
                 assert!(shared_spec.is_canonical());
@@ -4197,11 +4198,11 @@ mod tests {
                     match unseen_actions[i].apply_unchecked_canon(&shared_spec) {
                         Ok(applied) => {
                             unseen_actions.swap_remove(i);
-                            // TODO: Should we also assert that applying the same action at each level
+                            // TODO: Should we also assert that applying the same action for each target memory
                             //   doesn't actually accumulate additional memory?.
                             // TODO: Can we assert that the change in peak memory is exactly the
                             //   additional amount at the limit?.
-                            // TODO: Assert here that the min of each level-wise limit is zero.
+                            // TODO: Assert here that the min of each memory-wise limit is zero.
                             assert_eq!(&peak_memory(&applied), limits_memvec);
                         }
                         Err(ApplyError::NotApplicable(_)) => {}
@@ -4245,10 +4246,10 @@ mod tests {
                     _ => todo!(),
                 };
                 let MemoryLimits::Standard(limits_memvec) = &spec.1;
-                let levels = Tgt::levels();
+                let memories = Tgt::memories();
                 let mut corrected_lower_bound = lower_bound;
-                for i in 0..LEVEL_COUNT {
-                    if !levels[i].counts_registers() {
+                for i in 0..MEMORY_COUNT {
+                    if !memories[i].counts_registers() {
                         corrected_lower_bound[i] = next_binary_power(corrected_lower_bound[i]);
                     }
                 }
@@ -4290,27 +4291,27 @@ mod tests {
         };
 
         let aux0_1 = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: row_major(&basic0.parameter_shape(0)),
             vector_size: None,
         };
         let aux1_1 = TensorSpecAux {
-            level: L1,
+            memory: L1,
             layout: row_major(&basic1.parameter_shape(1)),
             vector_size: None,
         };
         let aux2_0 = TensorSpecAux {
-            level: GL,
+            memory: GL,
             layout: row_major(&basic2.parameter_shape(0)),
             vector_size: None,
         };
         let aux2_1 = TensorSpecAux {
-            level: L1,
+            memory: L1,
             layout: row_major(&basic2.parameter_shape(1)),
             vector_size: None,
         };
         let aux0_out = TensorSpecAux {
-            level: RF,
+            memory: RF,
             layout: row_major(&basic0.parameter_shape(2)),
             vector_size: None,
         };
