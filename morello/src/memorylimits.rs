@@ -1,5 +1,6 @@
 use crate::grid::general::BiMap;
 use crate::grid::linear::BimapInt;
+use crate::target::ZERO_LIMITS;
 use crate::utils::{bit_length, bit_length_inverse, next_binary_power};
 use crate::{
     target::{MemoryLevel, Target, LEVEL_COUNT},
@@ -7,11 +8,10 @@ use crate::{
 };
 
 use itertools::{izip, Either, Itertools};
-use log::warn;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
-use std::{iter, ops::Sub};
+use std::{array, iter, ops::Sub};
 
 // If true, schedules will be saved as if they had memory limits, for all banks,
 // that are the next highest power of 2. This discretizes cache line counts.
@@ -28,12 +28,33 @@ const SNAP_CAP_TO_POWER_OF_TWO: bool = true;
 /// that `Pipeline` to assume that those bytes have been freed after its own first and
 /// last stages complete.
 ///
-/// By convention, MemoryLimits are always discretized to powers of two. It is
-/// responsibility of the constructor to call `discretize`.
+/// # Discretization and Precision
+///
+/// By convention, MemoryLimits are always discretized to powers of two. It is the
+/// responsibility of the user to call `discretize`.
+///
+/// For register-counting levels (e.g., VRF, RF), values are stored exactly as integers.
+/// For non-register-counting levels (e.g., L1, GL), values are rounded down to the
+/// previous power of two via `prev_power_of_two` during `discretize`.
+///
+/// The `Pipeline` variant stores `limits`, `before`, and `after`, each of which
+/// is independently discretized.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub enum MemoryLimits {
-    // TODO: Implement Pipeline as described above.
     Standard(MemVec),
+    Pipeline {
+        /// Base memory limits.
+        limits: MemVec,
+        /// Memory consumed by tensors already live when execution begins.
+        ///
+        /// Subtracted from `limits` to compute available memory in the first stage.
+        before: [u64; LEVEL_COUNT],
+        /// Memory consumed by tensors that remain allocated after execution ends.
+        ///
+        /// Subtracted from `limits` to compute available memory once allocated
+        /// in the final stage.
+        after: [u64; LEVEL_COUNT],
+    },
 }
 
 /// The memory allocated by a single [Impl] node.
@@ -68,13 +89,41 @@ pub struct MemoryLimitsBimap<Tgt: Target> {
 impl MemoryLimits {
     /// Convert to a `MemoryLimits::Standard`.
     ///
-    /// This is always safe, but conservative.
-    pub fn into_standard(self) -> Self {
+    /// For Pipeline variants, computes `snap(limits - before - after)` per level.
+    pub fn into_standard<Tgt: Target>(self) -> Self {
         match self {
             MemoryLimits::Standard(_) => self,
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                let levels = Tgt::levels();
+                let mut values = ZERO_LIMITS;
+                let mut use_raw_encoding = [false; LEVEL_COUNT];
+                for i in 0..LEVEL_COUNT {
+                    let raw_capacity = limits
+                        .get_unscaled(i)
+                        .saturating_sub(before[i])
+                        .saturating_sub(after[i]);
+                    use_raw_encoding[i] = levels[i].counts_registers();
+                    if levels[i].counts_registers() {
+                        values[i] = raw_capacity;
+                    } else {
+                        values[i] = prev_power_of_two(raw_capacity);
+                    }
+                }
+                MemoryLimits::Standard(MemVec::new_mixed(values, use_raw_encoding))
+            }
         }
     }
 
+    /// Snap all non-register levels down to the nearest power of two.
+    ///
+    /// For `Pipeline`, this snaps all three fields (`limits`, `before`, `after`).
+    /// This can reduce precision: snapping `before` and `after` individually
+    /// may lose information compared to computing `limits - before - after`
+    /// first and then snapping.
     pub fn discretize<Tgt: Target>(&mut self) {
         match self {
             MemoryLimits::Standard(mem_vec) => {
@@ -86,6 +135,19 @@ impl MemoryLimits {
                             mem_vec.set_bit_length(i, prev_power_of_two(mem_vec.get_unscaled(i)));
                         }
                     });
+            }
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                for (i, level) in Tgt::levels().into_iter().enumerate() {
+                    if !level.counts_registers() {
+                        limits.set_bit_length(i, prev_power_of_two(limits.get_unscaled(i)));
+                        before[i] = prev_power_of_two(before[i]);
+                        after[i] = prev_power_of_two(after[i]);
+                    }
+                }
             }
         }
     }
@@ -101,6 +163,19 @@ impl MemoryLimits {
                 for (limit_idx, cur) in target_levels.iter().enumerate() {
                     if levels_bounds.iter().all(|bound| bound < cur) {
                         mem_vec.set_bit_length(limit_idx, 0);
+                    }
+                }
+            }
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                for (limit_idx, cur) in target_levels.iter().enumerate() {
+                    if levels_bounds.iter().all(|bound| bound < cur) {
+                        limits.set_bit_length(limit_idx, 0);
+                        before[limit_idx] = 0;
+                        after[limit_idx] = 0;
                     }
                 }
             }
@@ -123,6 +198,21 @@ impl MemoryLimits {
                     }
                 }
             }
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                for (limit_idx, cur) in target_levels.iter().enumerate() {
+                    if (limits.get_unscaled(limit_idx) != 0
+                        || before[limit_idx] != 0
+                        || after[limit_idx] != 0)
+                        && levels_bounds.iter().all(|bound| bound < cur)
+                    {
+                        return true;
+                    }
+                }
+            }
         }
         false
     }
@@ -136,74 +226,126 @@ impl MemoryLimits {
         &self,
         allocated: &MemoryAllocation,
     ) -> Option<Vec<MemoryLimits>> {
-        warn!("Not transitioning to pipeline MemoryLimits yet");
+        // Handle Pipeline allocation specially - it produces Pipeline children
+        match allocated {
+            MemoryAllocation::Simple(_) | MemoryAllocation::Inner(_) => {
+                let per_child_diffs = match allocated {
+                    MemoryAllocation::Simple(v) => Either::Left(iter::repeat(v)),
+                    MemoryAllocation::Inner(during_children) => {
+                        Either::Right(during_children.iter())
+                    }
+                    MemoryAllocation::Pipeline { .. } => unreachable!(),
+                };
+                match self {
+                    MemoryLimits::Standard(cur_limit) => {
+                        let mut result = Vec::with_capacity(cur_limit.len());
+                        for child_allocation in per_child_diffs {
+                            debug_assert_eq!(child_allocation.len(), cur_limit.len());
+                            let to_push = cur_limit
+                                .clone()
+                                .checked_sub_snap_down(child_allocation)
+                                .ok()?;
+                            let mut to_push = MemoryLimits::Standard(to_push);
+                            to_push.discretize::<Tgt>();
+                            result.push(to_push);
+                        }
+                        Some(result)
+                    }
+                    MemoryLimits::Pipeline {
+                        limits,
+                        before,
+                        after,
+                    } => {
+                        let mut result = Vec::new();
+                        for (child_idx, child_allocation) in per_child_diffs.enumerate() {
+                            debug_assert_eq!(child_allocation.len(), limits.len());
 
-        let per_child_diffs = match allocated {
-            MemoryAllocation::Simple(v) => Either::Left(iter::repeat(v)),
-            MemoryAllocation::Inner(during_children) => Either::Right(during_children.iter()),
+                            // Create base limits after subtracting child allocation
+                            let base_limits = limits
+                                .clone()
+                                .checked_sub_snap_down(child_allocation)
+                                .ok()?;
+
+                            // For pipeline limits, subtract 'before' from first child and 'after' from last child
+                            let child_limits = if child_idx == 0 {
+                                // First child: subtract 'before' memory
+                                base_limits.checked_sub_snap_down(before).ok()?
+                            } else {
+                                // Other children: use base limits (will be updated for last child)
+                                base_limits
+                            };
+
+                            let mut to_push = MemoryLimits::Standard(child_limits);
+                            to_push.discretize::<Tgt>();
+                            result.push(to_push);
+                        }
+
+                        // Update the last child to account for 'after' memory if there are children
+                        if let Some(last_child) = result.last_mut() {
+                            if let MemoryLimits::Standard(last_limits) = last_child {
+                                *last_limits =
+                                    last_limits.clone().checked_sub_snap_down(after).ok()?;
+                                last_child.discretize::<Tgt>();
+                            }
+                        }
+
+                        Some(result)
+                    }
+                }
+            }
             MemoryAllocation::Pipeline {
-                intermediate_consumption: _,
-            } => todo!(),
+                intermediate_consumption,
+            } => self.transition_pipeline::<Tgt>(intermediate_consumption),
+        }
+    }
+
+    fn transition_pipeline<Tgt: Target>(
+        &self,
+        intermediate_consumption: &[[u64; LEVEL_COUNT]],
+    ) -> Option<Vec<MemoryLimits>> {
+        let (parent_limits, parent_before, parent_after) = match self {
+            MemoryLimits::Standard(limits) => (
+                array::from_fn(|i| limits.get_unscaled(i)),
+                &ZERO_LIMITS,
+                &ZERO_LIMITS,
+            ),
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => (array::from_fn(|i| limits.get_unscaled(i)), before, after),
         };
 
-        match self {
-            MemoryLimits::Standard(cur_limit) => {
-                let mut result = Vec::with_capacity(cur_limit.len());
-                for child_allocation in per_child_diffs {
-                    debug_assert_eq!(child_allocation.len(), cur_limit.len());
-                    let to_push = cur_limit
-                        .clone()
-                        .checked_sub_snap_down(child_allocation)
-                        .ok()?;
-                    let mut to_push = MemoryLimits::Standard(to_push);
-                    to_push.discretize::<Tgt>();
-                    result.push(to_push);
+        let num_children = intermediate_consumption.len() + 1;
+        let mut result = Vec::with_capacity(num_children);
+
+        for child_idx in 0..num_children {
+            let alloc_before = child_idx
+                .checked_sub(1)
+                .map(|i| intermediate_consumption[i])
+                .unwrap_or(ZERO_LIMITS);
+            let alloc_after = intermediate_consumption
+                .get(child_idx)
+                .copied()
+                .unwrap_or(ZERO_LIMITS);
+
+            // Check that the conservative worst case fits in limits (OOM).
+            let final_before = array::from_fn(|i| parent_before[i] + alloc_before[i]);
+            let final_after = array::from_fn(|i| parent_after[i] + alloc_after[i]);
+            for i in 0..LEVEL_COUNT {
+                if final_before[i] + final_after[i] > parent_limits[i] {
+                    return None;
                 }
-                Some(result)
             }
-        }
-    }
-}
 
-impl PartialOrd for MemoryLimits {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
-                limits_vec.partial_cmp(other_limits_vec)
-            }
+            result.push(MemoryLimits::Pipeline {
+                limits: MemVec::new_for_target::<Tgt>(parent_limits),
+                before: final_before,
+                after: final_after,
+            });
         }
-    }
 
-    fn ge(&self, other: &Self) -> bool {
-        match (self, other) {
-            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
-                limits_vec.ge(other_limits_vec)
-            }
-        }
-    }
-
-    fn le(&self, other: &Self) -> bool {
-        match (self, other) {
-            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
-                limits_vec.le(other_limits_vec)
-            }
-        }
-    }
-
-    fn lt(&self, other: &Self) -> bool {
-        match (self, other) {
-            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
-                limits_vec.lt(other_limits_vec)
-            }
-        }
-    }
-
-    fn gt(&self, other: &Self) -> bool {
-        match (self, other) {
-            (MemoryLimits::Standard(limits_vec), MemoryLimits::Standard(other_limits_vec)) => {
-                limits_vec.gt(other_limits_vec)
-            }
-        }
+        Some(result)
     }
 }
 
@@ -211,6 +353,13 @@ impl Display for MemoryLimits {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             MemoryLimits::Standard(mem_vec) => mem_vec.fmt(f),
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                write!(f, "pipemem({limits}, {before:?}, {after:?})")
+            }
         }
     }
 }
@@ -716,37 +865,108 @@ impl Iterator for MemVecIter<'_> {
 
 impl ExactSizeIterator for MemVecIter<'_> {}
 
+impl<Tgt: Target> MemoryLimitsBimap<Tgt> {
+    /// Returns the length of the vectors returned by [MemoryLimitsBimap::apply].
+    pub(crate) fn codomain_len() -> usize {
+        1 + 3 * Tgt::levels().len()
+    }
+}
+
 impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
     type Domain = MemoryLimits;
     type Codomain = Vec<BimapInt>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        let levels_count = Tgt::levels().len();
+        let mut result = vec![0u32; 1 + 3 * levels_count];
+
         match t {
-            MemoryLimits::Standard(limits_vec) => Tgt::levels()
-                .into_iter()
-                .enumerate()
-                .map(|(i, level)| {
+            MemoryLimits::Standard(limits_vec) => {
+                result[0] = 0u32; // Variant discriminator: 0 for Standard
+                for (i, level) in Tgt::levels().into_iter().enumerate() {
                     if level.counts_registers() {
-                        BimapInt::try_from(limits_vec.get_unscaled(i)).unwrap()
+                        result[1 + i] = BimapInt::try_from(limits_vec.get_unscaled(i)).unwrap();
                     } else {
-                        BimapInt::from(limits_vec.get_binary_scaled(i))
+                        result[1 + i] = BimapInt::from(limits_vec.get_binary_scaled(i));
                     }
-                })
-                .collect(),
+                }
+            }
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                result[0] = 1u32; // Variant discriminator: 1 for Pipeline
+                for (i, level) in Tgt::levels().into_iter().enumerate() {
+                    if level.counts_registers() {
+                        result[1 + i] = BimapInt::try_from(limits.get_unscaled(i)).unwrap();
+                        result[1 + levels_count + i] = before[i].try_into().unwrap();
+                        result[1 + 2 * levels_count + i] = after[i].try_into().unwrap();
+                    } else {
+                        result[1 + i] = BimapInt::from(limits.get_binary_scaled(i));
+                        result[1 + levels_count + i] = bit_length(before[i]);
+                        result[1 + 2 * levels_count + i] = bit_length(after[i]);
+                    }
+                }
+            }
         }
+        result
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
         let levels = Tgt::levels();
-        let mut values = [0u64; LEVEL_COUNT];
-        for idx in 0..LEVEL_COUNT {
-            if levels[idx].counts_registers() {
-                values[idx] = i[idx].into();
-            } else {
-                values[idx] = bit_length_inverse(i[idx]);
-            }
+        if i.len() != 1 + 3 * levels.len() {
+            panic!("Invalid MemoryLimits BiMap vector length");
         }
-        MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(values))
+
+        match i[0] {
+            0 => {
+                let limits_data = &i[1..1 + levels.len()];
+                let mut values = ZERO_LIMITS;
+                let mut use_raw_encoding = [false; LEVEL_COUNT];
+                for (idx, level) in levels.iter().enumerate() {
+                    let raw = limits_data[idx];
+                    if level.counts_registers() {
+                        values[idx] = raw.into();
+                        use_raw_encoding[idx] = true;
+                    } else {
+                        values[idx] = bit_length_inverse(raw);
+                    }
+                }
+                MemoryLimits::Standard(MemVec::new_mixed(values, use_raw_encoding))
+            }
+            1 => {
+                let limits_data = &i[1..1 + levels.len()];
+                let before_data = &i[1 + levels.len()..1 + 2 * levels.len()];
+                let after_data = &i[1 + 2 * levels.len()..1 + 3 * levels.len()];
+
+                let mut limits_values = ZERO_LIMITS;
+                let mut use_raw_encoding = [false; LEVEL_COUNT];
+                let mut before = ZERO_LIMITS;
+                let mut after = ZERO_LIMITS;
+
+                for (idx, level) in levels.iter().enumerate() {
+                    let limits_raw: u32 = limits_data[idx];
+                    if level.counts_registers() {
+                        limits_values[idx] = u64::from(limits_raw);
+                        use_raw_encoding[idx] = true;
+                        before[idx] = u64::from(before_data[idx]);
+                        after[idx] = u64::from(after_data[idx]);
+                    } else {
+                        limits_values[idx] = bit_length_inverse(limits_raw);
+                        before[idx] = bit_length_inverse(before_data[idx]);
+                        after[idx] = bit_length_inverse(after_data[idx]);
+                    }
+                }
+
+                MemoryLimits::Pipeline {
+                    limits: MemVec::new_mixed(limits_values, use_raw_encoding),
+                    before,
+                    after,
+                }
+            }
+            _ => panic!("Invalid variant discriminator"),
+        }
     }
 }
 
@@ -780,14 +1000,56 @@ pub fn arb_memorylimits_ext<Tgt: Target>(
         })
         .collect::<Vec<_>>();
 
-    component_ranges.prop_map(move |v| {
-        let mut values = [0u64; LEVEL_COUNT];
+    component_ranges.prop_flat_map(move |v| {
+        let mut values = ZERO_LIMITS;
         let mut use_raw_encoding = [false; LEVEL_COUNT];
         for i in 0..LEVEL_COUNT {
             values[i] = v[i];
             use_raw_encoding[i] = levels[i].counts_registers();
         }
-        MemoryLimits::Standard(MemVec::new_mixed(values, use_raw_encoding))
+
+        prop_oneof![
+            // 70% chance of Standard variant
+            7 => Just(MemoryLimits::Standard(MemVec::new_mixed(values, use_raw_encoding))),
+            // 30% chance of Pipeline variant
+            3 => {
+                // Generate before/after such that before and after sum to at most limits on each level.
+                let before_after_strategy = Just(values).prop_flat_map(|vals| {
+                    (0..=vals[0], 0..=vals[1], 0u32..=bit_length(vals[2]), 0u32..=bit_length(vals[3]))
+                        .prop_flat_map(move |(b0, b1, b2_log, b3_log)| {
+                            let before = [
+                                b0,
+                                b1,
+                                bit_length_inverse(b2_log),
+                                bit_length_inverse(b3_log),
+                            ];
+                            (
+                                Just(before),
+                                0..=(vals[0] - before[0]),
+                                0..=(vals[1] - before[1]),
+                                0u32..=bit_length(prev_power_of_two(vals[2] - before[2])),
+                                0u32..=bit_length(prev_power_of_two(vals[3] - before[3])),
+                            )
+                                .prop_map(|(before, a0, a1, a2_log, a3_log)| {
+                                    let after = [
+                                        a0,
+                                        a1,
+                                        bit_length_inverse(a2_log),
+                                        bit_length_inverse(a3_log),
+                                    ];
+                                    (before, after)
+                                })
+                        })
+                });
+                before_after_strategy.prop_map(move |(before, after)| {
+                    MemoryLimits::Pipeline {
+                        limits: MemVec::new_mixed(values, use_raw_encoding),
+                        before,
+                        after,
+                    }
+                })
+            },
+        ]
     })
 }
 
@@ -795,6 +1057,7 @@ pub fn arb_memorylimits_ext<Tgt: Target>(
 mod tests {
     use super::*;
     use crate::target::{ArmTarget, Avx2Target, CpuMemoryLevel};
+    use crate::utils::prev_power_of_two;
     use proptest::{array::uniform4, prelude::*};
 
     #[test]
@@ -805,31 +1068,6 @@ mod tests {
     #[test]
     fn test_zero_levels_slower_than_all_arm() {
         shared_test_zero_levels_slower_than_all::<ArmTarget>();
-    }
-
-    #[test]
-    fn test_memorylimits_standard_partialord() {
-        let a = MemoryLimits::Standard(MemVec::new([1, 2, 3, 4]));
-        let b = MemoryLimits::Standard(MemVec::new([1, 2, 3, 4]));
-        assert!(a >= b);
-        assert!(a <= b);
-        assert!(!a.lt(&b));
-        assert!(!a.gt(&b));
-        assert!(matches!(a.partial_cmp(&b), Some(Ordering::Equal)));
-
-        let b = MemoryLimits::Standard(MemVec::new([1, 2, 3, 5]));
-        assert!(a < b);
-        assert!(a <= b);
-        assert!(!a.gt(&b));
-        assert!(!a.ge(&b));
-        assert!(matches!(a.partial_cmp(&b), Some(Ordering::Less)));
-
-        let b = MemoryLimits::Standard(MemVec::new([1, 2, 1, 5]));
-        assert!(!a.lt(&b));
-        assert!(!a.le(&b));
-        assert!(!a.gt(&b));
-        assert!(!a.ge(&b));
-        assert!(a.partial_cmp(&b).is_none())
     }
 
     #[test]
@@ -903,8 +1141,196 @@ mod tests {
         assert_eq!(memvec.get_unscaled(2), 512); // next power of 2 after 257
     }
 
+    /// Verifies Standard-to-Pipeline transition produces expected child capacities.
+    #[test]
+    fn test_transition_standard_to_pipeline() {
+        let limits =
+            MemoryLimits::Standard(MemVec::new_for_target::<Avx2Target>([64, 32, 2048, 4096]));
+        let children = limits
+            .transition::<Avx2Target>(&MemoryAllocation::Pipeline {
+                intermediate_consumption: vec![[8, 4, 128, 256], [16, 8, 256, 512]],
+            })
+            .unwrap();
+        assert_eq!(children.len(), 3);
+        assert_eq!(standard_unscaled_levels(&children[0]), [56, 28, 1024, 2048]);
+        assert_eq!(standard_unscaled_levels(&children[1]), [40, 20, 1024, 2048]);
+        assert_eq!(standard_unscaled_levels(&children[2]), [48, 24, 1024, 2048]);
+    }
+
+    /// Verifies into_standard computes capacity from summed pipeline pressure
+    /// without pre-snapping before/after.
+    #[test]
+    fn test_into_standard_precision_preserved() {
+        let pipeline = MemoryLimits::Pipeline {
+            limits: MemVec::new_for_target::<Avx2Target>([16, 16, 1000, 1000]),
+            before: [0, 0, 300, 400],
+            after: [0, 0, 300, 400],
+        };
+        let MemoryLimits::Standard(memvec) = pipeline.into_standard::<Avx2Target>() else {
+            panic!();
+        };
+        // If before/after were snapped first (300->256 and 400->256), this
+        // would be [256, 256].
+        assert_eq!(memvec.get_unscaled(2), 256);
+        assert_eq!(memvec.get_unscaled(3), 128);
+    }
+
     proptest! {
-        // TODO: Add test of larger powers of two
+        /// For a one-buffer outer `Pipeline` transition, the two emitted children
+        /// differ only in the relative lifetime of the `outer_buf` memory (`before` in
+        /// one child, `after` in the other). After `into_standard`, both children map
+        /// to the same per-level capacity, `snap(initial - outer_buf)`.
+        #[test]
+        fn test_nested_pipeline_outer_into_standard_composition(
+            (initial, outer_buf, outer_children) in
+                (0u64..=6u64, 0u32..=8u32)
+                    .prop_flat_map(|(i_rf, i_l1_bits)| (
+                        Just(i_rf),
+                        Just(i_l1_bits),
+                        0u64..=i_rf,
+                        0u32..=i_l1_bits.saturating_sub(1),
+                    ))
+                    .prop_map(|(i_rf, i_l1_bits, o_rf, o_l1_bits)| {
+                        let i_l1 = bit_length_inverse(i_l1_bits);
+                        let o_l1 = bit_length_inverse(o_l1_bits);
+                        let initial = MemVec::new_for_target::<Avx2Target>([i_rf, i_rf, i_l1, i_l1]);
+                        let outer_buf = [o_rf, o_rf, o_l1, o_l1];
+                        let outer_children = apply_simple_pipeline_transition(&initial, outer_buf);
+                        (initial, outer_buf, outer_children)
+                    })
+        ) {
+            let outer_expected = array::from_fn(|i| {
+                let remaining = initial.get_unscaled(i) - outer_buf[i];
+                if Avx2Target::levels()[i].counts_registers() {
+                    remaining
+                } else {
+                    prev_power_of_two(remaining)
+                }
+            });
+
+            for outer_child in &outer_children {
+                prop_assert_eq!(standard_unscaled_levels(outer_child), outer_expected);
+            }
+        }
+
+        /// Verifies inner nested Pipeline children have the expected into_standard result.
+        #[test]
+        fn test_nested_pipeline_inner_into_standard_composition(
+            (initial, outer_buf, inner_buf, outer_children) in arb_nested_inner_case()
+        ) {
+            let avx2_levels = Avx2Target::levels();
+            let inner_expected = array::from_fn(|i| {
+                let after_outer = initial.get_unscaled(i) - outer_buf[i];
+                let after_inner = after_outer - inner_buf[i];
+                if avx2_levels[i].counts_registers() {
+                    after_inner
+                } else {
+                    prev_power_of_two(after_inner)
+                }
+            });
+
+            for outer_child in &outer_children {
+                let inner_alloc = MemoryAllocation::Pipeline {
+                    intermediate_consumption: vec![inner_buf],
+                };
+                let inner_children = outer_child.transition::<Avx2Target>(&inner_alloc).unwrap();
+                for inner_child in &inner_children {
+                    prop_assert_eq!(standard_unscaled_levels(inner_child), inner_expected);
+                }
+            }
+        }
+
+        /// Verifies Pipeline base limits remain equal to the root limits through nested Pipeline transitions.
+        #[test]
+        fn test_nested_pipeline_limits_preserved_through_nesting(
+            (initial, _, inner_buf, outer_children) in arb_nested_inner_case()
+        ) {
+            for outer_child in &outer_children {
+                let MemoryLimits::Pipeline {
+                    limits: outer_limits,
+                    ..
+                } = outer_child
+                else {
+                    panic!("expected Pipeline");
+                };
+                for level in 0..LEVEL_COUNT {
+                    prop_assert_eq!(
+                        outer_limits.get_unscaled(level),
+                        initial.get_unscaled(level),
+                        "outer limits changed at level {}",
+                        level
+                    );
+                }
+
+                let inner_alloc = MemoryAllocation::Pipeline {
+                    intermediate_consumption: vec![inner_buf],
+                };
+                let inner_children = outer_child.transition::<Avx2Target>(&inner_alloc).unwrap();
+                for inner_child in &inner_children {
+                    let MemoryLimits::Pipeline {
+                        limits: inner_limits,
+                        ..
+                    } = inner_child
+                    else {
+                        panic!("expected Pipeline");
+                    };
+                    for level in 0..LEVEL_COUNT {
+                        prop_assert_eq!(
+                            inner_limits.get_unscaled(level),
+                            initial.get_unscaled(level),
+                            "inner limits changed at level {}",
+                            level
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Test that nested Pipeline transitions never decrease per-level before/after.
+        #[test]
+        fn test_nested_pipeline_before_after_nondecreasing(
+            (_, _, inner_buf, outer_children) in arb_nested_inner_case()
+        ) {
+            for outer_child in &outer_children {
+                let MemoryLimits::Pipeline {
+                    limits: _,
+                    before: outer_before,
+                    after: outer_after,
+                } = outer_child
+                else {
+                    panic!("expected Pipeline outer child");
+                };
+                let inner_alloc = MemoryAllocation::Pipeline {
+                    intermediate_consumption: vec![inner_buf],
+                };
+                let inner_children = outer_child.transition::<Avx2Target>(&inner_alloc).unwrap();
+                for inner_child in &inner_children {
+                    let MemoryLimits::Pipeline {
+                        limits: _,
+                        before: inner_before,
+                        after: inner_after,
+                    } = inner_child
+                    else {
+                        panic!("expected Pipeline inner child");
+                    };
+                    for level in 0..LEVEL_COUNT {
+                        prop_assert!(inner_before[level] >= outer_before[level]);
+                        prop_assert!(inner_after[level] >= outer_after[level]);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn test_memorylimits_bimap_round_trip_avx2(
+            limits in arb_memorylimits::<Avx2Target>(&MemVec::new([127, 127, 4096, 4096]))
+        ) {
+            let bimap = MemoryLimitsBimap::<Avx2Target>::default();
+            let encoded = bimap.apply(&limits);
+            let decoded = bimap.apply_inverse(&encoded);
+            prop_assert_eq!(limits, decoded);
+        }
+
         #[test]
         fn test_memvec_new_returns_initial_non_bit_length_scaled_values(
             initials in uniform4(0..=16u64)
@@ -937,6 +1363,54 @@ mod tests {
         }
     }
 
+    /// Builds nested Pipeline test cases as
+    /// `(initial, outer_buf, inner_buf, outer_children)`.
+    ///
+    /// Earlier outputs restrict later ones: once `initial` and `outer_buf` are
+    /// chosen, only `inner_buf` values that fit those capacities are produced.
+    fn arb_nested_inner_case() -> impl Strategy<
+        Value = (
+            MemVec,
+            [u64; LEVEL_COUNT],
+            [u64; LEVEL_COUNT],
+            Vec<MemoryLimits>,
+        ),
+    > {
+        (0u64..=6u64, 0u32..=8u32)
+            .prop_flat_map(|(initial_rf, initial_l1_bits)| {
+                (
+                    Just(initial_rf),
+                    Just(initial_l1_bits),
+                    0u64..=initial_rf,
+                    0u32..=initial_l1_bits.saturating_sub(1),
+                )
+            })
+            .prop_flat_map(|(initial_rf, initial_l1_bits, o_rf, o_l1_bits)| {
+                (
+                    Just(initial_rf),
+                    Just(initial_l1_bits),
+                    Just(o_rf),
+                    Just(o_l1_bits),
+                    0u64..=initial_rf - o_rf,
+                    0u32..=initial_l1_bits.saturating_sub(1),
+                )
+            })
+            .prop_map(
+                |(initial_rf, i_l1_bits, o_rf, o_l1_bits, in_rf, in_l1_bits)| {
+                    let initial_l1 = bit_length_inverse(i_l1_bits);
+                    let o_l1 = bit_length_inverse(o_l1_bits);
+                    let in_l1 = bit_length_inverse(in_l1_bits);
+                    let initial = MemVec::new_for_target::<Avx2Target>([
+                        initial_rf, initial_rf, initial_l1, initial_l1,
+                    ]);
+                    let outer_buf = [o_rf, o_rf, o_l1, o_l1];
+                    let outer_children = apply_simple_pipeline_transition(&initial, outer_buf);
+                    let inner_buf = [in_rf, in_rf, in_l1, in_l1];
+                    (initial, outer_buf, inner_buf, outer_children)
+                },
+            )
+    }
+
     fn shared_test_zero_levels_slower_than_all<Tgt>()
     where
         Tgt: Target<Level = CpuMemoryLevel>,
@@ -966,5 +1440,27 @@ mod tests {
             zeroed_limits == limits,
             !limits.any_nonzero_levels_slower_than::<Tgt>(bounds)
         );
+    }
+
+    /// Transitions a simple [MemoryAllocation] (`initial`) with a single-buffer
+    /// (`outer_buf`) `Pipeline` allocation.
+    fn apply_simple_pipeline_transition(
+        initial: &MemVec,
+        outer_buf: [u64; LEVEL_COUNT],
+    ) -> Vec<MemoryLimits> {
+        let outer_alloc = MemoryAllocation::Pipeline {
+            intermediate_consumption: vec![outer_buf],
+        };
+        MemoryLimits::Standard(initial.clone())
+            .transition::<Avx2Target>(&outer_alloc)
+            .unwrap()
+    }
+
+    /// Returns unscaled level values of `limits`, or panics if not a [MemoryLimits::Standard].
+    fn standard_unscaled_levels(limits: &MemoryLimits) -> [u64; LEVEL_COUNT] {
+        let MemoryLimits::Standard(m) = limits.clone().into_standard::<Avx2Target>() else {
+            panic!("expected Standard variant");
+        };
+        array::from_fn(|i| m.get_unscaled(i))
     }
 }

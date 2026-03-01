@@ -6,7 +6,7 @@ use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::{Target, LEVEL_COUNT};
+use crate::target::{Target, ZERO_LIMITS};
 use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::views::{Param, Tensor, View, ViewE};
 use nonzero::nonzero as nz;
@@ -241,7 +241,7 @@ fn softmax_child_limits<'a, Tgt: Target, I>(
 where
     I: IntoIterator<Item = &'a TensorSpec<Tgt>>,
 {
-    let mut new_buffer_consumption = [0u64; LEVEL_COUNT];
+    let mut new_buffer_consumption = ZERO_LIMITS;
     for tensor_spec in live_tensors {
         let idx = Tgt::levels()
             .iter()
@@ -249,16 +249,18 @@ where
             .unwrap();
         new_buffer_consumption[idx] += tensor_spec.memory_units();
     }
-    let mut lowered_limits = MemoryLimits::Standard(match base_limits.to_owned() {
-        MemoryLimits::Standard(v) => v
-            .clone()
+    let MemoryLimits::Standard(available) = base_limits.clone().into_standard::<Tgt>() else {
+        unreachable!()
+    };
+    let mut lowered_limits = MemoryLimits::Standard(
+        available
             .checked_sub_snap_down(&new_buffer_consumption)
             .map_err(|oom_idx| {
                 ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
                     Tgt::levels()[oom_idx].to_string(),
                 ))
             })?,
-    });
+    );
     lowered_limits.discretize::<Tgt>();
     Ok(lowered_limits)
 }

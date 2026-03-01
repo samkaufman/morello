@@ -798,8 +798,6 @@ mod tests {
     use crate::utils::{bit_length, bit_length_inverse};
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
-    use proptest::sample::select;
-    use std::rc::Rc;
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
     const TEST_SMALL_MEM: u64 = 64;
@@ -843,7 +841,7 @@ mod tests {
         #[test]
         #[ignore]
         fn test_more_memory_never_worsens_solution_with_shared_db(
-            spec_pair in lower_and_higher_canonical_specs::<Avx2Target>()
+            spec_pair in arb_lower_and_higher_canonical_specs::<Avx2Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
             let db = FilesDatabase::new(None, false, 1, 128, 1);
@@ -1148,64 +1146,156 @@ mod tests {
         assert_eq!(first_solutions, lower_solutions);
     }
 
-    fn lower_and_higher_canonical_specs<Tgt: Target>(
+    /// Generates canonical Spec pairs with logical Specs where the second is the same
+    /// but with one level limit increased.
+    ///
+    /// For `Standard`, this raises one `limits` dimension. For `Pipeline`, this either
+    /// raises one `limits` dimension or lowers one `before`/`after` dimension.
+    fn arb_lower_and_higher_canonical_specs<Tgt: Target>(
     ) -> impl Strategy<Value = (Spec<Tgt>, Spec<Tgt>)> {
-        let MemoryLimits::Standard(mut top_memvec) = Avx2Target::max_mem();
-        top_memvec = top_memvec.map(|v| v.min(TEST_SMALL_MEM));
+        let top_memory_for_adjustment_selection = {
+            let MemoryLimits::Standard(top_memvec) = Tgt::max_mem().into_standard::<Tgt>() else {
+                std::unreachable!()
+            };
+            top_memvec.map(|v| v.min(TEST_SMALL_MEM))
+        };
 
-        let top_memory_a = Rc::new(MemoryLimits::Standard(top_memvec));
-        let top_memory_b = Rc::clone(&top_memory_a);
-        let top_memory_c = Rc::clone(&top_memory_a);
-
-        arb_canonical_spec::<Tgt>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
-            .prop_filter("limits should not be max", move |s| s.1 != *top_memory_a)
-            .prop_flat_map(move |spec| {
-                let MemoryLimits::Standard(top_memvec) = top_memory_b.as_ref();
-                let MemoryLimits::Standard(raised_memory) = &spec.1;
-                let non_top_levels = (0..raised_memory.len())
-                    .filter(|&idx| raised_memory.get_unscaled(idx) < top_memvec.get_unscaled(idx))
-                    .collect::<Vec<_>>();
-                (Just(spec), select(non_top_levels))
+        (
+            arb_canonical_spec::<Tgt>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM)),
+            0..LEVEL_COUNT,
+        )
+            .prop_filter_map(
+                "chosen level must support a valid memory adjustment",
+                move |(spec, idx)| {
+                    arb_less_restrictive_memory::<Tgt>(
+                        &spec.1,
+                        idx,
+                        &top_memory_for_adjustment_selection,
+                    )
+                    .map(|strategy| (spec, strategy))
+                },
+            )
+            .prop_flat_map(|(spec, adjusted_memory_strategy)| {
+                (Just(spec), adjusted_memory_strategy)
             })
-            .prop_flat_map(move |(spec, dim_idx_to_raise)| {
-                let MemoryLimits::Standard(top_memvec) = top_memory_c.as_ref();
-                let MemoryLimits::Standard(spec_memvec) = &spec.1;
-
-                let levels = Tgt::levels();
-                let raise_strategy = if levels[dim_idx_to_raise].counts_registers() {
-                    let low = spec_memvec.get_unscaled(dim_idx_to_raise);
-                    let high = top_memvec.get_unscaled(dim_idx_to_raise);
-                    ((low + 1)..=high).boxed()
-                } else {
-                    let low = bit_length(spec_memvec.get_unscaled(dim_idx_to_raise));
-                    let high = bit_length(top_memvec.get_unscaled(dim_idx_to_raise));
-                    ((low + 1)..=high).prop_map(bit_length_inverse).boxed()
-                };
-                (Just(spec), Just(dim_idx_to_raise), raise_strategy)
-            })
-            .prop_map(|(spec, dim_idx_to_raise, raise_amount)| {
-                let MemoryLimits::Standard(base_memvec) = &spec.1;
-
-                // Get current values
-                let mut new_values: [u64; LEVEL_COUNT] =
-                    base_memvec.iter().collect::<Vec<_>>().try_into().unwrap();
-
-                // Update the specific level
-                new_values[dim_idx_to_raise] = raise_amount;
-
-                // Create encoding flags based on whether each level counts registers
-                let levels = Tgt::levels();
-                let encoding_flags: [bool; LEVEL_COUNT] = levels
-                    .iter()
-                    .map(|level| level.counts_registers())
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-
-                let raised_memory =
-                    MemoryLimits::Standard(MemVec::new_mixed(new_values, encoding_flags));
+            .prop_map(|(spec, raised_memory)| {
                 let raised_spec = Spec(spec.0.clone(), raised_memory);
                 (spec, raised_spec)
             })
+    }
+
+    /// Yields [MemoryLimits] which have the 'base' level at `idx` raised.
+    ///
+    /// For [MemoryLimits::Standard], this means raising one `limits` dimension. For
+    /// [MemoryLimits::Pipeline], this means raising one `limits` dimension while
+    /// keeping `before` and `after` the same.
+    ///
+    /// The raised value remains with the provided top-memory bound (`top_memory[idx]`).
+    fn arb_raised_available<Tgt: Target>(
+        memory_limits: &MemoryLimits,
+        idx: usize,
+        top_memory: &MemVec,
+    ) -> Option<impl Strategy<Value = MemoryLimits>> {
+        let low = match memory_limits {
+            MemoryLimits::Standard(limits) | MemoryLimits::Pipeline { limits, .. } => {
+                limits.get_unscaled(idx)
+            }
+        };
+        if low >= top_memory.get_unscaled(idx) {
+            return None;
+        }
+        let raised_limit = if Tgt::levels()[idx].counts_registers() {
+            ((low + 1)..=top_memory.get_unscaled(idx)).boxed()
+        } else {
+            let low = bit_length(low);
+            let high = bit_length(top_memory.get_unscaled(idx));
+            ((low + 1)..=high).prop_map(bit_length_inverse).boxed()
+        };
+        let use_raw_encoding = Tgt::levels().map(|level| level.counts_registers());
+        let template = memory_limits.clone();
+
+        Some(raised_limit.prop_map(move |new_limit| {
+            let mut raised = template.clone();
+            let limits = match &mut raised {
+                MemoryLimits::Standard(limits) | MemoryLimits::Pipeline { limits, .. } => limits,
+            };
+            let mut values = std::array::from_fn(|i| limits.get_unscaled(i));
+            values[idx] = new_limit;
+            *limits = MemVec::new_mixed(values, use_raw_encoding);
+            raised
+        }))
+    }
+
+    /// Produces a strategy for lowering one selected `Pipeline` `before`/`after` component.
+    fn arb_lower_pipeline_field<Tgt: Target>(
+        memory_limits: &MemoryLimits,
+        idx: usize,
+        lower_before: bool,
+    ) -> Option<impl Strategy<Value = MemoryLimits>> {
+        let MemoryLimits::Pipeline {
+            limits,
+            before,
+            after,
+        } = memory_limits
+        else {
+            return None;
+        };
+
+        let current = if lower_before {
+            before[idx]
+        } else {
+            after[idx]
+        };
+        if current == 0 {
+            return None;
+        }
+
+        let lowered_component = if Tgt::levels()[idx].counts_registers() {
+            (0..current).boxed()
+        } else {
+            (0..bit_length(current))
+                .prop_map(bit_length_inverse)
+                .boxed()
+        };
+
+        let limits = limits.clone();
+        let base_before = *before;
+        let base_after = *after;
+        Some(
+            lowered_component
+                .prop_map(move |adjusted_amount| {
+                    let mut before = base_before;
+                    let mut after = base_after;
+                    let field = if lower_before {
+                        &mut before
+                    } else {
+                        &mut after
+                    };
+                    field[idx] = adjusted_amount;
+                    MemoryLimits::Pipeline {
+                        limits: limits.clone(),
+                        before,
+                        after,
+                    }
+                })
+                .boxed(),
+        )
+    }
+
+    /// Produces less-restrictive [MemoryLimits].
+    fn arb_less_restrictive_memory<Tgt: Target>(
+        memory_limits: &MemoryLimits,
+        idx: usize,
+        top_memory: &MemVec,
+    ) -> Option<proptest::strategy::BoxedStrategy<MemoryLimits>> {
+        let strategies: Vec<_> = [
+            arb_raised_available::<Tgt>(memory_limits, idx, top_memory).map(|s| s.boxed()),
+            arb_lower_pipeline_field::<Tgt>(memory_limits, idx, true).map(|s| s.boxed()),
+            arb_lower_pipeline_field::<Tgt>(memory_limits, idx, false).map(|s| s.boxed()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!strategies.is_empty()).then(|| proptest::strategy::Union::new(strategies).boxed())
     }
 }

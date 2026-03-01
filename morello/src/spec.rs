@@ -303,7 +303,9 @@ impl<Tgt: Target> proptest::arbitrary::Arbitrary for Spec<Tgt> {
         use proptest::prelude::*;
 
         // Optionally lower the max memory limits.
-        let MemoryLimits::Standard(mut max_memory) = Tgt::max_mem();
+        let MemoryLimits::Standard(mut max_memory) = Tgt::max_mem().into_standard::<Tgt>() else {
+            unreachable!()
+        };
         if let Some(lower_max) = args.1 {
             max_memory = max_memory.map(|v| v.min(lower_max));
         }
@@ -344,7 +346,10 @@ pub fn arb_canonical_primitive_spec<Tgt: Target>(
     use proptest::prelude::*;
 
     // Optionally lower the max memory limits.
-    let MemoryLimits::Standard(mut max_memory_limits) = Tgt::max_mem();
+    let MemoryLimits::Standard(mut max_memory_limits) = Tgt::max_mem().into_standard::<Tgt>()
+    else {
+        unreachable!()
+    };
     if let Some(lower_max) = max_memory {
         max_memory_limits = max_memory_limits.map(|v| v.min(lower_max));
     }
@@ -371,7 +376,10 @@ pub fn arb_canonical_compose_spec<Tgt: Target>(
     use proptest::prelude::*;
 
     // Optionally lower the max memory limits.
-    let MemoryLimits::Standard(mut max_memory_limits) = Tgt::max_mem();
+    let MemoryLimits::Standard(mut max_memory_limits) = Tgt::max_mem().into_standard::<Tgt>()
+    else {
+        unreachable!()
+    };
     if let Some(lower_max) = max_memory {
         max_memory_limits = max_memory_limits.map(|v| v.min(lower_max));
     }
@@ -2146,7 +2154,18 @@ where
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         let (left, right) = i;
-        let (inner_right, memory_right) = right.split_at(i.1.len() - Tgt::levels().len());
+        let mem_bimap_len = MemoryLimitsBimap::<Tgt>::codomain_len();
+        // TODO: Remove this case once we can drop backward compatibility.
+        let mem_len = if right.len() >= mem_bimap_len {
+            mem_bimap_len
+        } else {
+            Tgt::levels().len()
+        };
+        debug_assert!(
+            right.len() >= mem_len,
+            "SpecSurMap codomain shorter than expected"
+        );
+        let (inner_right, memory_right) = right.split_at(right.len() - mem_len);
 
         let remaining_value = (
             left.clone(),
@@ -3901,8 +3920,9 @@ mod tests {
                     let bytes_needed = buf_volume * value_size;
                     let rf_idx =
                         Avx2Target::levels().iter().position(|l| l == &CpuMemoryLevel::RF).unwrap();
-                    let remaining_in_rf = match s.1.clone().into_standard() {
+                    let remaining_in_rf = match s.1.clone().into_standard::<Avx2Target>() {
                         MemoryLimits::Standard(standard) => standard.get_unscaled(rf_idx),
+                        _ => unreachable!(),
                     };
                     u64::from(bytes_needed) <= remaining_in_rf
                 })
@@ -3960,8 +3980,10 @@ mod tests {
             };
             applied.visit_leaves(&mut |leaf| {
                 if let ImplNode::SpecApp(spec_app) = leaf {
+                    let is_strictly_greater =
+                        memory_limits_strictly_greater(&spec_app.0 .1, &spec.1);
                     assert!(
-                        spec.0 != spec_app.0 .0 || spec_app.0 .1 <= spec.1,
+                        spec.0 != spec_app.0 .0 || !is_strictly_greater,
                         "Action {:?} produced the same Spec {} with higher memory limit {}",
                         action,
                         spec,
@@ -3991,7 +4013,9 @@ mod tests {
         // with the same logical Spec at that memory limit and up. To keep
         // performance acceptable, we limit memory.
         let mut maxes = vec![];
-        let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
+        let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem().into_standard::<Tgt>() else {
+            unreachable!()
+        };
         for v in maxes_vec.iter() {
             maxes.push(v.min(64));
         }
@@ -4019,7 +4043,11 @@ mod tests {
                 };
                 shared_spec.1 = MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(pt_arr));
                 assert!(shared_spec.is_canonical());
-                let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
+                let MemoryLimits::Standard(limits_memvec) =
+                    shared_spec.1.clone().into_standard::<Tgt>()
+                else {
+                    unreachable!()
+                };
                 // TODO: Assert that nothing disappears?
                 for i in (0..unseen_actions.len()).rev() {
                     // We could use `apply` for safety, but instead we use `apply_unchecked_canon`
@@ -4032,7 +4060,7 @@ mod tests {
                             // TODO: Can we assert that the change in peak memory is exactly the
                             //   additional amount at the limit?.
                             // TODO: Assert here that the min of each level-wise limit is zero.
-                            assert_eq!(&peak_memory(&applied), limits_memvec);
+                            assert_eq!(&peak_memory(&applied), &limits_memvec);
                         }
                         Err(ApplyError::NotApplicable(_)) => {}
                         Err(ApplyError::SpecNotCanonical) => panic!(),
@@ -4074,7 +4102,10 @@ mod tests {
                     } if intermediate_consumption.len() == 1 => intermediate_consumption[0],
                     _ => todo!(),
                 };
-                let MemoryLimits::Standard(limits_memvec) = &spec.1;
+                let limits_memvec = match &spec.1 {
+                    MemoryLimits::Standard(m) => m,
+                    MemoryLimits::Pipeline { limits, .. } => limits,
+                };
                 let levels = Tgt::levels();
                 let mut corrected_lower_bound = lower_bound;
                 for i in 0..LEVEL_COUNT {
@@ -4100,6 +4131,100 @@ mod tests {
                     lower_limit_strategy,
                 )
             })
+    }
+
+    /// Returns the per-level effective available memory for `memory_limits`,
+    /// or `None` if `memory_limits` is invalid (e.g. pipeline limits where `before
+    /// + after > limits` at any level).
+    ///
+    /// For `Standard`, this is the raw limit at each level. For `Pipeline`,
+    /// this computes `limits - before - after` per level and returns `None`
+    /// if any subtraction underflows.
+    ///
+    /// Unlike [`MemoryLimits::into_standard`], this is lossless for non-register
+    /// levels (no power-of-two snapping) and uses checked subtraction rather
+    /// than saturating underflow to zero.
+    fn memory_limits_available(memory_limits: &MemoryLimits) -> Option<[u64; LEVEL_COUNT]> {
+        match memory_limits {
+            MemoryLimits::Standard(limits) => Some(std::array::from_fn(|i| limits.get_unscaled(i))),
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                let mut available = [0; LEVEL_COUNT];
+                for idx in 0..limits.len() {
+                    let after_before = limits.get_unscaled(idx).checked_sub(before[idx])?;
+                    available[idx] = after_before.checked_sub(after[idx])?;
+                }
+                Some(available)
+            }
+        }
+    }
+
+    /// Returns whether `lhs` is strictly less restrictive than `rhs`.
+    ///
+    /// For `Pipeline` vs `Pipeline`, this uses field-wise ordering at each level:
+    /// `lhs.limits >= rhs.limits`, `lhs.before <= rhs.before`, and
+    /// `lhs.after <= rhs.after`, with at least one strict inequality.
+    ///
+    /// For mixed-variant comparisons, this falls back to effective available
+    /// memory (`limits - before - after`) at each level. Invalid pipeline limits
+    /// (where `before + after > limits`) are treated as non-comparable and
+    /// return `false`.
+    fn memory_limits_strictly_greater(lhs: &MemoryLimits, rhs: &MemoryLimits) -> bool {
+        match (lhs, rhs) {
+            (
+                MemoryLimits::Pipeline {
+                    limits: lhs_limits,
+                    before: lhs_before,
+                    after: lhs_after,
+                },
+                MemoryLimits::Pipeline {
+                    limits: rhs_limits,
+                    before: rhs_before,
+                    after: rhs_after,
+                },
+            ) => {
+                let mut any_strict = false;
+                for idx in 0..LEVEL_COUNT {
+                    let lhs_limit = lhs_limits.get_unscaled(idx);
+                    let rhs_limit = rhs_limits.get_unscaled(idx);
+                    if lhs_limit < rhs_limit
+                        || lhs_before[idx] > rhs_before[idx]
+                        || lhs_after[idx] > rhs_after[idx]
+                    {
+                        return false;
+                    }
+                    if lhs_limit > rhs_limit
+                        || lhs_before[idx] < rhs_before[idx]
+                        || lhs_after[idx] < rhs_after[idx]
+                    {
+                        any_strict = true;
+                    }
+                }
+                any_strict
+            }
+            _ => {
+                let Some(lhs_available) = memory_limits_available(lhs) else {
+                    return false;
+                };
+                let Some(rhs_available) = memory_limits_available(rhs) else {
+                    return false;
+                };
+
+                let mut any_strict = false;
+                for idx in 0..LEVEL_COUNT {
+                    if lhs_available[idx] < rhs_available[idx] {
+                        return false;
+                    }
+                    if lhs_available[idx] > rhs_available[idx] {
+                        any_strict = true;
+                    }
+                }
+                any_strict
+            }
+        }
     }
 
     fn matmul_chain_test_data() -> LogicalSpec<Avx2Target> {

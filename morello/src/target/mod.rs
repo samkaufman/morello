@@ -28,6 +28,8 @@ use std::hash::Hash;
 // TODO: This should be generic per Target. Right now, all targets must have 4 levels!
 pub const LEVEL_COUNT: usize = 4;
 
+pub(crate) const ZERO_LIMITS: [u64; LEVEL_COUNT] = [0u64; LEVEL_COUNT];
+
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Level: MemoryLevel;

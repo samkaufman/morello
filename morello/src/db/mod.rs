@@ -313,10 +313,12 @@ impl FilesDatabase {
         // Check that all costs in decisions have peak memory less than or equal to spec's
         // memory limits.
         debug_assert!(
-            decisions.iter().all(|(_, c)| {
-                let MemoryLimits::Standard(limits) = &spec.1;
-                &c.peaks <= limits
-            }),
+            match &spec.1 {
+                MemoryLimits::Standard(available) =>
+                    decisions.iter().all(|(_, c)| &c.peaks <= available),
+                MemoryLimits::Pipeline { limits, .. } =>
+                    decisions.iter().all(|(_, c)| &c.peaks <= limits),
+            },
             "peak memory of an action exceeds memory limits of {spec}: {decisions:?}"
         );
 
@@ -966,9 +968,10 @@ where
 
     // TODO: This computes the non-memory dimensions of the key/coordinates twice. Avoid that.
     debug_assert_eq!(upper_inclusive.0, lower_inclusive.0);
+    let mem_coord_len = MemoryLimitsBimap::<Tgt>::codomain_len();
     debug_assert_eq!(
-        upper_inclusive.1[..upper_inclusive.1.len() - LEVEL_COUNT],
-        lower_inclusive.1[..lower_inclusive.1.len() - LEVEL_COUNT]
+        upper_inclusive.1[..upper_inclusive.1.len() - mem_coord_len],
+        lower_inclusive.1[..lower_inclusive.1.len() - mem_coord_len]
     );
 
     (upper_inclusive.0, (lower_inclusive.1, upper_inclusive.1))
@@ -1242,7 +1245,14 @@ mod tests {
         fn test_put_then_get_fills_across_memory_limits(
             decision in arb_spec_and_decision::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
+            let spec_limits = match &decision.spec.1 {
+                MemoryLimits::Standard(limits) => limits.clone(),
+                MemoryLimits::Pipeline { .. } => {
+                    // TODO: Implement memory limit iteration for Pipeline variant.
+                    // For now, skip this test case for Pipeline specs.
+                    return Ok(());
+                }
+            };
             let db = FilesDatabase::new(None, false, 1, 128, 1);
 
             let top_logical_spec = decision.spec.0.clone();

@@ -23,8 +23,7 @@ pub struct Move<Tgt: Target> {
 }
 
 /// Data useful to both a Move's [ActionSolver] or [ImplNode].
-struct AllocPlan<'a, Tgt: Target> {
-    outer_moved_operand_spec: &'a TensorSpec<Tgt>,
+struct AllocPlan<Tgt: Target> {
     new_spec: TensorSpec<Tgt>,
     prologue_spec: Option<Spec<Tgt>>,
     epilogue_spec: Option<Spec<Tgt>>,
@@ -35,11 +34,7 @@ struct AllocPlan<'a, Tgt: Target> {
 
 impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
-        let logical_spec = &spec.0;
-        let operands = logical_spec.parameters();
-
         let AllocPlan {
-            outer_moved_operand_spec,
             new_spec,
             prologue_spec,
             epilogue_spec,
@@ -48,13 +43,13 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
             is_cache_miss,
         } = plan_alloc(
             spec,
-            &operands,
             self.source_idx,
             self.destination_dtype,
             self.destination_level,
             &self.destination_layout,
             self.destination_vector_size,
         )?;
+        let outer_moved_operand_spec = spec.0.parameter(self.source_idx.into());
 
         let inner_moved_operand = if is_cache_miss {
             let source = Param::new(self.source_idx, outer_moved_operand_spec.clone());
@@ -93,7 +88,7 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
 
         Ok(ImplNode::Alloc(Alloc::new(
             self.source_idx,
-            outer_moved_operand_spec.clone(),
+            outer_moved_operand_spec,
             inner_moved_operand,
             prologue,
             main_stage,
@@ -103,17 +98,16 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
     }
 
     fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
-        let operands = spec.0.parameters();
         let plan = plan_alloc(
             spec,
-            &operands,
             self.source_idx,
             self.destination_dtype,
             self.destination_level,
             &self.destination_layout,
             self.destination_vector_size,
         )?;
-        let base_main_cost = move_cost(plan.outer_moved_operand_spec) + move_cost(&plan.new_spec);
+        let source_spec = spec.0.parameter(self.source_idx.into());
+        let base_main_cost = move_cost(&source_spec) + move_cost(&plan.new_spec);
         let allocation = alloc_memory_allocation(&plan.new_spec);
         Ok(MoveActionSolver {
             prologue: plan.prologue_spec,
@@ -126,15 +120,16 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
     }
 }
 
-fn plan_alloc<'a, Tgt: Target>(
+fn plan_alloc<Tgt: Target>(
     spec: &Spec<Tgt>,
-    operands: &'a [TensorSpec<Tgt>],
     source_idx: u8,
     destination_dtype: Dtype,
     destination_level: Tgt::Level,
     destination_layout: &Layout,
     destination_vector_size: Option<DimSize>,
-) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
+) -> Result<AllocPlan<Tgt>, ApplyError> {
+    let operands = spec.0.parameters();
+
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
     let (destination_layout_canonicalized, is_cache_miss) = if !destination_level.has_layout() {
@@ -213,22 +208,52 @@ fn plan_alloc<'a, Tgt: Target>(
             MemoryLimits::Standard(base) => {
                 let mut new_values: [u64; LEVEL_COUNT] =
                     base.iter().collect::<Vec<_>>().try_into().unwrap();
-
                 let Some(level_updated) = new_values[updated_level_idx].checked_sub(additional)
                 else {
                     return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
                         levels[updated_level_idx].to_string(),
                     )));
                 };
-
-                // Update the specific level with correct value based on whether it counts registers
                 if levels[updated_level_idx].counts_registers() {
                     new_values[updated_level_idx] = level_updated;
                 } else {
                     new_values[updated_level_idx] = prev_power_of_two(level_updated);
                 }
-
                 MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(new_values))
+            }
+            MemoryLimits::Pipeline {
+                limits,
+                before,
+                after,
+            } => {
+                let mut limits = limits.clone();
+                let current = limits.get_unscaled(updated_level_idx);
+                let Some(level_updated) = current.checked_sub(additional) else {
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                        levels[updated_level_idx].to_string(),
+                    )));
+                };
+                // limits was lowered, but before and after are unchanged. If either
+                // difference would go negative, then the move is not possible due to
+                // OOM, since the move's buffer would exceed the available memory at
+                // that level.
+                if level_updated < before[updated_level_idx]
+                    || level_updated < after[updated_level_idx]
+                {
+                    return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                        levels[updated_level_idx].to_string(),
+                    )));
+                }
+                if levels[updated_level_idx].counts_registers() {
+                    limits.set(updated_level_idx, level_updated);
+                } else {
+                    limits.set(updated_level_idx, prev_power_of_two(level_updated));
+                }
+                MemoryLimits::Pipeline {
+                    limits,
+                    before: *before,
+                    after: *after,
+                }
             }
         }
     };
@@ -262,14 +287,13 @@ fn plan_alloc<'a, Tgt: Target>(
     let prologue_spec = make_logue(false, &move_gens_prologue);
     let epilogue_spec = make_logue(true, &move_gens_epilogue);
 
-    let mut new_operands = operands.to_vec();
+    let mut new_operands = operands;
     new_operands[usize::from(source_idx)] = new_spec.clone();
     let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
     new_body_spec.0.replace_io(&new_operands);
     new_body_spec.canonicalize().unwrap();
 
     Ok(AllocPlan {
-        outer_moved_operand_spec,
         new_spec,
         prologue_spec,
         epilogue_spec,
@@ -321,11 +345,11 @@ fn move_is_cache_miss<Tgt: Target>(
 mod tests {
     use super::*;
     use crate::imp::Impl;
-    use crate::layout;
     use crate::layout::{batched_col_major, row_major};
     use crate::scheduling::Action;
-    use crate::spec;
     use crate::target::{Avx2Target, CpuMemoryLevel};
+    use crate::{layout, shape};
+    use crate::{lspec, spec};
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {
@@ -357,10 +381,8 @@ mod tests {
             (f32, CpuMemoryLevel::GL, row_major),
             (f32, CpuMemoryLevel::GL, row_major)
         ));
-        let parameters = spec.0.parameters();
         let plan = plan_alloc(
             &spec,
-            &parameters,
             0,
             Dtype::Float32,
             CpuMemoryLevel::L1,
@@ -375,6 +397,65 @@ mod tests {
                 .unwrap()
         );
         assert!(plan.new_spec.is_contiguous());
+    }
+
+    /// Test that [plan_alloc] preserves and correctly updates [MemoryLimits::Pipeline].
+    #[test]
+    fn test_plan_alloc_preserves_pipeline_structure() {
+        const ORIGINAL_L1: u64 = 4096;
+        let limits = MemVec::new_for_target::<Avx2Target>([16, 16, ORIGINAL_L1, 4096]);
+        const BEFORE: [u64; LEVEL_COUNT] = [0, 0, 512, 512];
+        const AFTER: [u64; LEVEL_COUNT] = [0, 0, 256, 256];
+        let spec: Spec<Avx2Target> = Spec(
+            lspec!(Move(
+                [8, 8],
+                (f32, CpuMemoryLevel::GL, row_major),
+                (f32, CpuMemoryLevel::L1, row_major)
+            )),
+            MemoryLimits::Pipeline {
+                limits: limits.clone(),
+                before: BEFORE,
+                after: AFTER,
+            },
+        );
+        let plan = plan_alloc(
+            &spec,
+            0,
+            Dtype::Float32,
+            CpuMemoryLevel::L1,
+            &row_major(&shape![8, 8]),
+            None,
+        )
+        .unwrap();
+        let MemoryLimits::Pipeline {
+            limits: result_limits,
+            before: result_before,
+            after: result_after,
+        } = &plan.new_body_spec.1
+        else {
+            panic!("expected Pipeline, got Standard");
+        };
+
+        // Compute expected L1 limit: original - cache_lines, snapped to prev power of two
+        let cache_lines = row_major(&shape![8, 8])
+            .estimate_cache_lines::<Avx2Target>(&shape![8, 8], Dtype::Float32);
+        let expected_l1 = prev_power_of_two(ORIGINAL_L1 - u64::from(cache_lines));
+
+        // limits should be unchanged at levels 0, 1; decreased at L1 (level 2); zeroed
+        // at GL (level 3)
+        assert_eq!(result_limits.get_unscaled(0), limits.get_unscaled(0));
+        assert_eq!(result_limits.get_unscaled(1), limits.get_unscaled(1));
+        assert_eq!(result_limits.get_unscaled(2), expected_l1);
+        assert_eq!(result_limits.get_unscaled(3), 0);
+
+        // before and after should be unchanged for levels 0..=2, zeroed at GL (index 3)
+        assert_eq!(result_before[..3], BEFORE[..3]);
+        assert_eq!(
+            result_before[3], 0,
+            "before's GL should be zeroed by canonicalization"
+        );
+        assert_eq!(result_after[..3], AFTER[..3]);
+        assert_eq!(result_after[3], 0);
     }
 
     fn child_impls_into_specs(imp: &ImplNode<Avx2Target>) -> Vec<Spec<Avx2Target>> {

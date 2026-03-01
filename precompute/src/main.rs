@@ -165,7 +165,9 @@ fn main_per_db(
     deadline: Option<Instant>,
 ) {
     let levels = Avx2Target::levels();
-    let MemoryLimits::Standard(top) = Avx2Target::max_mem();
+    let MemoryLimits::Standard(top) = Avx2Target::max_mem() else {
+        unimplemented!();
+    };
 
     // TODO: Most of the following details aren't used in computing the bound.
     // It could be simplified.
@@ -477,7 +479,9 @@ fn next_limits<'a>(
     result_peak: &'a MemVec,
     levels: &'a [CpuMemoryLevel],
 ) -> impl Iterator<Item = MemVec> + 'a {
-    let MemoryLimits::Standard(limits_vec) = result_limits;
+    let MemoryLimits::Standard(limits_vec) = result_limits else {
+        unimplemented!();
+    };
     debug_assert!(limits_vec
         .iter()
         .zip(result_peak.iter())

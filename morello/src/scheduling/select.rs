@@ -36,9 +36,13 @@ impl<Tgt: Target> ActionT<Tgt> for Select<Tgt> {
             (false, MemoryAllocation::Inner(_) | MemoryAllocation::Pipeline { .. }, _) => {
                 panic!("Kernel::memory_allocated returned non-Standard MemoryAllocation")
             }
-            (false, MemoryAllocation::Simple(allocated), MemoryLimits::Standard(bounds)) => {
-                for (i, (a, b)) in allocated.iter().zip(bounds.iter()).enumerate() {
-                    if *a > b {
+            (false, MemoryAllocation::Simple(allocated), spec_limits) => {
+                let MemoryLimits::Standard(available) = spec_limits.clone().into_standard::<Tgt>()
+                else {
+                    unreachable!()
+                };
+                for (i, a) in allocated.iter().enumerate() {
+                    if *a > available.get_unscaled(i) {
                         return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
                             Tgt::levels()[i].to_string(),
                         )));

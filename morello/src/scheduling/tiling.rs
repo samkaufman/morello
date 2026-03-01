@@ -953,9 +953,12 @@ fn update_compose_aux_for_tiling<Tgt: Target>(
 
     // First component's external parameters (skip output and first input)
     let c0_output_idx = components[0].typ.unique_output_index().unwrap();
-    for parameter in 1..components[0].typ.operand_count() {
+    debug_assert_eq!(
+        components[0].typ.operand_count(),
+        original_component_shapes[0].len()
+    );
+    for (parameter, original_shape) in original_component_shapes[0].iter().enumerate().skip(1) {
         if parameter != c0_output_idx {
-            let original_shape = &original_component_shapes[0][parameter];
             let new_shape = components[0].parameter_shape(parameter);
             update_aux_for_tiling(&mut operand_auxes[aux_idx], original_shape, &new_shape);
             aux_idx += 1;
@@ -969,11 +972,18 @@ fn update_compose_aux_for_tiling<Tgt: Target>(
         .take(components.len() - 1)
         .skip(1)
     {
+        debug_assert_eq!(
+            component.typ.operand_count(),
+            original_component_shapes[component_idx].len()
+        );
         let output_idx = component.typ.unique_output_index().unwrap();
-        for parameter in 1..component.typ.operand_count() {
-            if parameter != output_idx {
-                let original_shape = &original_component_shapes[component_idx][parameter];
-                let new_shape = component.parameter_shape(parameter);
+        for (param_idx, original_shape) in original_component_shapes[component_idx]
+            .iter()
+            .enumerate()
+            .skip(1)
+        {
+            if param_idx != output_idx {
+                let new_shape = component.parameter_shape(param_idx);
                 update_aux_for_tiling(&mut operand_auxes[aux_idx], original_shape, &new_shape);
                 aux_idx += 1;
             }
@@ -984,10 +994,12 @@ fn update_compose_aux_for_tiling<Tgt: Target>(
     let last_component_idx = components.len() - 1;
     let last_component = &components[last_component_idx];
     let cl_output_idx = last_component.typ.unique_output_index().unwrap();
-    for parameter in 0..last_component.typ.operand_count() {
-        if parameter != cl_output_idx {
-            let original_shape = &original_component_shapes[last_component_idx][parameter];
-            let new_shape = last_component.parameter_shape(parameter);
+    for (param_idx, original_shape) in original_component_shapes[last_component_idx]
+        .iter()
+        .enumerate()
+    {
+        if param_idx != cl_output_idx {
+            let new_shape = last_component.parameter_shape(param_idx);
             update_aux_for_tiling(&mut operand_auxes[aux_idx], original_shape, &new_shape);
             aux_idx += 1;
         }

@@ -69,7 +69,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
                 }
             });
 
-            let mut m = MemoryLimits::Standard(match &spec.1 {
+            let mut m = MemoryLimits::Standard(match &spec.1.clone().into_standard::<Tgt>() {
                 MemoryLimits::Standard(v) => v
                     .clone()
                     .checked_sub_snap_down(&intermediate_mem_consumed)
@@ -78,6 +78,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
                             Tgt::levels()[oom_idx].to_string(),
                         ))
                     })?,
+                MemoryLimits::Pipeline { .. } => unreachable!(),
             });
             m.discretize::<Tgt>();
             m
