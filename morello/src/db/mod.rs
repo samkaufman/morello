@@ -1350,17 +1350,9 @@ mod tests {
         fn test_put_then_get_fills_across_memory_limits(
             decision in arb_spec_and_decision::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let spec_limits = match &decision.spec.1 {
-                MemoryLimits::Standard(limits) => limits.clone(),
-                MemoryLimits::Pipeline { .. } => {
-                    // TODO: Implement memory limit iteration for Pipeline variant.
-                    // For now, skip this test case for Pipeline specs.
-                    return Ok(());
-                }
-            };
             let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
 
-            let top_logical_spec = decision.spec.0.clone();
+            let top_spec = decision.spec.clone();
             let top_actions_costs = decision.actions_costs.clone();
 
             // Put all decisions into database.
@@ -1374,27 +1366,74 @@ mod tests {
                 MemVec::zero::<Avx2Target>()
             };
             let expected = ActionCostVec(top_actions_costs);
-            izip!(Avx2Target::memories(), spec_limits.iter(), peaks.iter())
-                .map(|(memory, l, p)| {
-                    if memory.counts_registers() {
-                        (u32::try_from(p).unwrap()..=u32::try_from(l).unwrap()).collect::<Vec<_>>()
-                    } else {
-                        assert!(l == 0 || l.is_power_of_two());
-                        assert!(p == 0 || p.is_power_of_two());
-                        (bit_length(p)..=bit_length(l)).map(bit_length_inverse_u32).collect::<Vec<_>>()
+            match &top_spec.1 {
+                MemoryLimits::Standard(spec_limits) => {
+                    let top_logical_spec = top_spec.0.clone();
+                    izip!(Avx2Target::memories(), spec_limits.iter(), peaks.iter())
+                        .map(|(memory, l, p)| {
+                            if memory.counts_registers() {
+                                (u32::try_from(p).unwrap()..=u32::try_from(l).unwrap())
+                                    .collect::<Vec<_>>()
+                            } else {
+                                assert!(l == 0 || l.is_power_of_two());
+                                assert!(p == 0 || p.is_power_of_two());
+                                (bit_length(p)..=bit_length(l))
+                                    .map(bit_length_inverse_u32)
+                                    .collect::<Vec<_>>()
+                            }
+                        })
+                        .multi_cartesian_product()
+                        .for_each(|limit_to_check_bits| {
+                            let limit_to_check_vec = limit_to_check_bits
+                                .into_iter()
+                                .map_into()
+                                .collect::<Vec<u64>>();
+                            let limit_to_check = MemoryLimits::Standard(MemVec::new(
+                                limit_to_check_vec.try_into().unwrap(),
+                            ));
+                            let spec_to_check = Spec(top_logical_spec.clone(), limit_to_check);
+                            let get_result =
+                                db.get(&spec_to_check).expect("Spec should be in database");
+                            assert_eq!(get_result, expected, "Entries differed at {spec_to_check}");
+                        });
+                }
+                MemoryLimits::Pipeline { .. } => {
+                    // Enumerate all corners of the fill box plus one interior midpoint, then
+                    // query only round-trippable points in Spec-space.
+                    let bimap = db.spec_bimap::<Avx2Target>();
+
+                    // NOTE: At the time this test was written, put_range_to_fill
+                    //       returns a single point.
+                    let (table_key, (bottom, top)) =
+                        put_range_to_fill(&bimap, &top_spec, &expected.0);
+
+                    let mut checked = 0usize;
+                    let mut saw_pipeline_query = false;
+                    for pt in corner_and_mid_points_inclusive_box(&bottom, &top) {
+                        let spec_to_check = BiMap::apply_inverse(&bimap, &(table_key.clone(), pt.clone()));
+                        let (roundtrip_key, roundtrip_pt) = BiMap::apply(&bimap, &spec_to_check);
+                        if roundtrip_key != table_key || roundtrip_pt != pt {
+                            continue;
+                        }
+
+                        checked += 1;
+                        saw_pipeline_query |=
+                            matches!(spec_to_check.1, MemoryLimits::Pipeline { .. });
+                        let get_result =
+                            db.get(&spec_to_check).expect("Spec should be in database");
+                        assert_eq!(get_result, expected, "Entries differed at {spec_to_check}");
                     }
-                })
-                .multi_cartesian_product()
-                .for_each(|limit_to_check_bits| {
-                    let limit_to_check_vec = limit_to_check_bits
-                        .into_iter()
-                        .map_into()
-                        .collect::<Vec<u64>>();
-                    let limit_to_check = MemoryLimits::Standard(MemVec::new(limit_to_check_vec.try_into().unwrap()));
-                    let spec_to_check = Spec(top_logical_spec.clone(), limit_to_check);
-                    let get_result = db.get(&spec_to_check).expect("Spec should be in database");
-                    assert_eq!(get_result, expected, "Entries differed at {spec_to_check}");
-                });
+
+                    debug_assert!(
+                        checked > 0,
+                        "Expected at least one queryable point in fill range"
+                    );
+                    debug_assert!(
+                        saw_pipeline_query,
+                        "Expected at least one query using MemoryLimits::Pipeline"
+                    );
+                }
+            }
         }
 
         // TODO: Fix and re-enable this test.
@@ -1487,6 +1526,54 @@ mod tests {
         //         }
         //     }
         // }
+    }
+
+    /// Return all corners of an inclusive hyper-rectangle plus one midpoint.
+    fn corner_and_mid_points_inclusive_box(
+        bottom: &[BimapInt],
+        top: &[BimapInt],
+    ) -> Vec<Vec<BimapInt>> {
+        debug_assert_eq!(bottom.len(), top.len());
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for (&b, &t) in bottom.iter().zip(top) {
+            debug_assert!(b <= t);
+        }
+
+        // Check every corner of the fill box over varying dimensions only.
+        let varying_dims = (0..bottom.len())
+            .filter(|&dim| bottom[dim] != top[dim])
+            .collect::<Vec<_>>();
+        if varying_dims.len() > usize::BITS as usize {
+            panic!(
+                "Cannot enumerate corners for {} varying dimensions",
+                varying_dims.len()
+            );
+        }
+        for mask in 0..(1usize << varying_dims.len()) {
+            let mut corner = bottom.to_vec();
+            for (bit_idx, &dim) in varying_dims.iter().enumerate() {
+                if ((mask >> bit_idx) & 1) != 0 {
+                    corner[dim] = top[dim];
+                }
+            }
+            if seen.insert(corner.clone()) {
+                out.push(corner);
+            }
+        }
+
+        // Check one interior point.
+        let mid = bottom
+            .iter()
+            .zip(top)
+            .map(|(&b, &t)| b + ((t - b) / 2))
+            .collect::<Vec<_>>();
+        if seen.insert(mid.clone()) {
+            out.push(mid);
+        }
+
+        out
     }
 
     fn arb_spec_and_decision<Tgt: Target>(
