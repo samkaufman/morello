@@ -12,7 +12,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::reconstruct::reconstruct_impls_from_actions;
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
-use crate::target::{Target, TargetId, MEMORY_COUNT};
+use crate::target::{Target, TargetId};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use pagecontents::RTreePageContents;
 
@@ -279,7 +279,7 @@ impl FilesDatabase {
             .map(|&x| u8::try_from(x).unwrap())
             .collect::<Vec<_>>();
 
-        let page_pt = blockify_point(&global_pt);
+        let page_pt = blockify_point::<Tgt>(&global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let page: &Page = &self.load_live_page(&page_key);
@@ -297,7 +297,7 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = BiMap::apply(&bimap, &query);
-        let page_pt = blockify_point(&global_pt);
+        let page_pt = blockify_point::<Tgt>(&global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let shard = &self.shards.0[self.shard_index(&page_key)];
@@ -321,7 +321,7 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt_lhs) = BiMap::apply(&bimap, spec);
-        let page_pt = blockify_point(&global_pt_lhs);
+        let page_pt = blockify_point::<Tgt>(&global_pt_lhs);
         PageId {
             db: self,
             table_key,
@@ -340,10 +340,12 @@ impl FilesDatabase {
         // Check that all costs in decisions have peak memory less than or equal to spec's
         // memory limits.
         debug_assert!(
-            decisions.iter().all(|(_, c)| {
-                let MemoryLimits::Standard(limits) = &spec.1;
-                &c.peaks <= limits
-            }),
+            match &spec.1 {
+                MemoryLimits::Standard(available) =>
+                    decisions.iter().all(|(_, c)| &c.peaks <= available),
+                MemoryLimits::Pipeline { limits, .. } =>
+                    decisions.iter().all(|(_, c)| &c.peaks <= limits),
+            },
             "peak memory of an action exceeds memory limits of {spec}: {decisions:?}"
         );
 
@@ -359,7 +361,9 @@ impl FilesDatabase {
             .into_iter()
             .zip(&top)
             .enumerate()
-            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
+            .map(|(dim, (b, t))| {
+                iter_blocks_in_single_dim_range(b, *t, block_size_dim::<Tgt>(dim, rank))
+            })
             .multi_cartesian_product();
 
         // Since this put is for a single Spec, we can normalize the cost with that Spec's volume.
@@ -581,7 +585,7 @@ impl PageId<'_> {
         if self.table_key != table_key {
             return false;
         }
-        let page_pt = blockify_point(&global_pt);
+        let page_pt = blockify_point::<Tgt>(&global_pt);
         self.page_id == page_pt
     }
 }
@@ -914,8 +918,9 @@ fn analyze_visit_dir(
     }
 }
 
-fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
-    if dim >= dim_count - MEMORY_COUNT {
+fn block_size_dim<Tgt: Target>(dim: usize, dim_count: usize) -> u32 {
+    let mem_coord_len = MemoryLimitsBimap::<Tgt>::codomain_len();
+    if dim >= dim_count - mem_coord_len {
         31
     } else {
         8
@@ -923,11 +928,11 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
 }
 
 /// Compute the block coordinate from a global coordinate.
-fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
+fn blockify_point<Tgt: Target>(pt: &[BimapInt]) -> Vec<BimapInt> {
     let rank = pt.len();
     pt.iter()
         .enumerate()
-        .map(|(i, &d)| d / block_size_dim(i, rank))
+        .map(|(i, &d)| d / block_size_dim::<Tgt>(i, rank))
         .collect()
 }
 
@@ -953,17 +958,26 @@ where
     // Compute the complete upper and lower bounds from the given Spec and that Spec modified with
     // the peaks' bound (computed above).
     let upper_inclusive = BiMap::apply(bimap, spec);
-    let lower_inclusive = {
-        let mut lower_bound_spec = spec.clone();
-        lower_bound_spec.1 = MemoryLimits::Standard(per_level_peaks);
-        BiMap::apply(bimap, &lower_bound_spec)
+    let lower_inclusive = match &spec.1 {
+        MemoryLimits::Standard(_) => {
+            let mut lower_bound_spec = spec.clone();
+            lower_bound_spec.1 = MemoryLimits::Standard(per_level_peaks);
+            BiMap::apply(bimap, &lower_bound_spec)
+        }
+        MemoryLimits::Pipeline { .. } => {
+            // TODO: Pipeline range fill is disabled for now. Revisit fill
+            //       semantics and implement a sound + useful range policy
+            //       before re-enabling.
+            upper_inclusive.clone()
+        }
     };
 
     // TODO: This computes the non-memory dimensions of the key/coordinates twice. Avoid that.
     debug_assert_eq!(upper_inclusive.0, lower_inclusive.0);
+    let mem_coord_len = MemoryLimitsBimap::<Tgt>::codomain_len();
     debug_assert_eq!(
-        upper_inclusive.1[..upper_inclusive.1.len() - MEMORY_COUNT],
-        lower_inclusive.1[..lower_inclusive.1.len() - MEMORY_COUNT]
+        upper_inclusive.1[..upper_inclusive.1.len() - mem_coord_len],
+        lower_inclusive.1[..lower_inclusive.1.len() - mem_coord_len]
     );
 
     (upper_inclusive.0, (lower_inclusive.1, upper_inclusive.1))
@@ -1336,7 +1350,14 @@ mod tests {
         fn test_put_then_get_fills_across_memory_limits(
             decision in arb_spec_and_decision::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
+            let spec_limits = match &decision.spec.1 {
+                MemoryLimits::Standard(limits) => limits.clone(),
+                MemoryLimits::Pipeline { .. } => {
+                    // TODO: Implement memory limit iteration for Pipeline variant.
+                    // For now, skip this test case for Pipeline specs.
+                    return Ok(());
+                }
+            };
             let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
 
             let top_logical_spec = decision.spec.0.clone();

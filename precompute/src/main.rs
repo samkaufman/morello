@@ -169,7 +169,9 @@ fn main_per_db<Tgt>(
         morello::grid::general::BiMap<Codomain = u8>,
 {
     let memories = Tgt::memories();
-    let MemoryLimits::Standard(top) = Tgt::max_mem();
+    let MemoryLimits::Standard(top) = Tgt::max_mem() else {
+        unimplemented!();
+    };
 
     let phases = goal_phases::<Tgt>(args);
     let bounds: Vec<_> = phases.iter().flatten().cloned().collect();
@@ -676,7 +678,9 @@ fn next_limits<'a, L: Memory + 'a>(
     result_peak: &'a MemVec,
     memories: &'a [L],
 ) -> impl Iterator<Item = MemVec> + 'a {
-    let MemoryLimits::Standard(limits_vec) = result_limits;
+    let MemoryLimits::Standard(limits_vec) = result_limits else {
+        unimplemented!();
+    };
     debug_assert!(limits_vec
         .iter()
         .zip(result_peak.iter())

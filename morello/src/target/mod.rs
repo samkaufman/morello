@@ -28,6 +28,8 @@ use std::hash::Hash;
 // TODO: This should be generic per Target. Right now, all targets must have 4 memories!
 pub const MEMORY_COUNT: usize = 4;
 
+pub(crate) const ZERO_LIMITS: [u64; MEMORY_COUNT] = [0u64; MEMORY_COUNT];
+
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Memory: Memory;
