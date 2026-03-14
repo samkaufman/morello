@@ -798,28 +798,8 @@ impl Display for Layout {
             ]
         {
             write!(f, "NHWC")?;
-        } else if dims.iter().all(|(_, s)| s == &PhysDim::Dynamic) {
-            write!(
-                f,
-                "[{}]",
-                dims.iter()
-                    .map(|(d, _)| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )?;
         } else {
-            write!(
-                f,
-                "<[{}], [{}]>",
-                dims.iter()
-                    .map(|(d, _)| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                dims.iter()
-                    .map(|(_, s)| format!("{s:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )?;
+            write!(f, "[{}]", dims.iter().map(layout_dim_shorthand).join(", "))?;
         }
 
         if !self.is_fully_contiguous() {
@@ -827,6 +807,15 @@ impl Display for Layout {
         }
 
         Ok(())
+    }
+}
+
+/// Formats one layout dimension using the shorthand syntax accepted by the `layout!` macro.
+fn layout_dim_shorthand((logical_dim, phys_dim): &(u8, PhysDim)) -> String {
+    match phys_dim {
+        PhysDim::Dynamic => logical_dim.to_string(),
+        PhysDim::Packed(size) => format!("{logical_dim} p({size})"),
+        PhysDim::OddEven(size) => format!("{logical_dim} oe({size})"),
     }
 }
 
