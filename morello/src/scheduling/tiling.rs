@@ -1359,6 +1359,12 @@ mod tests {
     use proptest::prelude::*;
     use std::num::NonZeroU32;
 
+    struct TileOutDirectAndIndirectPaths {
+        intermediate_spec: Spec<Avx2Target>,
+        direct_path: Result<ImplNode<Avx2Target>, ApplyError>,
+        indirect_path: Result<ImplNode<Avx2Target>, ApplyError>,
+    }
+
     #[test]
     fn test_non_multiple_tile_out_single_succeeds() {
         shared_test_non_multiple_tiling_succeeds(Action::TileOut(TileOut::SingleLoop {
@@ -2410,27 +2416,25 @@ mod tests {
     }
 
     proptest! {
-        /// If (spec -> tile_a) succeeds, then (tile_a -> tile_b) should equal (spec -> tile_b),
-        /// unless (spec -> tile_a) constructs a parallel loop. (This latter case is a problem
-        /// because it would produce a serial-only sub-Spec, which prevents tile_a -> tile_b from
-        /// being a parallel loop, even if spec -> tile_b could be.)
+        /// If (spec -> tile_a) succeeds, then (tile_a -> tile_b) should have the same validity as
+        /// (spec -> tile_b), unless (spec -> tile_a) constructs a parallel loop. (This latter
+        /// case is a problem because it would produce a serial-only sub-Spec, which prevents
+        /// tile_a -> tile_b from being a parallel loop, even if spec -> tile_b could be.)
         #[test]
-        fn test_tile_out_transitivity(
+        fn test_tile_out_validity_transitivity(
             (spec, tile_a, tile_b) in arb_spec_and_nested_tilings()
         ) {
-            // First try spec -> tile_a. If this fails, ignore this test case.
-            let tile_a_result = tile_a.apply(&spec);
-            let Ok(ImplNode::Loop(Loop { bodies: bodies_a, .. })) = tile_a_result else {
+            let Some(TileOutDirectAndIndirectPaths {
+                intermediate_spec: nested_spec,
+                direct_path,
+                indirect_path,
+            }) =
+                tile_out_direct_and_indirect_paths(&spec, &tile_a, &tile_b)
+            else {
                 return Ok(());
-            };
-            let [ImplNode::SpecApp(SpecApp(nested_spec, _))] = &bodies_a[..] else {
-                return Ok(())
             };
 
             // Now compare: (spec -> tile_b) vs ((spec -> tile_a) -> tile_b)
-            let direct_path = tile_b.apply(&spec);
-            let indirect_path = tile_b.apply(nested_spec);
-
             // If spec -> tile_a succeeds, then (spec -> tile_b) should have the
             // same result as (spec -> tile_a -> tile_b).
             match (direct_path, indirect_path) {
@@ -2449,6 +2453,84 @@ mod tests {
                 }
             }
         }
+        #[test]
+        fn test_tile_out_layout_transitivity(
+            (spec, tile_a, tile_b) in arb_spec_and_nested_tilings()
+        ) {
+            let Some(TileOutDirectAndIndirectPaths {
+                intermediate_spec,
+                direct_path,
+                indirect_path,
+            }) =
+                tile_out_direct_and_indirect_paths(&spec, &tile_a, &tile_b)
+            else {
+                return Ok(());
+            };
+            let Some(direct_nested_spec) =
+                extract_nested_spec_from_perfect_loop_nest_result(direct_path)
+            else {
+                return Ok(());
+            };
+            let Some(indirect_nested_spec) =
+                extract_nested_spec_from_perfect_loop_nest_result(indirect_path)
+            else {
+                return Ok(());
+            };
+
+            let direct_layouts = direct_nested_spec
+                .0
+                .parameters()
+                .into_iter()
+                .map(|p| p.layout().clone())
+                .collect::<Vec<_>>();
+            let indirect_layouts = indirect_nested_spec
+                .0
+                .parameters()
+                .into_iter()
+                .map(|p| p.layout().clone())
+                .collect::<Vec<_>>();
+
+            prop_assert_eq!(
+                direct_layouts,
+                indirect_layouts,
+                "parameter layouts diverged for direct vs indirect tiling;\n\
+                 intermediate Spec: {}\n\
+                 direct nested Spec: {}\n\
+                 indirect nested Spec: {}",
+                intermediate_spec,
+                direct_nested_spec,
+                indirect_nested_spec,
+            );
+        }
+    }
+
+    fn extract_nested_spec_from_perfect_loop_nest_result(
+        tile_result: Result<ImplNode<Avx2Target>, ApplyError>,
+    ) -> Option<Spec<Avx2Target>> {
+        let Ok(ImplNode::Loop(Loop { bodies, .. })) = tile_result else {
+            return None;
+        };
+        let [ImplNode::SpecApp(SpecApp(nested_spec, _))] = &bodies[..] else {
+            return None;
+        };
+        Some(nested_spec.clone())
+    }
+
+    /// Returns the intermediate Spec from `spec -> tile_a` together with the
+    /// direct `spec -> tile_b` and indirect `spec -> tile_a -> tile_b` results.
+    fn tile_out_direct_and_indirect_paths(
+        spec: &Spec<Avx2Target>,
+        tile_a: &TileOut,
+        tile_b: &TileOut,
+    ) -> Option<TileOutDirectAndIndirectPaths> {
+        let nested_spec = extract_nested_spec_from_perfect_loop_nest_result(tile_a.apply(spec))?;
+        let direct_path = tile_b.apply(spec);
+        let indirect_path = tile_b.apply(&nested_spec);
+        Some(TileOutDirectAndIndirectPaths {
+            intermediate_spec: nested_spec,
+            direct_path,
+            indirect_path,
+        })
     }
 
     /// Generate a proptest strategy that produces a spec and a tiling action
