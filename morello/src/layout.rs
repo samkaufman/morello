@@ -394,8 +394,8 @@ impl Layout {
             new_layout.lower_contig_to_first_broken_dimension(parent_shape, tile_shape)?;
         new_layout.contig =
             new_layout.prune_size_one_logical_dims_with_contig(tile_shape, new_layout.contig);
-        new_layout.merge_consecutive_dimensions();
         new_layout.drop_unneeded_packings(tile_shape);
+        new_layout.merge_consecutive_dimensions();
         Ok(new_layout)
     }
 
