@@ -22,8 +22,9 @@ use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
 use crate::target::{
     cpu::{
-        broadcastvecmult_side, dotproduct_accum_count, DOT_PRODUCT_ACCUM_COUNT,
-        DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE,
+        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, dotproduct_accum_count,
+        DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE,
+        DOT_PRODUCT_STRIP_SIZE,
     },
     CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
 };
@@ -882,6 +883,16 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
                         let denom_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
 
+                        let vector_size = arguments[0].spec().vector_size().unwrap();
+                        let denom_acc = self.namer.fresh_name();
+                        writeln!(
+                            w,
+                            "{0}{1} {denom_acc} = ({1}){{}};",
+                            indent(depth),
+                            get_vector(Tgt::vec_types(), Dtype::Float32, vector_size)
+                                .native_type_name,
+                        )?;
+
                         for (input_vector_name, unscaled_vector_name) in
                             input_vector_exprs.iter().zip(&unscaled_vector_exprs)
                         {
@@ -891,13 +902,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 indent(depth),
                                 self.c_index(max_buffer, &max_iexpr, None),
                             )?;
-                            writeln!(
-                                w,
-                                "{}{} += sum8({unscaled_vector_name});",
-                                indent(depth),
-                                self.c_index(denom_buffer, &denom_iexpr, None),
-                            )?;
+                            writeln!(w, "{}{denom_acc} += {unscaled_vector_name};", indent(depth))?;
                         }
+                        writeln!(
+                            w,
+                            "{}{} += sum8({denom_acc});",
+                            indent(depth),
+                            self.c_index(denom_buffer, &denom_iexpr, None),
+                        )?;
                         Ok(())
                     }
                     CpuKernel::VectorSoftmaxComplete => {
@@ -2047,6 +2059,108 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 exprs[0],
                                 exprs[1]
                             )?;
+                        }
+                        Ok(())
+                    }
+                    CpuKernel::DivideVecScalarReciprocal => {
+                        // scan_dim is the only non-matching dimension size
+                        let scan_dim = {
+                            let input_shape = arguments[0].spec().shape();
+                            let denominator_shape = arguments[1].spec().shape();
+                            input_shape
+                                .iter()
+                                .zip(denominator_shape)
+                                .position(|(&in_size, &denom_size)| in_size != denom_size)
+                                .map(|dim| u8::try_from(dim).unwrap())
+                                .unwrap()
+                        };
+
+                        let vector_size = divide_vec_scalar_reciprocal_vector_size::<Tgt>(
+                            arguments[0].spec(),
+                            arguments[2].spec(),
+                        )
+                        .unwrap();
+                        let vector_type =
+                            get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
+                        self.headers.vector_type_defs.insert(vector_type);
+                        let volume = arguments[0].spec().volume().get();
+                        debug_assert_eq!(volume % vector_size.get(), 0);
+                        let vector_count = volume / vector_size.get();
+
+                        let input_tensor = arguments[0].backing_tensor().unwrap();
+                        let denom_tensor = arguments[1].backing_tensor().unwrap();
+                        let out_tensor = arguments[2].backing_tensor().unwrap();
+                        let input_buffer = self.name_env.get(&input_tensor.identifier()).unwrap();
+                        let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
+                        let out_buffer = self.name_env.get(&out_tensor.identifier()).unwrap();
+
+                        let reciprocal_vec = self.namer.fresh_name();
+                        let denom_expr =
+                            arguments[1]
+                                .make_buffer_indexing_expr()
+                                .map_vars(&mut |v| match v {
+                                    BufferVar::TileIdx(dim, _) if dim != scan_dim => {
+                                        AffineForm::from(v)
+                                    }
+                                    _ => AffineForm::zero(),
+                                });
+                        // Lowers to vdivss + vbroadcastss.
+                        writeln!(w, "{}/* DivideVecScalarReciprocal */", indent(depth))?;
+                        writeln!(
+                            w,
+                            "{0}{1} {reciprocal_vec} = (1.0f / ({2})) - ({1}){{}};",
+                            indent(depth),
+                            vector_type.name,
+                            self.c_index(denom_buffer, &denom_expr, None),
+                        )?;
+
+                        let vector_temp = self.namer.fresh_name();
+                        writeln!(w, "{}{} {vector_temp};", indent(depth), vector_type.name)?;
+                        if !input_buffer.needs_unroll() && !out_buffer.needs_unroll() {
+                            let in_expr = zero_points(arguments[0].make_buffer_indexing_expr());
+                            let out_expr = zero_points(arguments[2].make_buffer_indexing_expr());
+                            let in_ptr = self.c_index_ptr(input_buffer, &in_expr, None);
+                            let out_ptr = self.c_index_ptr(out_buffer, &out_expr, None);
+                            let offset_var = self.namer.fresh_name();
+                            writeln!(
+                                w,
+                                "{}for (int {offset_var} = 0; {offset_var} < {volume}; {offset_var} += {}) {{",
+                                indent(depth),
+                                vector_size.get(),
+                            )?;
+                            writeln!(
+                                w,
+                                "{}__builtin_memcpy(&{vector_temp}, ({in_ptr}) + {offset_var}, sizeof({vector_temp}));",
+                                indent(depth + 1),
+                            )?;
+                            writeln!(w, "{}{vector_temp} *= {reciprocal_vec};", indent(depth + 1),)?;
+                            writeln!(
+                                w,
+                                "{}__builtin_memcpy(({out_ptr}) + {offset_var}, &{vector_temp}, sizeof({vector_temp}));",
+                                indent(depth + 1),
+                            )?;
+                            writeln!(w, "{}}}", indent(depth))?;
+                        } else {
+                            for vector_idx in 0..vector_count {
+                                let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
+                                let in_expr =
+                                    zero_points(arguments[0].make_buffer_indexing_expr()) + offset;
+                                let out_expr =
+                                    zero_points(arguments[2].make_buffer_indexing_expr()) + offset;
+                                writeln!(
+                                    w,
+                                    "{}__builtin_memcpy(&{vector_temp}, {}, sizeof({vector_temp}));",
+                                    indent(depth),
+                                    self.c_index_ptr(input_buffer, &in_expr, None),
+                                )?;
+                                writeln!(w, "{}{vector_temp} *= {reciprocal_vec};", indent(depth),)?;
+                                writeln!(
+                                    w,
+                                    "{}__builtin_memcpy({}, &{vector_temp}, sizeof({vector_temp}));",
+                                    indent(depth),
+                                    self.c_index_ptr(out_buffer, &out_expr, None),
+                                )?;
+                            }
                         }
                         Ok(())
                     }

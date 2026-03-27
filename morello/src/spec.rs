@@ -248,10 +248,7 @@ impl<Tgt: Target> Spec<Tgt> {
                             * u64::from(n.get()),
                     )
                 }
-                PrimitiveSpecType::Softmax { scan_dim } => {
-                    const EXP_FLOPS: u64 = 13;
-                    const OTHER_FLOPS: u64 = 2;
-                    const OTHER_MIN_ONE_FLOPS: u64 = 2;
+                PrimitiveSpecType::Softmax { .. } => {
                     if basics.dtypes.iter().any(|&t| t != Dtype::Float32) {
                         return None;
                     }
@@ -260,22 +257,7 @@ impl<Tgt: Target> Spec<Tgt> {
                         .iter()
                         .map(|d| u64::from(d.get()))
                         .product::<u64>();
-                    let volume_reduced = basics
-                        .spec_shape
-                        .iter()
-                        .enumerate()
-                        .map(|(dim, d)| {
-                            if dim == usize::from(scan_dim) {
-                                u64::from(d.get() - 1)
-                            } else {
-                                u64::from(d.get())
-                            }
-                        })
-                        .product::<u64>();
-                    Some(
-                        ((EXP_FLOPS + OTHER_FLOPS) * volume)
-                            + (OTHER_MIN_ONE_FLOPS * volume_reduced),
-                    )
+                    Some(5 * volume)
                 }
                 _ => None,
             },

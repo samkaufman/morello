@@ -9,7 +9,7 @@ use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
-    CpuMemory::{self, GL, L1, RF, VRF},
+    CpuMemory::{self, GL, L1, RF},
     Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -21,7 +21,7 @@ use std::panic;
 
 fn main() {
     const RANK: u8 = 2;
-    const SIZE: DimSize = nz!(128u32);
+    const SIZE: DimSize = nz!(1024u32);
     let shape = vec![SIZE; usize::from(RANK)];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
@@ -49,7 +49,7 @@ fn main() {
         .subschedule(&[0], |subspec| {
             subspec.to_max_and_unscaled(GL, row_major, None)
         })
-        .subschedule(&[0, 0], |subspec| subspec.to_accum().split(1))
+        .subschedule(&[0, 0], |subspec| subspec.to_accum().split(8))
         .subschedule(&[0, 0, 0], |subspec| {
             subspec
                 .move_param(0, L1)
@@ -60,10 +60,10 @@ fn main() {
         .subschedule(&[0, 0, 1], |maxaccum| {
             maxaccum
                 .move_param(0, L1)
-                .move_param(0, RF)
+                .move_vrf(0, CpuMemory::VRF, 8)
                 .move_param(1, L1)
                 .move_param(1, RF)
-                .select(CpuKernel::ValueMax)
+                .select(CpuKernel::VectorMax)
                 .subschedule(&[0], |s| s.select(CpuKernel::Assign))
                 .subschedule(&[1, 0], |s| s.select(CpuKernel::Assign))
                 .subschedule(&[1, 2], |s| s.select(CpuKernel::Assign))
@@ -97,27 +97,7 @@ fn main() {
                         })
                 })
         })
-        .subschedule(&[1], |subspec| {
-            subspec
-                .tile_out(&[1, 4])
-                .broadcast_first(VRF, row_major, Some(4))
-                .subschedule(&[0], |broadcast| {
-                    broadcast
-                        .move_param(0, CpuMemory::L1)
-                        .move_param(0, CpuMemory::RF)
-                        .subschedule(&[0], |s| s.select(CpuKernel::Assign))
-                        .select(CpuKernel::VecScalarAssign)
-                })
-                .subschedule(&[1], |d| {
-                    d.move_param(0, L1)
-                        .move_vrf(0, VRF, 4)
-                        .subschedule(&[0], |m| m.select(CpuKernel::Assign))
-                        .move_param(2, L1)
-                        .move_vrf(2, VRF, 4)
-                        .subschedule(&[1, 0], |m| m.select(CpuKernel::DivideVec))
-                        .subschedule(&[1, 1], |m| m.select(CpuKernel::Assign))
-                })
-        });
+        .subschedule(&[1], |dvs| dvs.select(CpuKernel::DivideVecScalarReciprocal));
 
     println!("\nImpl resulting from manual scheduling:");
     pprint(&implementation, ImplPrintStyle::Compact);

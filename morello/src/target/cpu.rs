@@ -4,6 +4,7 @@ use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
+use crate::imp::allocs::move_cost;
 use crate::layout;
 use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
@@ -112,6 +113,15 @@ pub enum CpuKernel {
     VectorMax, // TODO: Add F32 to name
     VecScalarAssign,
     DivideVec,
+    /// Lowers to an implementation of `DivideVecScalar` that computes `1 / denominator`
+    /// once per reduced index and then multiplies vectors by that scalar reciprocal.
+    ///
+    /// This kernel applies when the first input and output have the same shape, the denominator
+    /// (second input) is all ones, and the shared input/output shape is all ones except for an
+    /// optional non-1 scan dimension. Additionally, the first input and output must either share
+    /// a VRF vector size or be contiguous addressed/cache tensors whose tile volume is divisible
+    /// by one of the target's vector widths. All parameters must have dtype `Float32`.
+    DivideVecScalarReciprocal,
     Assign,
     MemsetZero,
     /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
@@ -377,7 +387,9 @@ impl<T: CpuTarget> Target for T {
                     }
                 }
                 PrimitiveSpecType::DivideVec => &[CpuKernel::DivideVec],
-                PrimitiveSpecType::DivideVecScalar { .. } => &[],
+                PrimitiveSpecType::DivideVecScalar { .. } => {
+                    &[CpuKernel::DivideVecScalarReciprocal]
+                }
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {
                         const MAX_KERNELS: [CpuKernel; 2] =
@@ -609,7 +621,8 @@ impl CpuKernel {
             | CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
             | CpuKernel::DotProductLoopBf16Bf16F32
-            | CpuKernel::DivideVec => 3,
+            | CpuKernel::DivideVec
+            | CpuKernel::DivideVecScalarReciprocal => 3,
             CpuKernel::OnePrefixNoOp
             | CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
@@ -1163,6 +1176,69 @@ impl CpuKernel {
 
                 true
             }
+            CpuKernel::DivideVecScalarReciprocal => {
+                let PrimitiveSpecType::DivideVecScalar { scan_dim } = *typ else {
+                    return false;
+                };
+                debug_assert_eq!(operands.len(), 3);
+                let scan_dim = usize::from(scan_dim);
+
+                if operands[0].dtype() != Dtype::Float32
+                    || operands[1].dtype() != Dtype::Float32
+                    || operands[2].dtype() != Dtype::Float32
+                {
+                    return false;
+                }
+
+                if (operands[0].memory() != CpuMemory::GL
+                    && operands[0].memory() != CpuMemory::L1
+                    && operands[0].memory() != CpuMemory::VRF)
+                    || (operands[1].memory() != CpuMemory::GL
+                        && operands[1].memory() != CpuMemory::L1
+                        && operands[1].memory() != CpuMemory::RF)
+                    || (operands[2].memory() != CpuMemory::GL
+                        && operands[2].memory() != CpuMemory::L1
+                        && operands[2].memory() != CpuMemory::VRF)
+                {
+                    return false;
+                }
+
+                if divide_vec_scalar_reciprocal_vector_size::<Tgt>(&operands[0], &operands[2])
+                    .is_none()
+                {
+                    return false;
+                }
+
+                if !operands[0].is_contiguous()
+                    || !operands[1].is_contiguous()
+                    || !operands[2].is_contiguous()
+                {
+                    return false;
+                }
+
+                let input_shape = operands[0].shape();
+                if input_shape != operands[2].shape() {
+                    return false;
+                }
+
+                let denominator_shape = operands[1].shape();
+                if denominator_shape.len() != input_shape.len()
+                    || denominator_shape.iter().any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+
+                // This kernel handles a single reduction axis at a time.
+                if input_shape
+                    .iter()
+                    .enumerate()
+                    .any(|(dim, size)| dim != scan_dim && size.get() != 1)
+                {
+                    return false;
+                }
+
+                true
+            }
             CpuKernel::Assign => {
                 debug_assert_eq!(operands.len(), 2);
 
@@ -1418,7 +1494,11 @@ impl CpuKernel {
                 ))
             }
             CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => MemoryAllocation::Simple(
-                CPU_MEMORIES.map(|memory| if memory.vector_rf() { 4 } else { 0 }),
+                // Four unscaled vectors plus one vector accumulator (`denom_acc`).
+                CPU_MEMORIES.map(|memory| if memory.vector_rf() { 5 } else { 0 }),
+            ),
+            CpuKernel::DivideVecScalarReciprocal => MemoryAllocation::Simple(
+                CPU_MEMORIES.map(|memory| if memory.vector_rf() { 2 } else { 0 }),
             ),
             _ => MemoryAllocation::none(),
         }
@@ -1495,9 +1575,37 @@ impl CpuKernel {
                 let vector_cnt = value_cnt / parameters[vidx].spec().vector_size().unwrap().get();
                 INST_COST * (vector_cnt + 1)
             }
-            CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32
-            | CpuKernel::ValueSoftmaxDenominator
-            | CpuKernel::VectorSoftmaxDenominator => {
+            CpuKernel::DivideVecScalarReciprocal => {
+                // Setup once:
+                //   - `vdivss`      : scalar reciprocal
+                //   - `vbroadcastss`: splat reciprocal to a vector register
+                // per output vector:
+                //   - `vmulps` + load/store traffic (compiler may unroll)
+                const RECIPROCAL_SETUP_COST: MainCost = 2 * INST_COST;
+                const PER_VECTOR_COST: MainCost = 2 * INST_COST;
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_size = divide_vec_scalar_reciprocal_vector_size(
+                    parameters[0].spec(),
+                    parameters[2].spec(),
+                )
+                .unwrap()
+                .get();
+                debug_assert_eq!(value_cnt % vector_size, 0);
+                let vector_cnt = value_cnt / vector_size;
+                let io_cost = move_cost(parameters[0].spec()) + move_cost(parameters[2].spec());
+                RECIPROCAL_SETUP_COST + PER_VECTOR_COST * vector_cnt + io_cost
+            }
+            CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
+                // TODO: Measure throughput.
+                const PER_VECTOR_COST: MainCost = 2 * INST_COST;
+                const FINAL_REDUCTION_COST: MainCost = 4 * INST_COST;
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_size = parameters[0].spec().vector_size().unwrap().get();
+                debug_assert_eq!(value_cnt % vector_size, 0);
+                let vector_cnt = value_cnt / vector_size;
+                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST
+            }
+            CpuKernel::ValueSoftmaxDenominator | CpuKernel::VectorSoftmaxDenominator => {
                 // TODO: Measure throughput!
                 INST_COST * 3
             }
@@ -1719,6 +1827,33 @@ impl CanonicalBimap for CpuMemory {
 
     fn bimap() -> Self::Bimap {
         CpuMemoryBimap
+    }
+}
+
+/// Returns the vector width to use for `DivideVecScalarReciprocal`.
+///
+/// If both tensors already specify a vector size, they must agree. If only one tensor specifies a
+/// vector size, that size is used. If neither does, this returns the largest target vector width
+/// for the input dtype that evenly divides the shared tile volume.
+pub(crate) fn divide_vec_scalar_reciprocal_vector_size<Tgt: Target>(
+    input: &TensorSpec<Tgt>,
+    output: &TensorSpec<Tgt>,
+) -> Option<DimSize> {
+    match (input.vector_size(), output.vector_size()) {
+        (Some(lhs), Some(rhs)) if lhs == rhs => Some(lhs),
+        (Some(_), Some(_)) => None,
+        (Some(vector_size), None) | (None, Some(vector_size)) => Some(vector_size),
+        (None, None) => Tgt::vec_types()
+            .iter()
+            .filter(|vec_type| {
+                vec_type.dtype == input.dtype()
+                    && input
+                        .volume()
+                        .get()
+                        .is_multiple_of(u32::from(vec_type.value_cnt))
+            })
+            .max_by_key(|vec_type| vec_type.value_cnt)
+            .map(|vec_type| DimSize::new(u32::from(vec_type.value_cnt)).unwrap()),
     }
 }
 
@@ -2057,6 +2192,7 @@ mod tests {
         shape, spec,
         spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
         target::{Avx2Target, Target},
+        tensorspec::TensorSpecAux,
         views::Param,
     };
     use nonzero::nonzero as nz;
@@ -2233,6 +2369,37 @@ mod tests {
         ));
         assert!(logical_spec.is_canonical());
         assert!(!CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_dividevecscalarreciprocal_applies_to_l1_tiles() {
+        let logical_spec = LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::DivideVecScalar { scan_dim: 1 },
+                spec_shape: shape![1, 32],
+                dtypes: vec![Dtype::Float32; 3],
+            },
+            vec![
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::L1,
+                    layout: row_major(&shape![1, 32]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::GL,
+                    layout: row_major(&shape![1, 1]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::L1,
+                    layout: row_major(&shape![1, 32]),
+                    vector_size: None,
+                },
+            ],
+            true,
+        );
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::DivideVecScalarReciprocal.applies_to_logical_spec(&logical_spec));
     }
 
     #[test]

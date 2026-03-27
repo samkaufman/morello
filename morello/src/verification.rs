@@ -179,7 +179,14 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominator { .. } => todo!(),
                 PrimitiveSpecType::DivideVec => todo!(),
-                PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
+                PrimitiveSpecType::DivideVecScalar { scan_dim: _ } => {
+                    let [numer, denom, mut out] = args
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("expected 3 args"));
+                    out.assign(&numer);
+                    out /= &denom;
+                    vec![numer, denom, out]
+                }
                 PrimitiveSpecType::Max { .. } => todo!(),
                 PrimitiveSpecType::Move => {
                     let [inp, mut out] = args
