@@ -989,6 +989,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     CpuKernel::VectorMax => {
                         self.headers.emit_max = true;
+                        self.headers.emit_math_include = true;
 
                         let vector_volume = arguments[0].spec().volume().get();
                         let vector_size = arguments[0].spec().vector_size().unwrap();
@@ -1020,7 +1021,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         // Emit the single-vector reduction
                         writeln!(
                             w,
-                            "{0}{1} = horizontal_max_f32({2});",
+                            "{0}{1} = fmaxf({1}, horizontal_max_f32({2}));",
                             indent(depth),
                             out_expr,
                             input_vector_exprs[0],
