@@ -35,9 +35,8 @@ const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
 const CPU_MEMORIES: [CpuMemory; 4] = [CpuMemory::RF, CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
 pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
-pub(crate) const DOT_PRODUCT_ACCUM_COUNT: u32 = 4;
+pub(crate) const VECTOR_ACCUM_COUNT: u32 = 4;
 pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
-pub(crate) const DOT_PRODUCT_BF16_ACCUM_COUNT: u32 = 4;
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
@@ -111,6 +110,8 @@ pub enum CpuKernel {
     VectorSoftmaxDenominatorAndUnscaledF32,
     ValueMax,
     VectorMax, // TODO: Add F32 to name
+    /// Lowers to a max-reduction loop with multiple vector accumulators.
+    VectorMaxLoop,
     VecScalarAssign,
     DivideVec,
     /// Lowers to an implementation of `DivideVecScalar` that computes `1 / denominator`
@@ -392,8 +393,11 @@ impl<T: CpuTarget> Target for T {
                 }
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {
-                        const MAX_KERNELS: [CpuKernel; 2] =
-                            [CpuKernel::ValueMax, CpuKernel::VectorMax];
+                        const MAX_KERNELS: [CpuKernel; 3] = [
+                            CpuKernel::ValueMax,
+                            CpuKernel::VectorMax,
+                            CpuKernel::VectorMaxLoop,
+                        ];
                         &MAX_KERNELS
                     } else {
                         &[]
@@ -630,6 +634,7 @@ impl CpuKernel {
             | CpuKernel::VectorDeinterleaveF32Bf16
             | CpuKernel::ValueMax
             | CpuKernel::VectorMax
+            | CpuKernel::VectorMaxLoop
             | CpuKernel::Assign
             | CpuKernel::CastBf16F32
             | CpuKernel::VectorCastBf16F32
@@ -762,7 +767,7 @@ impl CpuKernel {
                             }
                         ] if lhs_shape[0] == nz!(1u32)
                           && lhs_shape[1] == nz!(1u32)
-                          && dotproduct_accum_count(lhs_shape[2].get()).is_some()
+                          && vector_accum_count(lhs_shape[2].get()).is_some()
                           && out_shape[..] == [nz!(1u32), nz!(1u32), nz!(1u32)]
                           && lhs.layout().is_row_major()
                           && rhs.layout().is_col_major()
@@ -1086,6 +1091,31 @@ impl CpuKernel {
                     return false;
                 }
                 true
+            }
+            CpuKernel::VectorMaxLoop => {
+                debug_assert_eq!(operands.len(), 2);
+                if !matches!(typ, PrimitiveSpecType::Max { accum: true, .. }) {
+                    return false;
+                }
+                if operands[0].memory() != CpuMemory::L1 && operands[0].memory() != CpuMemory::GL {
+                    return false;
+                }
+                if operands[1].memory() != CpuMemory::RF {
+                    return false;
+                }
+                if operands[0].dtype() != Dtype::Float32 || operands[1].dtype() != Dtype::Float32 {
+                    return false;
+                }
+                if operands[0].shape().iter().filter(|d| d.get() > 1).count() >= 2 {
+                    return false;
+                }
+                if operands[1].shape().iter().any(|d| d.get() != 1) {
+                    return false;
+                }
+                if !operands[0].is_contiguous() {
+                    return false;
+                }
+                vector_accum_count(operands[0].volume().get()).is_some()
             }
             CpuKernel::VecScalarAssign => {
                 let PrimitiveSpecType::Broadcast { dim } = *typ else {
@@ -1481,6 +1511,19 @@ impl CpuKernel {
                     0
                 }
             })),
+            CpuKernel::VectorMaxLoop => {
+                MemoryAllocation::Simple(
+                    // `VECTOR_ACCUM_COUNT` `__m256` accumulators plus the `__m128` temp in
+                    // `horizontal_max_f32`.
+                    CPU_MEMORIES.map(|memory| {
+                        if memory.vector_rf() {
+                            u64::from(VECTOR_ACCUM_COUNT) + 1
+                        } else {
+                            0
+                        }
+                    }),
+                )
+            }
             CpuKernel::VectorSoftmaxDenominator => {
                 // TODO: Check if VectorSoftmaxDenominator allocates more than 2 vectors.
                 MemoryAllocation::Simple(CPU_MEMORIES.map(
@@ -1536,20 +1579,20 @@ impl CpuKernel {
             CpuKernel::DotProductLoop => {
                 // TODO: Measure throughput! This is a rough estimate.
                 let value_cnt = parameters[0].spec().shape()[1].get();
-                let d = DOT_PRODUCT_STRIP_SIZE.get() * DOT_PRODUCT_ACCUM_COUNT;
+                let d = DOT_PRODUCT_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
                 8 * INST_COST * value_cnt / d
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 // TODO: Measure throughput! This is a rough estimate.
                 let value_cnt = parameters[0].spec().shape()[1].get();
-                let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT;
+                let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
                 (12 * INST_COST * value_cnt) / d
             }
             CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
                 // RThroughput = 8 or 16
                 let value_cnt = parameters[0].spec().shape()[1].get();
-                let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT;
+                let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
                 let mut cost = 16 * INST_COST * value_cnt;
                 if self == &CpuKernel::DotProductLoopF32Bf16F32 {
                     cost *= 2;
@@ -1574,6 +1617,13 @@ impl CpuKernel {
                 let value_cnt = parameters[vidx].spec().volume().get();
                 let vector_cnt = value_cnt / parameters[vidx].spec().vector_size().unwrap().get();
                 INST_COST * (vector_cnt + 1)
+            }
+            CpuKernel::VectorMaxLoop => {
+                // TODO: Measure throughput! This is a rough estimate.
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_cnt = value_cnt / DOT_PRODUCT_STRIP_SIZE.get();
+                let accum_count = vector_accum_count(value_cnt).unwrap();
+                INST_COST * (2 * vector_cnt + accum_count + 2)
             }
             CpuKernel::DivideVecScalarReciprocal => {
                 // Setup once:
@@ -1661,13 +1711,20 @@ impl CpuKernel {
     }
 }
 
-pub(crate) fn dotproduct_accum_count(k: u32) -> Option<u32> {
+/// Returns the number of vector accumulators to use for the float32 strip-based vector loops.
+///
+/// This is shared by [`CpuKernel::DotProductLoop`] and [`CpuKernel::VectorMaxLoop`]. Both kernels
+/// process the input in `DOT_PRODUCT_STRIP_SIZE` chunks and use up to [`VECTOR_ACCUM_COUNT`]
+/// independent accumulators, choosing the largest count that evenly partitions `k` so codegen can
+/// use a fixed-width unrolled loop without a cleanup path. Returns `None` when `k` is not a whole
+/// number of strips.
+pub(crate) fn vector_accum_count(k: u32) -> Option<u32> {
     let strip = DOT_PRODUCT_STRIP_SIZE.get();
     if !k.is_multiple_of(strip) {
         return None;
     }
     let chunk_count = k / strip;
-    (1..=DOT_PRODUCT_ACCUM_COUNT)
+    (1..=VECTOR_ACCUM_COUNT)
         .rev()
         .find(|c| chunk_count.is_multiple_of(*c))
 }
@@ -1699,7 +1756,7 @@ fn dotproductloop_bf16_applies<const N: usize, Tgt: CpuTarget>(
                 aux: _
             }
         ] if *ldt == lhs_dtype
-          && lhs_shape[2].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * DOT_PRODUCT_BF16_ACCUM_COUNT) == 0
+          && lhs_shape[2].get() % (DOT_PRODUCT_BF16_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT) == 0
           && out_shape[0] == nz!(1u32)  // means {lhs, rhs}_shape also equal 1
           && out_shape[1] == nz!(1u32)
           && out_shape[2] == nz!(1u32)

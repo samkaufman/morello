@@ -49,7 +49,7 @@ fn main() {
         .subschedule(&[0], |subspec| {
             subspec.to_max_and_unscaled(GL, row_major, None)
         })
-        .subschedule(&[0, 0], |subspec| subspec.to_accum().split(8))
+        .subschedule(&[0, 0], |subspec| subspec.to_accum())
         .subschedule(&[0, 0, 0], |subspec| {
             subspec
                 .move_param(0, L1)
@@ -60,13 +60,11 @@ fn main() {
         .subschedule(&[0, 0, 1], |maxaccum| {
             maxaccum
                 .move_param(0, L1)
-                .move_vrf(0, CpuMemory::VRF, 8)
                 .move_param(1, L1)
                 .move_param(1, RF)
-                .select(CpuKernel::VectorMax)
+                .select(CpuKernel::VectorMaxLoop)
                 .subschedule(&[0], |s| s.select(CpuKernel::Assign))
-                .subschedule(&[1, 0], |s| s.select(CpuKernel::Assign))
-                .subschedule(&[1, 2], |s| s.select(CpuKernel::Assign))
+                .subschedule(&[2], |s| s.select(CpuKernel::Assign))
         })
         .subschedule(&[0, 1], |subspec| {
             subspec

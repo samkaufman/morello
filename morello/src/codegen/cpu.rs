@@ -22,9 +22,8 @@ use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
 use crate::target::{
     cpu::{
-        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, dotproduct_accum_count,
-        DOT_PRODUCT_ACCUM_COUNT, DOT_PRODUCT_BF16_ACCUM_COUNT, DOT_PRODUCT_BF16_STRIP_SIZE,
-        DOT_PRODUCT_STRIP_SIZE,
+        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, vector_accum_count,
+        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
     CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
 };
@@ -1023,6 +1022,84 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         Ok(())
                     }
+                    CpuKernel::VectorMaxLoop => {
+                        self.headers.emit_max = true;
+                        self.headers.emit_math_include = true;
+
+                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                            0 => self.c_index_ptr(a, b, None),
+                            1 => self.c_index(a, b, None),
+                            _ => unreachable!(),
+                        });
+
+                        let value_cnt = arguments[0].spec().volume().get();
+                        let accum_count = usize::try_from(vector_accum_count(value_cnt).unwrap())
+                            .expect("vector accum_count must fit usize");
+                        let strip = usize::try_from(DOT_PRODUCT_STRIP_SIZE.get()).unwrap();
+                        let step_size = accum_count * strip;
+                        let step_idx_name = self.namer.fresh_name();
+                        let vector_accum_names = (0..accum_count)
+                            .map(|_| self.namer.fresh_name())
+                            .collect::<Vec<_>>();
+
+                        writeln!(w, "{}/* VectorMaxLoop */", indent(depth))?;
+                        for accum_name in &vector_accum_names {
+                            writeln!(
+                                w,
+                                "{}__m256 {accum_name} = _mm256_set1_ps(-INFINITY);",
+                                indent(depth),
+                            )?;
+                        }
+                        writeln!(
+                            w,
+                            "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                            indent(depth),
+                            step_idx_name,
+                            value_cnt,
+                            step_size,
+                        )?;
+                        for (i, accum_name) in vector_accum_names.iter().enumerate() {
+                            writeln!(
+                                w,
+                                "{0}{1} = _mm256_max_ps({1}, _mm256_loadu_ps({2} + {3} + {4}));",
+                                indent(depth + 1),
+                                accum_name,
+                                exprs[0],
+                                step_idx_name,
+                                i * strip,
+                            )?;
+                        }
+                        writeln!(w, "{}}}", indent(depth))?;
+
+                        let mut reduced_accum_names = vector_accum_names;
+                        while reduced_accum_names.len() > 1 {
+                            let mut next_round =
+                                Vec::with_capacity(reduced_accum_names.len().div_ceil(2));
+                            for pair in reduced_accum_names.chunks(2) {
+                                if pair.len() == 2 {
+                                    writeln!(
+                                        w,
+                                        "{0}{1} = _mm256_max_ps({1}, {2});",
+                                        indent(depth),
+                                        pair[0],
+                                        pair[1],
+                                    )?;
+                                }
+                                next_round.push(pair[0].clone());
+                            }
+                            reduced_accum_names = next_round;
+                        }
+
+                        writeln!(
+                            w,
+                            "{0}{1} = fmaxf({1}, horizontal_max_f32({2}));",
+                            indent(depth),
+                            exprs[1],
+                            reduced_accum_names[0],
+                        )?;
+
+                        Ok(())
+                    }
                     CpuKernel::MultAdd => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
@@ -1393,7 +1470,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE, 0);
                         let strip = DOT_PRODUCT_STRIP_SIZE.get();
-                        let accum_count = dotproduct_accum_count(lhs_spec.shape()[2].get())
+                        let accum_count = vector_accum_count(lhs_spec.shape()[2].get())
                             .expect("DotProductLoop applies should have ensured accum_count");
                         let step_size = accum_count * strip;
                         let step_idx_name = self.namer.fresh_name();
@@ -1480,7 +1557,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();
-                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                        let loop_names = (0..VECTOR_ACCUM_COUNT as usize)
                             .map(|_| {
                                 (
                                     self.namer.fresh_name(),
@@ -1517,7 +1594,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             indent(depth),
                             step_idx_name,
                             lhs_spec.shape()[1],
-                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                            VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (i, (_, even_lhs_name, odd_lhs_name, even_rhs_name, odd_rhs_name)) in
                             loop_names.iter().enumerate()
@@ -1595,7 +1672,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();
-                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                        let loop_names = (0..VECTOR_ACCUM_COUNT as usize)
                             .map(|_| {
                                 (
                                     self.namer.fresh_name(),
@@ -1630,7 +1707,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             indent(depth),
                             step_idx_name,
                             lhs_spec.shape()[1],
-                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                            VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (
                             i,
@@ -1714,7 +1791,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();
-                        let loop_names = (0..DOT_PRODUCT_BF16_ACCUM_COUNT as usize)
+                        let loop_names = (0..VECTOR_ACCUM_COUNT as usize)
                             .map(|_| {
                                 (
                                     self.namer.fresh_name(),
@@ -1749,7 +1826,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             indent(depth),
                             step_idx_name,
                             lhs_spec.shape()[1],
-                            DOT_PRODUCT_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                            VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (
                             i,
