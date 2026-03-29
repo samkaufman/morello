@@ -818,32 +818,51 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let max_expr = self.c_index(max_buffer, &max_iexpr, None);
                         let out_expr = self.c_index(out_buffer, &out_iexpr, None);
 
-                        let intermediate_buffer_name = self.namer.fresh_name();
-                        writeln!(
-                            w,
-                            "{}{} {intermediate_buffer_name} = exp256_ps({} - {});",
-                            indent(depth),
-                            get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size)
-                                .name,
-                            input_vector_exprs[0],
-                            max_expr,
-                        )?;
-                        // TODO: Don't fully unroll. Instead, read from L1.
-                        for input_vector_name in input_vector_exprs.iter().skip(1) {
+                        let accum_count = input_vector_exprs.len().min(VECTOR_ACCUM_COUNT as usize);
+                        debug_assert_ne!(accum_count, 0);
+                        let vector_accum_names = (0..accum_count)
+                            .map(|_| self.namer.fresh_name())
+                            .collect::<Vec<_>>();
+                        let vector_type =
+                            get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
+                        self.headers.vector_type_defs.insert(vector_type);
+                        for accum_name in &vector_accum_names {
                             writeln!(
                                 w,
-                                "{}{intermediate_buffer_name} += exp256_ps({} - {});",
+                                "{0}{1} {accum_name} = ({1}){{}};",
                                 indent(depth),
+                                vector_type.name,
+                            )?;
+                        }
+                        // TODO: Don't fully unroll. Instead, read from L1.
+                        for (i, input_vector_name) in input_vector_exprs.iter().enumerate() {
+                            writeln!(
+                                w,
+                                "{}{} += exp256_ps({} - {});",
+                                indent(depth),
+                                vector_accum_names[i % accum_count],
                                 input_vector_name,
                                 max_expr,
                             )?;
+                        }
+                        let mut reduced_accum_names = vector_accum_names;
+                        while reduced_accum_names.len() > 1 {
+                            let mut next_round =
+                                Vec::with_capacity(reduced_accum_names.len().div_ceil(2));
+                            for pair in reduced_accum_names.chunks(2) {
+                                if pair.len() == 2 {
+                                    writeln!(w, "{0}{1} += {2};", indent(depth), pair[0], pair[1],)?;
+                                }
+                                next_round.push(pair[0].clone());
+                            }
+                            reduced_accum_names = next_round;
                         }
                         writeln!(
                             w,
                             "{}{} += sum8({});",
                             indent(depth),
                             out_expr,
-                            intermediate_buffer_name,
+                            reduced_accum_names[0],
                         )
                     }
                     CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
@@ -868,17 +887,25 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let denom_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
 
                         let vector_size = arguments[0].spec().vector_size().unwrap();
-                        let denom_acc = self.namer.fresh_name();
-                        writeln!(
-                            w,
-                            "{0}{1} {denom_acc} = ({1}){{}};",
-                            indent(depth),
-                            get_vector(Tgt::vec_types(), Dtype::Float32, vector_size)
-                                .native_type_name,
-                        )?;
-
-                        for (input_vector_name, unscaled_vector_name) in
-                            input_vector_exprs.iter().zip(&unscaled_vector_exprs)
+                        let accum_count = input_vector_exprs.len().min(VECTOR_ACCUM_COUNT as usize);
+                        debug_assert!(accum_count > 0);
+                        let vector_accum_names = (0..accum_count)
+                            .map(|_| self.namer.fresh_name())
+                            .collect::<Vec<_>>();
+                        let vector_type = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size)
+                            .native_type_name;
+                        for accum_name in &vector_accum_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {accum_name} = ({1}){{}};",
+                                indent(depth),
+                                vector_type,
+                            )?;
+                        }
+                        for (i, (input_vector_name, unscaled_vector_name)) in input_vector_exprs
+                            .iter()
+                            .zip(&unscaled_vector_exprs)
+                            .enumerate()
                         {
                             writeln!(
                                 w,
@@ -886,13 +913,31 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 indent(depth),
                                 self.c_index(max_buffer, &max_iexpr, None),
                             )?;
-                            writeln!(w, "{}{denom_acc} += {unscaled_vector_name};", indent(depth))?;
+                            writeln!(
+                                w,
+                                "{}{} += {unscaled_vector_name};",
+                                indent(depth),
+                                vector_accum_names[i % accum_count],
+                            )?;
+                        }
+                        let mut reduced_accum_names = vector_accum_names;
+                        while reduced_accum_names.len() > 1 {
+                            let mut next_round =
+                                Vec::with_capacity(reduced_accum_names.len().div_ceil(2));
+                            for pair in reduced_accum_names.chunks(2) {
+                                if pair.len() == 2 {
+                                    writeln!(w, "{0}{1} += {2};", indent(depth), pair[0], pair[1],)?;
+                                }
+                                next_round.push(pair[0].clone());
+                            }
+                            reduced_accum_names = next_round;
                         }
                         writeln!(
                             w,
-                            "{}{} += sum8({denom_acc});",
+                            "{}{} += sum8({});",
                             indent(depth),
                             self.c_index(denom_buffer, &denom_iexpr, None),
+                            reduced_accum_names[0],
                         )?;
                         Ok(())
                     }
@@ -943,7 +988,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{} + {loop_iter_name}",
                             self.c_index_ptr(output_buffer, &out_base_expr, None)
                         );
-                        writeln!(w, "{0}{vtype} {1};", indent(depth + 1), input_vec,)?;
+                        writeln!(w, "{0}{vtype} {1};", indent(depth + 1), input_vec)?;
                         writeln!(
                             w,
                             "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",

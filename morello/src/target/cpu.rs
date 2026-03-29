@@ -36,6 +36,8 @@ const ASSIGN_INST_COST: MainCost = 1;
 const CPU_MEMORIES: [CpuMemory; 4] = [CpuMemory::RF, CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
 pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
 pub(crate) const VECTOR_ACCUM_COUNT: u32 = 4;
+/// Peak VRF register pressure of the compiled `exp256_ps` helper.
+const EXP256_PS_REG_COUNT: u64 = 5;
 pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
@@ -1524,22 +1526,29 @@ impl CpuKernel {
                     }),
                 )
             }
-            CpuKernel::VectorSoftmaxDenominator => {
-                // TODO: Check if VectorSoftmaxDenominator allocates more than 2 vectors.
-                MemoryAllocation::Simple(CPU_MEMORIES.map(
-                    |memory| {
-                        if memory.vector_rf() {
-                            2
-                        } else {
-                            0
-                        }
-                    },
-                ))
+            CpuKernel::VectorSoftmaxComplete => {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
+                    if memory.vector_rf() {
+                        // `input_vec` allocation, the temporary broadcast for max and denom. terms,
+                        // the `exp256_ps` budget.
+                        2 + EXP256_PS_REG_COUNT
+                    } else {
+                        0
+                    }
+                }))
             }
-            CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => MemoryAllocation::Simple(
-                // Four unscaled vectors plus one vector accumulator (`denom_acc`).
-                CPU_MEMORIES.map(|memory| if memory.vector_rf() { 5 } else { 0 }),
-            ),
+            CpuKernel::VectorSoftmaxDenominator
+            | CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
+                    if memory.vector_rf() {
+                        // Up to VECTOR_ACCUM_COUNT accumulators, 1 temporary for broadcasting
+                        // subtrahends, and the `exp256_ps` budget.
+                        u64::from(VECTOR_ACCUM_COUNT) + 1 + EXP256_PS_REG_COUNT
+                    } else {
+                        0
+                    }
+                }))
+            }
             CpuKernel::DivideVecScalarReciprocal => MemoryAllocation::Simple(
                 CPU_MEMORIES.map(|memory| if memory.vector_rf() { 2 } else { 0 }),
             ),
