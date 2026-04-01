@@ -2481,10 +2481,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
-    /// Return expressions naming each vector in a distributed tensor view.
+    /// Returns C lvalue expressions for each vector in VRF tensor `tensor`.
+    ///
+    /// Expressions are ordered by increasing vector offset in the view's
+    /// flattened element order and are resolved through the tensor's named
+    /// backing buffer in `name_env`.
+    /// 
+    /// Panics if `tensor` is not in vector registers or if its backing buffer has no name.
     fn c_vec_exprs_for_tensor(&self, tensor: &ViewE<Tgt>) -> Vec<String> {
         let vector_volume = tensor.spec().volume().get();
-        let vector_size = tensor.spec().vector_size().unwrap();
+        let vector_size = tensor
+            .spec()
+            .vector_size()
+            .expect("tensor must be in vector registers");
         let vector_count = vector_volume / vector_size.get();
         (0..vector_count)
             .map(|vector_idx| {
