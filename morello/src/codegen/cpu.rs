@@ -806,33 +806,18 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         self.headers.emit_expf_avx2 = true;
                         self.headers.emit_sum8 = true;
 
-                        let vector_volume = arguments[0].spec().volume().get();
-                        let vector_size = arguments[0].spec().vector_size().unwrap();
-                        let vector_count = vector_volume / vector_size.get();
                         writeln!(w, "{}/* VectorSoftmaxDenominator */", indent(depth))?;
 
-                        // TODO: Duplicate code with VectorMax. Factor out.
-                        let input_vector_exprs = (0..vector_count)
-                            .map(|vector_idx| {
-                                let backing_tensor = arguments[0].backing_tensor().unwrap();
-                                let buffer =
-                                    self.name_env.get(&backing_tensor.identifier()).unwrap();
-                                let mut buffer_indexing_expr =
-                                    arguments[0].make_buffer_indexing_expr();
-                                buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                                buffer_indexing_expr +=
-                                    i32::try_from(vector_size.get() * vector_idx).unwrap();
-                                self.c_index_vec(buffer, &buffer_indexing_expr, None)
-                            })
-                            .collect::<Vec<_>>();
-
+                        let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
+                        let vector_size = arguments[0].spec().vector_size().unwrap();
                         let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
                         let out_tensor = arguments[2].backing_tensor().unwrap();
+                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
                         let out_buffer = self.name_env.get(&out_tensor.identifier()).unwrap();
-
                         let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
                         let out_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
+                        let max_expr = self.c_index(max_buffer, &max_iexpr, None);
+                        let out_expr = self.c_index(out_buffer, &out_iexpr, None);
 
                         let intermediate_buffer_name = self.namer.fresh_name();
                         writeln!(
@@ -842,7 +827,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size)
                                 .name,
                             input_vector_exprs[0],
-                            self.c_index(max_buffer, &max_iexpr, None),
+                            max_expr,
                         )?;
                         // TODO: Don't fully unroll. Instead, read from L1.
                         for input_vector_name in input_vector_exprs.iter().skip(1) {
@@ -851,14 +836,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 "{}{intermediate_buffer_name} += exp256_ps({} - {});",
                                 indent(depth),
                                 input_vector_name,
-                                self.c_index(max_buffer, &max_iexpr, None),
+                                max_expr,
                             )?;
                         }
                         writeln!(
                             w,
                             "{}{} += sum8({});",
                             indent(depth),
-                            self.c_index(out_buffer, &out_iexpr, None),
+                            out_expr,
                             intermediate_buffer_name,
                         )
                     }
@@ -1008,13 +993,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_count = vector_volume / vector_size.get();
                         writeln!(w, "{}/* VectorMax */", indent(depth))?;
 
-                        let out_expr = {
-                            let backing_tensor = arguments[1].backing_tensor().unwrap();
-                            let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
-                            let mut buffer_indexing_expr = arguments[1].make_buffer_indexing_expr();
-                            buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                            self.c_index(buffer, &buffer_indexing_expr, None)
-                        };
+                        let out_tensor = arguments[1].backing_tensor().unwrap();
+                        let out_buffer = self.name_env.get(&out_tensor.identifier()).unwrap();
+                        let out_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
+                        let out_expr = self.c_index(out_buffer, &out_iexpr, None);
 
                         let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
 
@@ -1140,13 +1122,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )
                     }
                     CpuKernel::MemsetZero => {
-                        // TODO: Merge this duplicate `exprs` block. It's used also in the Assign.
                         debug_assert_eq!(arguments.len(), 1);
-                        let backing_tensor = arguments[0].backing_tensor().unwrap();
-                        let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
-                        let mut buffer_indexing_expr = arguments[0].make_buffer_indexing_expr();
-                        buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                        let arg_expr = self.c_index_ptr(buffer, &buffer_indexing_expr, None);
+                        let arg_tensor = arguments[0].backing_tensor().unwrap();
+                        let arg_buffer = self.name_env.get(&arg_tensor.identifier()).unwrap();
+                        let arg_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
+                        let arg_expr = self.c_index_ptr(arg_buffer, &arg_iexpr, None);
                         writeln!(
                             w,
                             "{}memset((void *)({arg_expr}), 0, {});",
