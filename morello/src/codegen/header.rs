@@ -1,6 +1,6 @@
 use super::c_utils::{c_type, VecType};
 use crate::target::TargetId;
-
+use itertools::Itertools;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
@@ -71,7 +71,13 @@ impl HeaderEmitter {
             out.write_char('\n')?;
         }
 
-        for vec_type in &self.vector_type_defs {
+        // Sort by name to make typedef emission deterministic across runs.
+        for vec_type in self
+            .vector_type_defs
+            .iter()
+            .copied()
+            .sorted_unstable_by_key(|vec_type| vec_type.name)
+        {
             // Declare a vector of {vec_bytes} bytes, divided into {dt.c_type}
             // values. (vec_bytes must be a multiple of the c_type size.)
             out.write_str(&format!(
