@@ -22,7 +22,8 @@ use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
 use crate::target::{
     cpu::{
-        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, vector_accum_count,
+        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size,
+        softmax_denominator_and_unscaled_vector_size, vector_accum_count,
         DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
     CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
@@ -875,19 +876,31 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             indent(depth)
                         )?;
 
-                        let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
-                        let unscaled_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[3]);
-                        debug_assert_eq!(input_vector_exprs.len(), unscaled_vector_exprs.len());
-
+                        let input_tensor = arguments[0].backing_tensor().unwrap();
+                        let input_buffer = self.name_env.get(&input_tensor.identifier()).unwrap();
                         let max_tensor = arguments[1].backing_tensor().unwrap();
                         let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
                         let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
+                        let max_expr = self.c_index(max_buffer, &max_iexpr, None);
                         let denom_tensor = arguments[2].backing_tensor().unwrap();
                         let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
                         let denom_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
+                        let output_tensor = arguments[3].backing_tensor().unwrap();
+                        let output_buffer = self.name_env.get(&output_tensor.identifier()).unwrap();
+                        let input_base_expr = zero_points(arguments[0].make_buffer_indexing_expr());
+                        let output_base_expr =
+                            zero_points(arguments[3].make_buffer_indexing_expr());
 
-                        let vector_size = arguments[0].spec().vector_size().unwrap();
-                        let accum_count = input_vector_exprs.len().min(VECTOR_ACCUM_COUNT as usize);
+                        let vector_size = softmax_denominator_and_unscaled_vector_size::<Tgt>(
+                            arguments[0].spec(),
+                            arguments[3].spec(),
+                        )
+                        .unwrap();
+                        let volume = arguments[0].spec().volume().get();
+                        let vector_count = volume / vector_size.get();
+                        let accum_count = usize::try_from(vector_count)
+                            .unwrap()
+                            .min(VECTOR_ACCUM_COUNT as usize);
                         debug_assert!(accum_count > 0);
                         let vector_accum_names = (0..accum_count)
                             .map(|_| self.namer.fresh_name())
@@ -902,23 +915,85 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 vector_type,
                             )?;
                         }
-                        for (i, (input_vector_name, unscaled_vector_name)) in input_vector_exprs
-                            .iter()
-                            .zip(&unscaled_vector_exprs)
-                            .enumerate()
-                        {
+                        let input_vector_name = self.namer.fresh_name();
+                        writeln!(w, "{0}{1} {input_vector_name};", indent(depth), vector_type,)?;
+
+                        let emit_unscaled_vector = |w: &mut W,
+                                                    depth: usize,
+                                                    input_ptr: &str,
+                                                    output_ptr: &str,
+                                                    accum_name: &str,
+                                                    unscaled_vector_name: &str|
+                         -> fmt::Result {
                             writeln!(
                                 w,
-                                "{}{unscaled_vector_name} = exp256_ps({input_vector_name} - {});",
+                                "{}__builtin_memcpy(&{input_vector_name}, {input_ptr}, sizeof({input_vector_name}));",
                                 indent(depth),
-                                self.c_index(max_buffer, &max_iexpr, None),
                             )?;
                             writeln!(
                                 w,
-                                "{}{} += {unscaled_vector_name};",
+                                "{}{vector_type} {unscaled_vector_name} = exp256_ps({input_vector_name} - {max_expr});",
                                 indent(depth),
-                                vector_accum_names[i % accum_count],
                             )?;
+                            writeln!(
+                                w,
+                                "{}__builtin_memcpy({output_ptr}, &{unscaled_vector_name}, sizeof({unscaled_vector_name}));",
+                                indent(depth),
+                            )?;
+                            writeln!(
+                                w,
+                                "{}{accum_name} += {unscaled_vector_name};",
+                                indent(depth),
+                            )
+                        };
+
+                        if !input_buffer.needs_unroll() && !output_buffer.needs_unroll() {
+                            let in_ptr = self.c_index_ptr(input_buffer, &input_base_expr, None);
+                            let out_ptr = self.c_index_ptr(output_buffer, &output_base_expr, None);
+                            let offset_var = self.namer.fresh_name();
+                            let step_size = vector_size.get() * u32::try_from(accum_count).unwrap();
+                            debug_assert_eq!(volume % step_size, 0);
+                            writeln!(
+                                w,
+                                "{}for (int {offset_var} = 0; {offset_var} < {volume}; {offset_var} += {step_size}) {{",
+                                indent(depth),
+                            )?;
+                            for (i, accum_name) in vector_accum_names.iter().enumerate() {
+                                let lane_offset = u32::try_from(i).unwrap() * vector_size.get();
+                                let input_ptr =
+                                    format!("({in_ptr}) + {offset_var} + {lane_offset}");
+                                let output_ptr =
+                                    format!("({out_ptr}) + {offset_var} + {lane_offset}");
+                                let unscaled_vector_name = self.namer.fresh_name();
+                                emit_unscaled_vector(
+                                    w,
+                                    depth + 1,
+                                    &input_ptr,
+                                    &output_ptr,
+                                    accum_name,
+                                    &unscaled_vector_name,
+                                )?;
+                            }
+                            writeln!(w, "{}}}", indent(depth))?;
+                        } else {
+                            for vector_idx in 0..vector_count {
+                                let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
+                                let input_iexpr = input_base_expr.clone() + offset;
+                                let output_iexpr = output_base_expr.clone() + offset;
+                                let input_ptr = self.c_index_ptr(input_buffer, &input_iexpr, None);
+                                let output_ptr =
+                                    self.c_index_ptr(output_buffer, &output_iexpr, None);
+                                let unscaled_vector_name = self.namer.fresh_name();
+                                emit_unscaled_vector(
+                                    w,
+                                    depth,
+                                    &input_ptr,
+                                    &output_ptr,
+                                    &vector_accum_names
+                                        [usize::try_from(vector_idx).unwrap() % accum_count],
+                                    &unscaled_vector_name,
+                                )?;
+                            }
                         }
                         let mut reduced_accum_names = vector_accum_names;
                         while reduced_accum_names.len() > 1 {

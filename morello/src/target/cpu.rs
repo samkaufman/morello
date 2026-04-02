@@ -39,6 +39,8 @@ pub(crate) const VECTOR_ACCUM_COUNT: u32 = 4;
 /// Peak VRF register pressure of the compiled `exp256_ps` helper.
 const EXP256_PS_REG_COUNT: u64 = 5;
 pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
+/// The vector size expected by [softmax_denominator_and_unscaled_vector_size].
+const SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE: DimSize = nz!(8u32);
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
@@ -975,10 +977,10 @@ impl CpuKernel {
                         return false;
                     }
 
-                    if operand.memory() != CpuMemory::VRF {
-                        return false;
-                    }
-                    if operand.vector_size().unwrap().get() != 8 {
+                    if operand.memory() != CpuMemory::VRF
+                        && operand.memory() != CpuMemory::L1
+                        && operand.memory() != CpuMemory::GL
+                    {
                         return false;
                     }
                     if !operand.is_contiguous() {
@@ -990,6 +992,21 @@ impl CpuKernel {
                         return false;
                     }
                     if operands[i].memory() != CpuMemory::RF {
+                        return false;
+                    }
+                }
+
+                if softmax_denominator_and_unscaled_vector_size::<Tgt>(&operands[0], &operands[3])
+                    .is_none()
+                {
+                    return false;
+                }
+
+                if operands[0].vector_size().is_none() && operands[3].vector_size().is_none() {
+                    let vector_count = operands[0].volume().get()
+                        / SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE.get();
+                    let accum_count = vector_count.min(VECTOR_ACCUM_COUNT);
+                    if !vector_count.is_multiple_of(accum_count) {
                         return false;
                     }
                 }
@@ -1659,7 +1676,12 @@ impl CpuKernel {
                 const PER_VECTOR_COST: MainCost = 2 * INST_COST;
                 const FINAL_REDUCTION_COST: MainCost = 4 * INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
-                let vector_size = parameters[0].spec().vector_size().unwrap().get();
+                let vector_size = softmax_denominator_and_unscaled_vector_size(
+                    parameters[0].spec(),
+                    parameters[3].spec(),
+                )
+                .unwrap()
+                .get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
                 PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST
@@ -1921,6 +1943,29 @@ pub(crate) fn divide_vec_scalar_reciprocal_vector_size<Tgt: Target>(
             .max_by_key(|vec_type| vec_type.value_cnt)
             .map(|vec_type| DimSize::new(u32::from(vec_type.value_cnt)).unwrap()),
     }
+}
+
+/// Returns the vector width to use for `VectorSoftmaxDenominatorAndUnscaledF32`.
+///
+/// This kernel is hard-wired to the AVX2 `exp256_ps` and `sum8` helpers, so it only supports 8-wide
+/// float32 vectors. VRF operands may carry that explicit vector size; addressed operands in L1/GL
+/// do not, so the width is inferred when the tile volume is divisible by 8.
+pub(crate) fn softmax_denominator_and_unscaled_vector_size<Tgt: Target>(
+    input: &TensorSpec<Tgt>,
+    output: &TensorSpec<Tgt>,
+) -> Option<DimSize> {
+    for spec in [input, output] {
+        match spec.vector_size() {
+            Some(v) if v == SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE => {}
+            None if spec
+                .volume()
+                .get()
+                .is_multiple_of(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE.get()) => {}
+            _ => return None,
+        }
+    }
+
+    Some(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE)
 }
 
 fn physicaltransposebyte_applies_to_operands<Tgt>(
@@ -2466,6 +2511,86 @@ mod tests {
         );
         assert!(logical_spec.is_canonical());
         assert!(CpuKernel::DivideVecScalarReciprocal.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_softmax_denominator_and_unscaled_f32_applies_to_l1_tiles() {
+        let logical_spec = LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                    scan_dim: 1,
+                    accum: true,
+                },
+                spec_shape: shape![1, 32],
+                dtypes: vec![Dtype::Float32; 4],
+            },
+            vec![
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::L1,
+                    layout: row_major(&shape![1, 32]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::RF,
+                    layout: row_major(&shape![1, 1]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::RF,
+                    layout: row_major(&shape![1, 1]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::L1,
+                    layout: row_major(&shape![1, 32]),
+                    vector_size: None,
+                },
+            ],
+            true,
+        );
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32
+            .applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_softmax_denominator_and_unscaled_f32_rejects_l1_tiles_with_tail() {
+        let logical_spec = LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                    scan_dim: 1,
+                    accum: true,
+                },
+                spec_shape: shape![1, 40],
+                dtypes: vec![Dtype::Float32; 4],
+            },
+            vec![
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::L1,
+                    layout: row_major(&shape![1, 40]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::RF,
+                    layout: row_major(&shape![1, 1]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::RF,
+                    layout: row_major(&shape![1, 1]),
+                    vector_size: None,
+                },
+                TensorSpecAux::<Avx2Target> {
+                    memory: CpuMemory::L1,
+                    layout: row_major(&shape![1, 40]),
+                    vector_size: None,
+                },
+            ],
+            true,
+        );
+        assert!(logical_spec.is_canonical());
+        assert!(!CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32
+            .applies_to_logical_spec(&logical_spec));
     }
 
     #[test]
