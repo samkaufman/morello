@@ -2466,7 +2466,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// Expressions are ordered by increasing vector offset in the view's
     /// flattened element order and are resolved through the tensor's named
     /// backing buffer in `name_env`.
-    /// 
+    ///
     /// Panics if `tensor` is not in vector registers or if its backing buffer has no name.
     fn c_vec_exprs_for_tensor(&self, tensor: &ViewE<Tgt>) -> Vec<String> {
         let vector_volume = tensor.spec().volume().get();
