@@ -3,6 +3,7 @@ mod clang;
 mod cpu;
 mod header;
 mod namegen;
+mod planmem;
 
 use crate::codegen::clang::clang_path;
 use crate::codegen::cpu::CpuCodeGenerator;
@@ -27,6 +28,11 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 pub use self::cpu::CpuCodeGenThreadStyle;
+pub(crate) use self::cpu::STACK_CUTOFF;
+pub(crate) use self::planmem::PlanMemoryTarget;
+
+/// Switch to statically plan heap allocations.
+pub const ENABLE_STATIC_ALLOCATION: bool = true;
 
 const CLI_FLAGS: [&str; 5] = [
     "-std=gnu99",

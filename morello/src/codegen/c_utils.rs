@@ -1,7 +1,7 @@
+use super::cpu::HEAP_BUFFER_ALIGNMENT_BYTES;
+use itertools::Either;
 use std::collections::HashMap;
 use std::{fmt, ops::Rem};
-
-use itertools::Either;
 
 use crate::{
     common::Dtype,
@@ -15,6 +15,14 @@ pub enum CBuffer {
         name: String,
         size: u32,
         dtype: Dtype,
+    },
+    /// A typed pointer into an enclosing workspace buffer.
+    WorkspaceSlice {
+        name: String,
+        size: u32,
+        dtype: Dtype,
+        workspace_name: String,
+        offset_bytes: u64,
     },
     StackArray {
         name: String,
@@ -52,6 +60,7 @@ impl CBuffer {
     pub fn name(&self) -> Option<&str> {
         match self {
             CBuffer::HeapArray { name, .. }
+            | CBuffer::WorkspaceSlice { name, .. }
             | CBuffer::StackArray { name, .. }
             | CBuffer::Ptr { name, .. } => Some(name),
             CBuffer::RegVars { inner_vecs } if inner_vecs.len() == 1 => Some(&inner_vecs[0].0),
@@ -75,9 +84,10 @@ impl CBuffer {
                 )?;
                 writeln!(
                     w,
-                    "{}posix_memalign((void **)&{}, 128, {}*sizeof({}));",
+                    "{}posix_memalign((void **)&{}, {}, {}*sizeof({}));",
                     indent(depth),
                     name,
+                    HEAP_BUFFER_ALIGNMENT_BYTES,
                     size,
                     c_type(*dtype)
                 )?;
@@ -95,6 +105,39 @@ impl CBuffer {
                     }
                     InitType::Random => self.emit_rand_init(w, depth, *size, name, *dtype),
                     _ => Ok(()),
+                }
+            }
+            CBuffer::WorkspaceSlice {
+                name,
+                size,
+                dtype,
+                workspace_name,
+                offset_bytes,
+            } => {
+                writeln!(
+                    w,
+                    "{}{} *__restrict__ {} = ({} *)({} + {});",
+                    indent(depth),
+                    c_type(*dtype),
+                    name,
+                    c_type(*dtype),
+                    workspace_name,
+                    offset_bytes
+                )?;
+
+                match init_type {
+                    InitType::Zero => {
+                        writeln!(
+                            w,
+                            "{}memset({}, 0, {}*sizeof({}));",
+                            indent(depth),
+                            name,
+                            size,
+                            c_type(*dtype)
+                        )
+                    }
+                    InitType::Random => self.emit_rand_init(w, depth, *size, name, *dtype),
+                    InitType::None => Ok(()),
                 }
             }
             CBuffer::StackArray { name, size, dtype } => {
@@ -185,7 +228,9 @@ impl CBuffer {
                 writeln!(w, "{}free({name});", indent(depth))?;
                 Ok(())
             }
-            CBuffer::StackArray { .. } | CBuffer::RegVars { .. } => Ok(()),
+            CBuffer::WorkspaceSlice { .. }
+            | CBuffer::StackArray { .. }
+            | CBuffer::RegVars { .. } => Ok(()),
             CBuffer::Ptr { .. } => unimplemented!(),
         }
     }

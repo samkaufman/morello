@@ -1,5 +1,6 @@
 use super::common_actions::{bufferize_actions, move_actions, split_actions, tile_out_actions};
 use crate::codegen::c_utils::VecType;
+use crate::codegen::{PlanMemoryTarget, STACK_CUTOFF};
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
@@ -610,6 +611,18 @@ impl<T: CpuTarget> Target for T {
 
     fn vec_types() -> &'static [VecType] {
         <Self as CpuTarget>::vec_types()
+    }
+}
+
+impl<Tgt: CpuTarget> PlanMemoryTarget for Tgt {
+    /// Returns the byte size of tensors that CPU codegen would otherwise heap-allocate.
+    fn heap_allocated_tensor_bytes(spec: &TensorSpec<Self>) -> Option<u64> {
+        match spec.memory().into() {
+            CpuMemory::L1 | CpuMemory::GL if spec.bytes_used() > u64::from(STACK_CUTOFF) => {
+                Some(spec.bytes_used())
+            }
+            CpuMemory::RF | CpuMemory::VRF | CpuMemory::L1 | CpuMemory::GL => None,
+        }
     }
 }
 

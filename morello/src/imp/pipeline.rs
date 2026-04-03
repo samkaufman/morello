@@ -19,7 +19,7 @@ pub struct Pipeline<Tgt: Target> {
 
 #[derive(Debug, Clone)]
 pub struct StageWiring<Tgt: Target> {
-    pub intermediate_tensors: Vec<Rc<Tensor<Tgt>>>, // TODO: Rename to intermediate_tensors
+    pub intermediate_tensors: Vec<Rc<Tensor<Tgt>>>,
 }
 
 impl<Tgt: Target> Impl<Tgt> for Pipeline<Tgt> {

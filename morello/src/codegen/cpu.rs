@@ -9,6 +9,8 @@ use std::rc::Rc;
 use super::c_utils::{c_type, printf_fmt, CBuffer, CName, InitType, VecType};
 use super::header::HeaderEmitter;
 use super::namegen::NameGenerator;
+use super::planmem::{StaticAllocationPlan, WorkspaceId};
+use super::ENABLE_STATIC_ALLOCATION;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, Bounds as _, NonAffine, NonAffineExpr, Substitute, Term};
 use crate::imp::blocks::Block;
@@ -31,7 +33,10 @@ use crate::target::{
 use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
 
-const STACK_CUTOFF: u32 = 256;
+/// Alignment used for addressed heap buffers emitted by CPU codegen.
+pub const HEAP_BUFFER_ALIGNMENT_BYTES: u64 = 128;
+/// Maximum addressed buffer size that still stays on the stack.
+pub const STACK_CUTOFF: u32 = 256;
 
 pub struct CpuCodeGenerator<Tgt: Target> {
     pub namer: NameGenerator,
@@ -41,6 +46,9 @@ pub struct CpuCodeGenerator<Tgt: Target> {
     pub kernel_name: String,
     pub thread_style: CpuCodeGenThreadStyle,
     pub benchmark: bool,
+    static_allocation_plan: Option<StaticAllocationPlan<Tgt>>,
+    /// Maps each currently emitted workspace scope to its fresh C variable name.
+    active_workspace_names: HashMap<WorkspaceId, String>,
     phantom: PhantomData<Tgt>,
 }
 
@@ -139,6 +147,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let beta_reduced_imp = imp
             .clone()
             .bind(&mut |param_idx| tensors_as_viewe.get(usize::from(param_idx)).cloned());
+        if ENABLE_STATIC_ALLOCATION {
+            self.static_allocation_plan = Some(StaticAllocationPlan::plan(&beta_reduced_imp));
+        }
         self.emit(&mut main_body_str, &beta_reduced_imp, 1)?;
 
         writeln!(main_body_str, "}}")?;
@@ -249,6 +260,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
             let buf = self.make_buffer(
+                Some(kernel_argument.identifier()),
                 spec.shape(),
                 spec.vector_size(),
                 spec.dtype(),
@@ -375,6 +387,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         for kernel_argument in top_arg_tensors {
             let spec = kernel_argument.spec();
             let buf = self.make_buffer(
+                Some(kernel_argument.identifier()),
                 spec.shape(),
                 spec.vector_size(),
                 spec.dtype(),
@@ -555,6 +568,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
     fn make_buffer(
         &mut self,
+        tensor_identifier: Option<OpaqueSymbol>,
         shape: &[DimSize],
         vector_size: Option<DimSize>,
         dtype: Dtype,
@@ -585,7 +599,26 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             CpuMemory::L1 | CpuMemory::GL => {
                 let name = self.namer.fresh_name();
                 if size * u32::from(dtype.size()) > STACK_CUTOFF {
-                    CBuffer::HeapArray { name, size, dtype }
+                    if let Some((workspace_id, offset_bytes)) = self
+                        .static_allocation_plan
+                        .as_ref()
+                        .zip(tensor_identifier)
+                        .and_then(|(plan, symbol)| plan.placement(symbol))
+                    {
+                        CBuffer::WorkspaceSlice {
+                            name,
+                            size,
+                            dtype,
+                            workspace_name: self
+                                .active_workspace_names
+                                .get(&workspace_id)
+                                .expect("workspace should be active")
+                                .clone(),
+                            offset_bytes,
+                        }
+                    } else {
+                        CBuffer::HeapArray { name, size, dtype }
+                    }
                 } else {
                     CBuffer::StackArray { name, size, dtype }
                 }
@@ -594,7 +627,42 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     }
 
     fn emit<W: Write>(&mut self, w: &mut W, imp: &ImplNode<Tgt>, depth: usize) -> fmt::Result {
-        match imp {
+        let workspace_id = self
+            .static_allocation_plan
+            .as_ref()
+            .and_then(|plan| plan.workspace_for(imp));
+        let workspace_scope = if let Some(workspace_id) = workspace_id {
+            let workspace_name = self.namer.fresh_name();
+            let alignment = HEAP_BUFFER_ALIGNMENT_BYTES.max(u64::from(Tgt::line_size()));
+            let bytes = self
+                .static_allocation_plan
+                .as_ref()
+                .expect("workspace plan should exist")
+                .workspace_size(workspace_id);
+            writeln!(
+                w,
+                "{}uint8_t *__restrict__ {workspace_name};",
+                indent(depth)
+            )?;
+            writeln!(
+                w,
+                "{}posix_memalign((void **)&{workspace_name}, {alignment}, {bytes});",
+                indent(depth),
+            )?;
+
+            let old_name = self
+                .active_workspace_names
+                .insert(workspace_id, workspace_name.clone());
+            debug_assert!(
+                old_name.is_none(),
+                "workspace ids should not be active in nested scopes"
+            );
+            Some((workspace_id, workspace_name))
+        } else {
+            None
+        };
+
+        let emit_result = match imp {
             ImplNode::Loop(l) => {
                 // Emit a C loop nest or, if any tensor view is requires unrolling (i.e., vector
                 // tensors), unroll the loop, emitting the body repeatedly.
@@ -626,6 +694,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         // CBuffer and Tensor.
                         let spec = alloc_binding.introduced.spec();
                         let dest_buffer = self.make_buffer(
+                            Some(tensor.identifier()),
                             spec.shape(),
                             spec.vector_size(),
                             spec.dtype(),
@@ -670,6 +739,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         for tensor_wiring in &wiring.intermediate_tensors {
                             let intermediate_spec = tensor_wiring.spec();
                             let buffer = self.make_buffer(
+                                Some(tensor_wiring.identifier()),
                                 intermediate_spec.shape(),
                                 intermediate_spec.vector_size(),
                                 intermediate_spec.dtype(),
@@ -750,6 +820,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             let backing_tensor = arg.backing_tensor().unwrap();
                             match self.name_env.get(&backing_tensor.identifier()).unwrap() {
                                 CBuffer::HeapArray { name, .. }
+                                | CBuffer::WorkspaceSlice { name, .. }
                                 | CBuffer::StackArray { name, .. }
                                 | CBuffer::Ptr { name, .. } => format!("{name}[_]"),
                                 CBuffer::RegVars { inner_vecs, .. } => inner_vecs[0].0.clone(),
@@ -2092,12 +2163,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let intermediate_dtype = arguments[0].spec().dtype();
                         let intermediate_lower = self.make_buffer(
+                            None,
                             &shape![1, 32],
                             Some(nz!(32u32)),
                             intermediate_dtype,
                             VRF.into(),
                         );
                         let intermediate_higher = self.make_buffer(
+                            None,
                             &shape![1, 32],
                             Some(nz!(32u32)),
                             intermediate_dtype,
@@ -2346,6 +2419,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             ImplNode::FunctionApp(_) => {
                 panic!("FunctionApp should have been inlined");
             }
+        };
+
+        if let Some((workspace_id, workspace_name)) = workspace_scope {
+            let removed_name = self.active_workspace_names.remove(&workspace_id);
+            debug_assert_eq!(removed_name.as_deref(), Some(workspace_name.as_str()));
+            emit_result?;
+            writeln!(w, "{}free({workspace_name});", indent(depth))
+        } else {
+            emit_result
         }
     }
 
@@ -2568,6 +2650,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     ) -> String {
         match buffer {
             CBuffer::HeapArray { name, .. }
+            | CBuffer::WorkspaceSlice { name, .. }
             | CBuffer::StackArray { name, .. }
             | CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
@@ -2603,7 +2686,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         #![allow(clippy::only_used_in_recursion)]
 
         match buffer {
-            CBuffer::HeapArray { .. } | CBuffer::StackArray { .. } | CBuffer::Ptr { .. } => {
+            CBuffer::HeapArray { .. }
+            | CBuffer::WorkspaceSlice { .. }
+            | CBuffer::StackArray { .. }
+            | CBuffer::Ptr { .. } => {
                 unimplemented!()
             }
             CBuffer::RegVars { .. } => {
@@ -2628,7 +2714,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         reinterpret: Option<String>,
     ) -> String {
         match buffer {
-            CBuffer::HeapArray { name, .. } | CBuffer::Ptr { name, .. } => match reinterpret {
+            CBuffer::HeapArray { name, .. }
+            | CBuffer::WorkspaceSlice { name, .. }
+            | CBuffer::Ptr { name, .. } => match reinterpret {
                 Some(_) => unimplemented!(),
                 None => {
                     format!(
@@ -2725,6 +2813,8 @@ impl<Tgt: Target> Default for CpuCodeGenerator<Tgt> {
             kernel_name: String::from("kernel"),
             thread_style: Default::default(),
             benchmark: false,
+            static_allocation_plan: None,
+            active_workspace_names: Default::default(),
             phantom: PhantomData,
         }
     }
