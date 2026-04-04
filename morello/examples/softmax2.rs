@@ -112,7 +112,7 @@ fn main() {
     }
 
     // Benchmark.
-    const ITERS: u32 = 100;
+    const ITERS: u32 = 5000;
     let result = implementation
         .bench(ITERS, None)
         .unwrap_or_else(|e| panic!("Failed to benchmark: {e}"));
