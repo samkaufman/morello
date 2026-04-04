@@ -167,10 +167,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     let [inp, mut out] = args
                         .try_into()
                         .unwrap_or_else(|_| panic!("expected 2 args"));
-                    let maxes = inp.max_axis(Axis(scan_dim.into()));
-                    out.assign(&(inp.clone() - maxes.broadcast(inp.shape()).unwrap()));
+                    let maxes = inp
+                        .max_axis(Axis(scan_dim.into()))
+                        .insert_axis(Axis(scan_dim.into()))
+                        .broadcast(out.shape())
+                        .unwrap();
+                    out.assign(&(inp.clone() - maxes));
                     out.exp();
-                    out /= &out.sum_axis(Axis(scan_dim.into()));
+                    let denom = out
+                        .sum_axis(Axis(scan_dim.into()))
+                        .insert_axis(Axis(scan_dim.into()))
+                        .broadcast(out.shape())
+                        .unwrap();
+                    out /= &denom;
                     vec![inp, out]
                 }
                 PrimitiveSpecType::SoftmaxComplete { .. } => todo!(),
@@ -245,6 +254,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 };
                 let maxes = first_out
                     .max_axis(Axis(soft_dim.into()))
+                    .insert_axis(Axis(soft_dim.into()))
                     .broadcast(first_out.shape())
                     .unwrap()
                     .into_dimensionality::<Ix3>()
@@ -253,6 +263,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 first_out.exp();
                 first_out /= &first_out
                     .sum_axis(Axis(soft_dim.into()))
+                    .insert_axis(Axis(soft_dim.into()))
                     .broadcast(first_out.shape())
                     .unwrap()
                     .into_dimensionality::<Ix3>()
@@ -426,6 +437,19 @@ impl<D: ndarray::Dimension> DynArray<D> {
             DynArray::Bfloat16(a) => a
                 .broadcast(shape)
                 .map(|b| DynArray::Bfloat16(b.into_owned())),
+        }
+    }
+
+    pub fn insert_axis(self, axis: Axis) -> DynArray<D::Larger> {
+        match self {
+            DynArray::Uint8(a) => DynArray::Uint8(a.insert_axis(axis)),
+            DynArray::Sint8(a) => DynArray::Sint8(a.insert_axis(axis)),
+            DynArray::Uint16(a) => DynArray::Uint16(a.insert_axis(axis)),
+            DynArray::Sint16(a) => DynArray::Sint16(a.insert_axis(axis)),
+            DynArray::Uint32(a) => DynArray::Uint32(a.insert_axis(axis)),
+            DynArray::Sint32(a) => DynArray::Sint32(a.insert_axis(axis)),
+            DynArray::Float32(a) => DynArray::Float32(a.insert_axis(axis)),
+            DynArray::Bfloat16(a) => DynArray::Bfloat16(a.insert_axis(axis)),
         }
     }
 
