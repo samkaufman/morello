@@ -1,10 +1,10 @@
 use morello::codegen::CodeGen;
-use morello::common::{DimSize, Dtype};
+use morello::common::Dtype;
 use morello::cost::Cost;
 use morello::layout::row_major;
 use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
-use morello::smallvec::smallvec;
+use morello::shape;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
@@ -15,19 +15,16 @@ use morello::target::{
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
-use nonzero::nonzero as nz;
 use std::io;
 use std::panic;
 
 fn main() {
-    const RANK: u8 = 2;
-    const SIZE: DimSize = nz!(1024u32);
-    let shape = vec![SIZE; usize::from(RANK)];
+    let shape = shape![8, 512];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {
             typ: PrimitiveSpecType::Softmax { scan_dim: 1 },
-            spec_shape: smallvec![SIZE; usize::from(RANK)],
-            dtypes: vec![Dtype::Float32; usize::from(RANK)],
+            spec_shape: shape.clone(),
+            dtypes: vec![Dtype::Float32; shape.len()],
         },
         vec![
             TensorSpecAux {
@@ -44,7 +41,7 @@ fn main() {
 
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)
-        .tile_out(&[1, SIZE.get()])
+        .tile_out(&[1, shape[1].get()])
         .to_softmax_parts(GL, row_major, None, GL, row_major, None)
         .subschedule(&[0], |subspec| {
             subspec.to_max_and_unscaled(GL, row_major, None)
