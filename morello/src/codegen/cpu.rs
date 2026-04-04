@@ -25,8 +25,9 @@ use crate::shape;
 use crate::target::{
     cpu::{
         broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size,
-        softmax_denominator_and_unscaled_vector_size, vector_accum_count,
-        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
+        softmax_complete_vector_size, softmax_denominator_and_unscaled_vector_size,
+        vector_accum_count, DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE,
+        VECTOR_ACCUM_COUNT,
     },
     CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
 };
@@ -1090,10 +1091,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     CpuKernel::VectorSoftmaxComplete => {
                         self.headers.emit_expf_avx2 = true;
 
-                        let vector_count = arguments[0].spec().volume().get() / 8;
+                        let vector_size = softmax_complete_vector_size::<Tgt>(
+                            arguments[0].spec(),
+                            arguments[3].spec(),
+                        )
+                        .unwrap();
+                        let vector_count = arguments[0].spec().volume().get() / vector_size.get();
                         writeln!(w, "{}/* VectorSoftmaxComplete */", indent(depth))?;
 
-                        let vtype = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32))
+                        let vtype = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size)
                             .native_type_name;
 
                         let input_tensor = arguments[0].backing_tensor().unwrap();
@@ -1114,14 +1120,22 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let max_expr = self.c_index(max_buffer, &max_expr, None);
                         let denom_expr = self.c_index(denominator_buffer, &denominator_expr, None);
+                        let reciprocal_vec = self.namer.fresh_name();
+                        writeln!(
+                            w,
+                            "{0}{vtype} {reciprocal_vec} = (1.0f / ({1})) - ({vtype}){{}};",
+                            indent(depth),
+                            denom_expr,
+                        )?;
 
                         let loop_iter_name = self.namer.fresh_name();
                         writeln!(
                             w,
-                            "{0}for (int {1} = 0; {1} < {2}; {1} += 8) {{",
+                            "{0}for (int {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             loop_iter_name,
-                            vector_count * 8,
+                            vector_count * vector_size.get(),
+                            vector_size.get(),
                         )?;
 
                         let input_vec = self.namer.fresh_name();
@@ -1144,12 +1158,18 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         writeln!(
                             w,
-                            "{0}{vtype} {1} = exp256_ps({2} - {3}) / {4};",
+                            "{0}{vtype} {1} = exp256_ps({2} - {3});",
                             indent(depth + 1),
                             out_vec,
                             input_vec,
                             max_expr,
-                            denom_expr,
+                        )?;
+                        writeln!(
+                            w,
+                            "{0}{1} *= {2};",
+                            indent(depth + 1),
+                            out_vec,
+                            reciprocal_vec,
                         )?;
                         writeln!(
                             w,

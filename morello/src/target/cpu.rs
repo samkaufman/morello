@@ -933,6 +933,9 @@ impl CpuKernel {
                         return false;
                     }
                 }
+                if softmax_complete_vector_size::<Tgt>(&operands[0], &operands[3]).is_none() {
+                    return false;
+                }
                 true
             }
             CpuKernel::ValueSoftmaxDenominator => {
@@ -1559,9 +1562,9 @@ impl CpuKernel {
             CpuKernel::VectorSoftmaxComplete => {
                 MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
                     if memory.vector_rf() {
-                        // `input_vec` allocation, the temporary broadcast for max and denom. terms,
-                        // the `exp256_ps` budget.
-                        2 + EXP256_PS_REG_COUNT
+                        // `input_vec`, `out_vec`, the broadcast reciprocal, and the `exp256_ps`
+                        // budget.
+                        3 + EXP256_PS_REG_COUNT
                     } else {
                         0
                     }
@@ -1703,9 +1706,27 @@ impl CpuKernel {
                 // TODO: Measure throughput!
                 INST_COST * 3
             }
-            CpuKernel::ValueSoftmaxComplete | CpuKernel::VectorSoftmaxComplete => {
+            CpuKernel::ValueSoftmaxComplete => {
                 // TODO: Measure throughput!
                 INST_COST * 4
+            }
+            CpuKernel::VectorSoftmaxComplete => {
+                // Setup once:
+                //   - `vdivss`      : scalar reciprocal
+                //   - `vbroadcastss`: splat reciprocal to a vector register
+                // per output vector:
+                //   - exp approximation, `vmulps`, and load/store traffic
+                const RECIPROCAL_SETUP_COST: MainCost = 2 * INST_COST;
+                const PER_VECTOR_COST: MainCost = 4 * INST_COST;
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_size =
+                    softmax_complete_vector_size(parameters[0].spec(), parameters[3].spec())
+                        .unwrap()
+                        .get();
+                debug_assert!(value_cnt.is_multiple_of(vector_size));
+                let vector_cnt = value_cnt / vector_size;
+                let io_cost = move_cost(parameters[0].spec()) + move_cost(parameters[3].spec());
+                RECIPROCAL_SETUP_COST + PER_VECTOR_COST * vector_cnt + io_cost
             }
             CpuKernel::MultAdd => {
                 match parameters[0].spec().dtype() {
@@ -1977,7 +1998,28 @@ pub(crate) fn softmax_denominator_and_unscaled_vector_size<Tgt: Target>(
             _ => return None,
         }
     }
+    Some(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE)
+}
 
+/// Returns the vector width to use for `VectorSoftmaxComplete`.
+///
+/// This kernel is also hard-wired to the AVX2 `exp256_ps` helper, so it currently only supports
+/// 8-wide float32 vectors. L1 operands may omit the explicit vector size, in which case the width
+/// is inferred when the tile volume is divisible by 8.
+pub(crate) fn softmax_complete_vector_size<Tgt: Target>(
+    input: &TensorSpec<Tgt>,
+    output: &TensorSpec<Tgt>,
+) -> Option<DimSize> {
+    for spec in [input, output] {
+        match spec.vector_size() {
+            Some(v) if v == SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE => {}
+            None if spec
+                .volume()
+                .get()
+                .is_multiple_of(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE.get()) => {}
+            _ => return None,
+        }
+    }
     Some(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE)
 }
 
