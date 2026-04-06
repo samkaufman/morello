@@ -37,11 +37,9 @@ const ASSIGN_INST_COST: MainCost = 1;
 const CPU_MEMORIES: [CpuMemory; 4] = [CpuMemory::RF, CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
 pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
 pub(crate) const VECTOR_ACCUM_COUNT: u32 = 4;
-/// Peak VRF register pressure of the compiled `exp256_ps` helper.
-const EXP256_PS_REG_COUNT: u64 = 5;
+/// Peak VRF register pressure budget for the emitted `exp256_ps` / `exp512_ps` C helpers.
+const X86_EXP_PS_REG_COUNT: u64 = 5;
 pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
-/// The vector size expected by [softmax_denominator_and_unscaled_vector_size].
-const SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE: DimSize = nz!(8u32);
 
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
@@ -784,7 +782,10 @@ impl CpuKernel {
                             }
                         ] if lhs_shape[0] == nz!(1u32)
                           && lhs_shape[1] == nz!(1u32)
-                          && vector_accum_count(lhs_shape[2].get()).is_some()
+                          && vector_accum_count(
+                              lhs_shape[2].get(),
+                              DOT_PRODUCT_STRIP_SIZE.get(),
+                          ).is_some()
                           && out_shape[..] == [nz!(1u32), nz!(1u32), nz!(1u32)]
                           && lhs.layout().is_row_major()
                           && rhs.layout().is_col_major()
@@ -933,7 +934,7 @@ impl CpuKernel {
                         return false;
                     }
                 }
-                if softmax_complete_vector_size::<Tgt>(&operands[0], &operands[3]).is_none() {
+                if softmax_vector_size::<Tgt>(&operands[0], &operands[3]).is_none() {
                     return false;
                 }
                 true
@@ -986,9 +987,6 @@ impl CpuKernel {
                     if shape[..dim_us].iter().any(|d| d.get() != 1) {
                         return false;
                     }
-                    if !shape[dim_us].get().is_multiple_of(8) {
-                        return false;
-                    }
                     if shape[(dim_us + 1)..].iter().any(|d| d.get() != 1) {
                         return false;
                     }
@@ -1012,15 +1010,13 @@ impl CpuKernel {
                     }
                 }
 
-                if softmax_denominator_and_unscaled_vector_size::<Tgt>(&operands[0], &operands[3])
-                    .is_none()
-                {
+                let Some(vector_size) = softmax_vector_size::<Tgt>(&operands[0], &operands[3])
+                else {
                     return false;
-                }
+                };
 
                 if operands[0].vector_size().is_none() && operands[3].vector_size().is_none() {
-                    let vector_count = operands[0].volume().get()
-                        / SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE.get();
+                    let vector_count = operands[0].volume().get() / vector_size.get();
                     let accum_count = vector_count.min(VECTOR_ACCUM_COUNT);
                     if !vector_count.is_multiple_of(accum_count) {
                         return false;
@@ -1105,15 +1101,13 @@ impl CpuKernel {
                 if operands[1].dtype() != Dtype::Float32 {
                     return false;
                 }
-                if !operands[0]
-                    .volume()
-                    .get()
-                    .is_multiple_of(operands[0].vector_size().unwrap().get())
-                {
+                let Some(vector_size) = operands[0].vector_size() else {
+                    return false;
+                };
+                if !matches!(vector_size.get(), 8 | 16) {
                     return false;
                 }
-                // 256-bit VRF
-                if operands[0].vector_size().unwrap().get() != 8 {
+                if !operands[0].volume().get().is_multiple_of(vector_size.get()) {
                     return false;
                 }
                 if operands[0].shape().iter().filter(|d| d.get() > 1).count() >= 2 {
@@ -1150,7 +1144,7 @@ impl CpuKernel {
                 if !operands[0].is_contiguous() {
                     return false;
                 }
-                vector_accum_count(operands[0].volume().get()).is_some()
+                vector_max_loop_properties::<Tgt>(operands[0].volume().get()).is_some()
             }
             CpuKernel::VecScalarAssign => {
                 let PrimitiveSpecType::Broadcast { dim } = *typ else {
@@ -1562,9 +1556,9 @@ impl CpuKernel {
             CpuKernel::VectorSoftmaxComplete => {
                 MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
                     if memory.vector_rf() {
-                        // `input_vec`, `out_vec`, the broadcast reciprocal, and the `exp256_ps`
+                        // `input_vec`, `out_vec`, the broadcast reciprocal, and the x86 exp
                         // budget.
-                        3 + EXP256_PS_REG_COUNT
+                        3 + X86_EXP_PS_REG_COUNT
                     } else {
                         0
                     }
@@ -1575,8 +1569,8 @@ impl CpuKernel {
                 MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
                     if memory.vector_rf() {
                         // Up to VECTOR_ACCUM_COUNT accumulators, 1 temporary for broadcasting
-                        // subtrahends, and the `exp256_ps` budget.
-                        u64::from(VECTOR_ACCUM_COUNT) + 1 + EXP256_PS_REG_COUNT
+                        // subtrahends, and the x86 exp budget.
+                        u64::from(VECTOR_ACCUM_COUNT) + 1 + X86_EXP_PS_REG_COUNT
                     } else {
                         0
                     }
@@ -1664,7 +1658,8 @@ impl CpuKernel {
                 // TODO: Measure throughput! This is a rough estimate.
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_cnt = value_cnt / DOT_PRODUCT_STRIP_SIZE.get();
-                let accum_count = vector_accum_count(value_cnt).unwrap();
+                let accum_count =
+                    vector_accum_count(value_cnt, DOT_PRODUCT_STRIP_SIZE.get()).unwrap();
                 INST_COST * (2 * vector_cnt + accum_count + 2)
             }
             CpuKernel::DivideVecScalarReciprocal => {
@@ -1692,12 +1687,9 @@ impl CpuKernel {
                 const PER_VECTOR_COST: MainCost = 2 * INST_COST;
                 const FINAL_REDUCTION_COST: MainCost = 4 * INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
-                let vector_size = softmax_denominator_and_unscaled_vector_size(
-                    parameters[0].spec(),
-                    parameters[3].spec(),
-                )
-                .unwrap()
-                .get();
+                let vector_size = softmax_vector_size(parameters[0].spec(), parameters[3].spec())
+                    .unwrap()
+                    .get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
                 PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST
@@ -1719,10 +1711,9 @@ impl CpuKernel {
                 const RECIPROCAL_SETUP_COST: MainCost = 2 * INST_COST;
                 const PER_VECTOR_COST: MainCost = 4 * INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
-                let vector_size =
-                    softmax_complete_vector_size(parameters[0].spec(), parameters[3].spec())
-                        .unwrap()
-                        .get();
+                let vector_size = softmax_vector_size(parameters[0].spec(), parameters[3].spec())
+                    .unwrap()
+                    .get();
                 debug_assert!(value_cnt.is_multiple_of(vector_size));
                 let vector_cnt = value_cnt / vector_size;
                 let io_cost = move_cost(parameters[0].spec()) + move_cost(parameters[3].spec());
@@ -1776,15 +1767,21 @@ impl CpuKernel {
     }
 }
 
-/// Returns the number of vector accumulators to use for the float32 strip-based vector loops.
+pub(crate) fn x86_f32_horizontal_max_helper(vector_size: DimSize) -> &'static str {
+    match vector_size.get() {
+        8 => "horizontal_max_f32",
+        16 => "_mm512_reduce_max_ps",
+        _ => panic!("Unsupported x86 float32 max helper width {vector_size}"),
+    }
+}
+
+/// Returns the number of vector accumulators to use for the given strip width.
 ///
-/// This is shared by [`CpuKernel::DotProductLoop`] and [`CpuKernel::VectorMaxLoop`]. Both kernels
-/// process the input in `DOT_PRODUCT_STRIP_SIZE` chunks and use up to [`VECTOR_ACCUM_COUNT`]
-/// independent accumulators, choosing the largest count that evenly partitions `k` so codegen can
-/// use a fixed-width unrolled loop without a cleanup path. Returns `None` when `k` is not a whole
-/// number of strips.
-pub(crate) fn vector_accum_count(k: u32) -> Option<u32> {
-    let strip = DOT_PRODUCT_STRIP_SIZE.get();
+/// The loop processes the input in `strip`-sized chunks and uses up to
+/// [`VECTOR_ACCUM_COUNT`] independent accumulators, choosing the largest count that evenly
+/// partitions `k` so codegen can use a fixed-width unrolled loop without a cleanup path.
+/// Returns `None` when `k` is not a whole number of strips.
+fn vector_accum_count(k: u32, strip: u32) -> Option<u32> {
     if !k.is_multiple_of(strip) {
         return None;
     }
@@ -1792,6 +1789,25 @@ pub(crate) fn vector_accum_count(k: u32) -> Option<u32> {
     (1..=VECTOR_ACCUM_COUNT)
         .rev()
         .find(|c| chunk_count.is_multiple_of(*c))
+}
+
+fn largest_vector_size_for_volume<Tgt: Target>(dtype: Dtype, volume: u32) -> Option<DimSize> {
+    Tgt::vec_types()
+        .iter()
+        .filter(|vec_type| {
+            vec_type.dtype == dtype && volume.is_multiple_of(u32::from(vec_type.value_cnt))
+        })
+        .max_by_key(|vec_type| vec_type.value_cnt)
+        .map(|vec_type| DimSize::new(u32::from(vec_type.value_cnt)).unwrap())
+}
+
+pub(crate) fn vector_max_loop_properties<Tgt: Target>(value_cnt: u32) -> Option<(DimSize, u32)> {
+    let vector_size = largest_vector_size_for_volume::<Tgt>(Dtype::Float32, value_cnt)?;
+    if !matches!(vector_size.get(), 8 | 16) {
+        return None;
+    }
+    let accum_count = vector_accum_count(value_cnt, vector_size.get())?;
+    Some((vector_size, accum_count))
 }
 
 fn dotproductloop_bf16_applies<const N: usize, Tgt: CpuTarget>(
@@ -1979,48 +1995,42 @@ pub(crate) fn divide_vec_scalar_reciprocal_vector_size<Tgt: Target>(
     }
 }
 
-/// Returns the vector width to use for `VectorSoftmaxDenominatorAndUnscaledF32`.
+/// Returns the vector size to use for [CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32] and
+/// [CpuKernel::VectorSoftmaxComplete].
 ///
-/// This kernel is hard-wired to the AVX2 `exp256_ps` and `sum8` helpers, so it only supports 8-wide
-/// float32 vectors. VRF operands may carry that explicit vector size; addressed operands in L1/GL
-/// do not, so the width is inferred when the tile volume is divisible by 8.
-pub(crate) fn softmax_denominator_and_unscaled_vector_size<Tgt: Target>(
+/// If both tensors already specify a vector size, they must agree or this returns `None`. If just
+/// one tensor specifies a vector size, that size is used. If neither does, this returns the largest
+/// vector size for the tensor dtype defined by `Tgt` that evenly divides the tensor volume.
+pub(crate) fn softmax_vector_size<Tgt: Target>(
     input: &TensorSpec<Tgt>,
     output: &TensorSpec<Tgt>,
 ) -> Option<DimSize> {
-    for spec in [input, output] {
-        match spec.vector_size() {
-            Some(v) if v == SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE => {}
-            None if spec
-                .volume()
-                .get()
-                .is_multiple_of(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE.get()) => {}
-            _ => return None,
-        }
-    }
-    Some(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE)
-}
+    debug_assert_eq!(input.volume(), output.volume());
+    debug_assert_eq!(input.dtype(), output.dtype());
+    let volume = input.volume().get();
+    let dtype = input.dtype();
+    let mut explicit = None;
 
-/// Returns the vector width to use for `VectorSoftmaxComplete`.
-///
-/// This kernel is also hard-wired to the AVX2 `exp256_ps` helper, so it currently only supports
-/// 8-wide float32 vectors. L1 operands may omit the explicit vector size, in which case the width
-/// is inferred when the tile volume is divisible by 8.
-pub(crate) fn softmax_complete_vector_size<Tgt: Target>(
-    input: &TensorSpec<Tgt>,
-    output: &TensorSpec<Tgt>,
-) -> Option<DimSize> {
-    for spec in [input, output] {
-        match spec.vector_size() {
-            Some(v) if v == SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE => {}
-            None if spec
-                .volume()
-                .get()
-                .is_multiple_of(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE.get()) => {}
-            _ => return None,
+    // After this loop, `explicit` is the vector width shared by the input/output tensor, or `None`
+    // if neither tensor specified one.
+    for vector_size in [input.vector_size(), output.vector_size()] {
+        let Some(vector_size) = vector_size else {
+            continue;
+        };
+        debug_assert!(volume.is_multiple_of(vector_size.get()));
+        debug_assert!(Tgt::vec_types().iter().any(|vec_type| {
+            vec_type.dtype == dtype && vector_size.get() == u32::from(vec_type.value_cnt)
+        }));
+        // If both tensors specify widths and they disagree, short-circuit with `None`.
+        match explicit {
+            Some(existing) if existing != vector_size => return None,
+            None => explicit = Some(vector_size),
+            Some(_) => {}
         }
     }
-    Some(SOFTMAX_DENOMINATOR_AND_UNSCALED_VECTOR_SIZE)
+
+    // Fall back to the widest legal vector size for this dtype and volume.
+    explicit.or_else(|| largest_vector_size_for_volume::<Tgt>(dtype, volume))
 }
 
 fn physicaltransposebyte_applies_to_operands<Tgt>(
@@ -2358,7 +2368,7 @@ mod tests {
         shape, spec,
         spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
         target::{Avx2Target, Target},
-        tensorspec::TensorSpecAux,
+        tensorspec::{TensorSpec, TensorSpecAux},
         views::Param,
     };
     use nonzero::nonzero as nz;

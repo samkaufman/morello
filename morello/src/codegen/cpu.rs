@@ -25,9 +25,8 @@ use crate::shape;
 use crate::target::{
     cpu::{
         broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size,
-        softmax_complete_vector_size, softmax_denominator_and_unscaled_vector_size,
-        vector_accum_count, DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE,
-        VECTOR_ACCUM_COUNT,
+        softmax_vector_size, vector_max_loop_properties, x86_f32_horizontal_max_helper,
+        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
     CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
 };
@@ -66,6 +65,42 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             benchmark,
             ..Self::default()
         }
+    }
+
+    fn require_x86_f32_exp_helper(&mut self, vector_size: DimSize) -> &'static str {
+        match vector_size.get() {
+            8 => {
+                self.headers.emit_expf_avx2 = true;
+                "exp256_ps"
+            }
+            16 => {
+                self.headers.emit_expf_avx512 = true;
+                "exp512_ps"
+            }
+            _ => panic!("Unsupported x86 float32 exp helper width {vector_size}"),
+        }
+    }
+
+    fn require_x86_f32_sum_helper(&mut self, vector_size: DimSize) -> &'static str {
+        match vector_size.get() {
+            8 => {
+                self.headers.emit_sum8 = true;
+                "sum8"
+            }
+            16 => "_mm512_reduce_add_ps",
+            _ => panic!("Unsupported x86 float32 sum helper width {vector_size}"),
+        }
+    }
+
+    fn require_x86_f32_horizontal_max_helper(
+        &mut self,
+        vector_size: DimSize,
+    ) -> &'static str {
+        let helper = x86_f32_horizontal_max_helper(vector_size);
+        if helper == "horizontal_max_f32" {
+            self.headers.emit_max = true;
+        }
+        helper
     }
 
     /// Write a pretty-printed Impl as a C comment.
@@ -875,13 +910,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     CpuKernel::VectorSoftmaxDenominator => {
                         // TODO: Test that we don't mutate the input.
 
-                        self.headers.emit_expf_avx2 = true;
-                        self.headers.emit_sum8 = true;
-
                         writeln!(w, "{}/* VectorSoftmaxDenominator */", indent(depth))?;
 
                         let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
                         let vector_size = arguments[0].spec().vector_size().unwrap();
+                        let exp_helper = self.require_x86_f32_exp_helper(vector_size);
+                        let sum_helper = self.require_x86_f32_sum_helper(vector_size);
                         let max_tensor = arguments[1].backing_tensor().unwrap();
                         let out_tensor = arguments[2].backing_tensor().unwrap();
                         let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
@@ -911,7 +945,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         for (i, input_vector_name) in input_vector_exprs.iter().enumerate() {
                             writeln!(
                                 w,
-                                "{}{} += exp256_ps({} - {});",
+                                "{}{} += {exp_helper}({} - {});",
                                 indent(depth),
                                 vector_accum_names[i % accum_count],
                                 input_vector_name,
@@ -932,21 +966,24 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         writeln!(
                             w,
-                            "{}{} += sum8({});",
+                            "{}{} += {sum_helper}({});",
                             indent(depth),
                             out_expr,
                             reduced_accum_names[0],
                         )
                     }
                     CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
-                        self.headers.emit_expf_avx2 = true;
-                        self.headers.emit_sum8 = true;
-
                         writeln!(
                             w,
                             "{}/* VectorSoftmaxDenominatorAndUnscaledF32 */",
                             indent(depth)
                         )?;
+
+                        let vector_size =
+                            softmax_vector_size::<Tgt>(arguments[0].spec(), arguments[3].spec())
+                                .unwrap();
+                        let exp_helper = self.require_x86_f32_exp_helper(vector_size);
+                        let sum_helper = self.require_x86_f32_sum_helper(vector_size);
 
                         let input_tensor = arguments[0].backing_tensor().unwrap();
                         let input_buffer = self.name_env.get(&input_tensor.identifier()).unwrap();
@@ -962,12 +999,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let input_base_expr = zero_points(arguments[0].make_buffer_indexing_expr());
                         let output_base_expr =
                             zero_points(arguments[3].make_buffer_indexing_expr());
-
-                        let vector_size = softmax_denominator_and_unscaled_vector_size::<Tgt>(
-                            arguments[0].spec(),
-                            arguments[3].spec(),
-                        )
-                        .unwrap();
                         let volume = arguments[0].spec().volume().get();
                         let vector_count = volume / vector_size.get();
                         let accum_count = usize::try_from(vector_count)
@@ -1004,7 +1035,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
                             writeln!(
                                 w,
-                                "{}{vector_type} {unscaled_vector_name} = exp256_ps({input_vector_name} - {max_expr});",
+                                "{}{vector_type} {unscaled_vector_name} = {exp_helper}({input_vector_name} - {max_expr});",
                                 indent(depth),
                             )?;
                             writeln!(
@@ -1081,7 +1112,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         writeln!(
                             w,
-                            "{}{} += sum8({});",
+                            "{}{} += {sum_helper}({});",
                             indent(depth),
                             self.c_index(denom_buffer, &denom_iexpr, None),
                             reduced_accum_names[0],
@@ -1089,13 +1120,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     CpuKernel::VectorSoftmaxComplete => {
-                        self.headers.emit_expf_avx2 = true;
-
-                        let vector_size = softmax_complete_vector_size::<Tgt>(
-                            arguments[0].spec(),
-                            arguments[3].spec(),
-                        )
-                        .unwrap();
+                        let vector_size =
+                            softmax_vector_size::<Tgt>(arguments[0].spec(), arguments[3].spec())
+                                .unwrap();
+                        let exp_helper = self.require_x86_f32_exp_helper(vector_size);
                         let vector_count = arguments[0].spec().volume().get() / vector_size.get();
                         writeln!(w, "{}/* VectorSoftmaxComplete */", indent(depth))?;
 
@@ -1158,7 +1186,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         writeln!(
                             w,
-                            "{0}{vtype} {1} = exp256_ps({2} - {3});",
+                            "{0}{vtype} {1} = {exp_helper}({2} - {3});",
                             indent(depth + 1),
                             out_vec,
                             input_vec,
@@ -1195,12 +1223,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )
                     }
                     CpuKernel::VectorMax => {
-                        self.headers.emit_max = true;
-                        self.headers.emit_math_include = true;
-
                         let vector_volume = arguments[0].spec().volume().get();
                         let vector_size = arguments[0].spec().vector_size().unwrap();
                         let vector_count = vector_volume / vector_size.get();
+
+                        self.headers.emit_math_include = true;
+                        let horizontal_max_helper =
+                            self.require_x86_f32_horizontal_max_helper(vector_size);
+
                         writeln!(w, "{}/* VectorMax */", indent(depth))?;
 
                         let out_tensor = arguments[1].backing_tensor().unwrap();
@@ -1215,7 +1245,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         for vector_idx in 1..usize::try_from(vector_count).unwrap() {
                             writeln!(
                                 w,
-                                "{0}{1} = _mm256_max_ps({1}, {2});",
+                                "{0}{1} = __builtin_elementwise_max({1}, {2});",
                                 indent(depth),
                                 input_vector_exprs[0],
                                 input_vector_exprs[vector_idx],
@@ -1225,7 +1255,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         // Emit the single-vector reduction
                         writeln!(
                             w,
-                            "{0}{1} = fmaxf({1}, horizontal_max_f32({2}));",
+                            "{0}{1} = fmaxf({1}, {horizontal_max_helper}({2}));",
                             indent(depth),
                             out_expr,
                             input_vector_exprs[0],
@@ -1234,7 +1264,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     CpuKernel::VectorMaxLoop => {
-                        self.headers.emit_max = true;
+                        let value_cnt = arguments[0].spec().volume().get();
+                        let (vector_size, accum_count) =
+                            vector_max_loop_properties::<Tgt>(value_cnt).unwrap();
+
                         self.headers.emit_math_include = true;
 
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
@@ -1243,10 +1276,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             _ => unreachable!(),
                         });
 
-                        let value_cnt = arguments[0].spec().volume().get();
-                        let accum_count = usize::try_from(vector_accum_count(value_cnt).unwrap())
+                        let horizontal_max_helper =
+                            self.require_x86_f32_horizontal_max_helper(vector_size);
+                        let vector_type = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size);
+                        self.headers.vector_type_defs.insert(vector_type);
+                        let accum_count = usize::try_from(accum_count)
                             .expect("vector accum_count must fit usize");
-                        let strip = usize::try_from(DOT_PRODUCT_STRIP_SIZE.get()).unwrap();
+                        let strip = usize::try_from(vector_size.get()).unwrap();
                         let step_size = accum_count * strip;
                         let step_idx_name = self.namer.fresh_name();
                         let vector_accum_names = (0..accum_count)
@@ -1257,8 +1293,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         for accum_name in &vector_accum_names {
                             writeln!(
                                 w,
-                                "{}__m256 {accum_name} = _mm256_set1_ps(-INFINITY);",
+                                "{0}{1} {accum_name} = (-INFINITY) - ({1}){{}};",
                                 indent(depth),
+                                vector_type.name,
                             )?;
                         }
                         writeln!(
@@ -1270,14 +1307,26 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             step_size,
                         )?;
                         for (i, accum_name) in vector_accum_names.iter().enumerate() {
+                            let input_vec_name = self.namer.fresh_name();
                             writeln!(
                                 w,
-                                "{0}{1} = _mm256_max_ps({1}, _mm256_loadu_ps({2} + {3} + {4}));",
+                                "{0}{1} {input_vec_name};",
                                 indent(depth + 1),
-                                accum_name,
+                                vector_type.name,
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}__builtin_memcpy(&{input_vec_name}, {1} + {2} + {3}, sizeof({input_vec_name}));",
+                                indent(depth + 1),
                                 exprs[0],
                                 step_idx_name,
                                 i * strip,
+                            )?;
+                            writeln!(
+                                w,
+                                "{0}{1} = __builtin_elementwise_max({1}, {input_vec_name});",
+                                indent(depth + 1),
+                                accum_name,
                             )?;
                         }
                         writeln!(w, "{}}}", indent(depth))?;
@@ -1290,7 +1339,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 if pair.len() == 2 {
                                     writeln!(
                                         w,
-                                        "{0}{1} = _mm256_max_ps({1}, {2});",
+                                        "{0}{1} = __builtin_elementwise_max({1}, {2});",
                                         indent(depth),
                                         pair[0],
                                         pair[1],
@@ -1303,7 +1352,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         writeln!(
                             w,
-                            "{0}{1} = fmaxf({1}, horizontal_max_f32({2}));",
+                            "{0}{1} = fmaxf({1}, {horizontal_max_helper}({2}));",
                             indent(depth),
                             exprs[1],
                             reduced_accum_names[0],
@@ -1681,7 +1730,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE, 0);
                         let strip = DOT_PRODUCT_STRIP_SIZE.get();
-                        let accum_count = vector_accum_count(lhs_spec.shape()[2].get())
+                        let chunk_count = lhs_spec.shape()[2].get() / strip;
+                        let accum_count = (1..=VECTOR_ACCUM_COUNT)
+                            .rev()
+                            .find(|c| chunk_count.is_multiple_of(*c))
                             .expect("DotProductLoop applies should have ensured accum_count");
                         let step_size = accum_count * strip;
                         let step_idx_name = self.namer.fresh_name();

@@ -12,6 +12,7 @@ pub struct HeaderEmitter {
     pub emit_math_include: bool,  // math.h
     pub emit_float_include: bool, // float.h
     pub emit_expf_avx2: bool,
+    pub emit_expf_avx512: bool,
     pub emit_cores_clamp: bool,
     pub emit_sum8: bool,
     pub emit_cvtbf16_fp32: bool,
@@ -57,6 +58,9 @@ impl HeaderEmitter {
         }
         if self.emit_expf_avx2 {
             out.write_str(include_str!("../codegen/partials/x86/expf_avx2.c"))?;
+        }
+        if self.emit_expf_avx512 {
+            out.write_str(include_str!("../codegen/partials/x86/expf_avx512.c"))?;
         }
         out.write_char('\n')?;
         if self.emit_benchmarking {
