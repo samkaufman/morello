@@ -721,10 +721,10 @@ impl<Tgt: Target> SpecTask<Tgt> {
                         finished = true;
                         reducer.insert(
                             *producing_action_num,
-                            solver.compute_cost(
-                                // TODO: Move rather than clone the child_costs.
-                                &mut subspec_costs.iter().map(|c| c.as_ref().unwrap().clone()),
-                            ),
+                            // Safe to move the child costs out here because this partial Impl is
+                            // about to leave `Constructing` and its `subspec_costs` will not be
+                            // read again.
+                            solver.compute_cost(&mut subspec_costs.iter_mut().map(|c| c.take().unwrap())),
                         );
                     }
                 } else {
