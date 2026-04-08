@@ -397,8 +397,7 @@ where
                 };
                 if in_same_page {
                     let (subspec_idx, subtask) = self.get_task_internal(&subspec);
-                    if !visited_in_stage.contains(spec) {
-                        visited_in_stage.insert(subspec.clone());
+                    if visited_in_stage.insert(subspec.clone()) {
                         self.visit_next_request_batch(
                             subspec_idx,
                             &subspec,
