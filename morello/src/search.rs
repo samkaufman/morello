@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::slice;
 
 use crate::cost::Cost;
-use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference};
+use crate::db::{ActionCostVec, ActionNum, FilesDatabase, GetPreference, PageId};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::ImplNode;
@@ -40,6 +40,7 @@ struct BlockSearch<'a, 'd, Tgt: Target> {
     // `working_set` when a WorkingPartialImpl became Unsat.
     working_block_requests: HashMap<usize, Vec<WorkingPartialImplHandle>>,
     subblock_requests: Vec<HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>>,
+    subblock_page_ids: Vec<Option<PageId<'d>>>,
 }
 
 /// On-going synthesis of a [Spec]. (Essentially a coroutine.)
@@ -49,8 +50,8 @@ enum SpecTask<Tgt: Target> {
         reducer: ImplReducer,
         partial_impls: Vec<WorkingPartialImpl<Tgt>>,
         partial_impls_incomplete: usize,
+        request_batches: Vec<Vec<(Spec<Tgt>, RequestId)>>,
         request_batches_returned: usize,
-        max_children: usize, // TODO: Combine with request_batches_returned
     },
     // TODO: Shouldn't need this second bool to track if it's from the database
     Complete(ActionCostVec, bool),
@@ -61,7 +62,6 @@ enum SpecTask<Tgt: Target> {
 enum WorkingPartialImpl<Tgt: Target> {
     Constructing {
         solver: ActionSolver<Tgt>,
-        subspecs: Vec<Spec<Tgt>>,
         subspec_costs: Vec<Option<Cost>>, // empty = unsat; all Some = ready-to-complete
         producing_action_num: ActionNum,
     },
@@ -223,12 +223,13 @@ where
             working_set_running: 0,
             working_block_requests: HashMap::new(),
             subblock_requests: Vec::new(),
+            subblock_page_ids: Vec::new(),
         };
         let mut visited_in_stage = HashSet::new();
         let mut outbox = Vec::new();
         for g in goals {
             let (spec_working_set_index, task) = block.get_task_internal(g);
-            visited_in_stage.insert(g.clone());
+            visited_in_stage.insert(spec_working_set_index);
             block.visit_next_request_batch(
                 spec_working_set_index,
                 g,
@@ -243,15 +244,17 @@ where
                 block.resolve_request_internal(&spec, completed_task_results);
             }
 
-            let new_vec = Vec::with_capacity(block.subblock_requests.len());
-            let mut subblock_reqs_iter = replace(&mut block.subblock_requests, new_vec)
+            let new_subblocks = Vec::with_capacity(block.subblock_requests.len());
+            let new_page_ids = Vec::with_capacity(block.subblock_page_ids.len());
+            let mut subblock_reqs_iter = replace(&mut block.subblock_requests, new_subblocks)
                 .into_iter()
+                .zip(replace(&mut block.subblock_page_ids, new_page_ids))
                 .peekable();
-            while let Some(mut subblock) = subblock_reqs_iter.next() {
+            while let Some((mut subblock, _)) = subblock_reqs_iter.next() {
                 // TODO: Move prefetch so that it happens after the get inside the recursive call.
                 let mut prefetch_to_push_down: Option<&Spec<Tgt>> = None;
                 match subblock_reqs_iter.peek() {
-                    Some(next_subblock) => prefetch_to_push_down = next_subblock.keys().next(),
+                    Some((next_subblock, _)) => prefetch_to_push_down = next_subblock.keys().next(),
                     None => {
                         if let Some(prefetch_after) = prefetch_after.as_ref() {
                             if search.db.can_memoize(prefetch_after) {
@@ -376,7 +379,7 @@ where
         working_set_spec_idx: usize,
         spec: &Spec<Tgt>,
         task_ref: Rc<RefCell<SpecTask<Tgt>>>,
-        visited_in_stage: &mut HashSet<Spec<Tgt>>,
+        visited_in_stage: &mut HashSet<usize>,
         outbox: &mut Vec<(Spec<Tgt>, ActionCostVec)>, // TODO: Make Option<Cost>
     ) {
         let db = &self.search.db;
@@ -386,18 +389,17 @@ where
         }
         let page_id_opt = db.can_memoize(spec).then(|| db.page_id(spec));
 
-        // collect to avoid keeping the borrow
-        if let Some(next_batch) = task.next_request_batch().map(|v| v.collect::<Vec<_>>()) {
+        if let Some(next_batch) = task.next_request_batch() {
             for (subspec, request_id) in next_batch {
-                let can_memoize = db.can_memoize(&subspec);
-                let in_same_page = match (page_id_opt.as_ref(), can_memoize) {
-                    (Some(pid), true) => pid.contains(&subspec),
-                    (None, false) => true, // Both non-memoizable
+                let subspec_page_id = db.can_memoize(&subspec).then(|| db.page_id(&subspec));
+                let in_same_page = match (page_id_opt.as_ref(), subspec_page_id.as_ref()) {
+                    (Some(pid), Some(subspec_pid)) => pid == subspec_pid,
+                    (None, None) => true, // Both non-memoizable
                     _ => false,
                 };
                 if in_same_page {
                     let (subspec_idx, subtask) = self.get_task_internal(&subspec);
-                    if visited_in_stage.insert(subspec.clone()) {
+                    if visited_in_stage.insert(subspec_idx) {
                         self.visit_next_request_batch(
                             subspec_idx,
                             &subspec,
@@ -434,7 +436,12 @@ where
                         }
                     };
                 } else {
-                    self.add_request_mapping_external(working_set_spec_idx, &subspec, request_id);
+                    self.add_request_mapping_external(
+                        working_set_spec_idx,
+                        subspec,
+                        subspec_page_id,
+                        request_id,
+                    );
                 }
             }
         }
@@ -532,14 +539,15 @@ where
     fn add_request_mapping_external(
         &mut self,
         working_set_spec_idx: usize,
-        subspec: &Spec<Tgt>,
+        subspec: Spec<Tgt>,
+        subspec_page: Option<PageId<'d>>,
         request_id: RequestId,
     ) {
-        let request_set = if self.search.db.can_memoize(subspec) {
-            let subspec_page = self.search.db.page_id(subspec);
-            let matching_idx = self.subblock_requests.iter().position(|subblock| {
-                let existing_spec = subblock.keys().next().unwrap();
-                self.search.db.can_memoize(existing_spec) && subspec_page.contains(existing_spec)
+        let request_set = if let Some(subspec_page) = subspec_page {
+            let matching_idx = self.subblock_page_ids.iter().position(|page_id_opt| {
+                page_id_opt
+                    .as_ref()
+                    .is_some_and(|page_id| page_id == &subspec_page)
             });
             if let Some(idx) = matching_idx {
                 self.subblock_requests.get_mut(idx).unwrap()
@@ -551,14 +559,14 @@ where
                         self.search.db.prefetch(requesting_spec);
                     }
                 }
-                self.new_subblock_request_set()
+                self.new_subblock_request_set(Some(subspec_page))
             }
         } else {
             // Always create a fresh subblock for unmemoizable specs to avoid page computations.
-            self.new_subblock_request_set()
+            self.new_subblock_request_set(None)
         };
         request_set
-            .entry(subspec.clone())
+            .entry(subspec)
             .or_default()
             .push((working_set_spec_idx, request_id));
     }
@@ -566,8 +574,11 @@ where
     /// Allocate and return a fresh subblock request map.
     fn new_subblock_request_set(
         &mut self,
+        page_id: Option<PageId<'d>>,
     ) -> &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>> {
+        debug_assert_eq!(self.subblock_requests.len(), self.subblock_page_ids.len());
         self.subblock_requests.push(HashMap::new());
+        self.subblock_page_ids.push(page_id);
         self.subblock_requests
             .last_mut()
             .expect("newly pushed subblock should exist")
@@ -589,9 +600,9 @@ impl<Tgt: Target> SpecTask<Tgt> {
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         let mut reducer = ImplReducer::new(search.top_k, preferences.unwrap_or_default());
-        let mut max_children = 0;
         let mut partial_impls = Vec::new();
         let mut partial_impls_incomplete = 0;
+        let mut request_batches: Vec<Vec<(Spec<Tgt>, RequestId)>> = Vec::new();
 
         let all_actions = Tgt::actions(&goal.0).collect::<Vec<_>>();
         let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
@@ -603,7 +614,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
                     let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
 
                     let subspec_count = partial_impl_subspecs.len();
-                    max_children = max_children.max(subspec_count);
 
                     // If the resulting Impl is already complete, update the reducer. If there
                     // are nested sub-Specs, then store the partial Impl for resolution by the
@@ -614,9 +624,16 @@ impl<Tgt: Target> SpecTask<Tgt> {
                             solver.compute_cost(iter::empty()),
                         );
                     } else {
+                        let working_impl_idx = partial_impls.len();
+                        if request_batches.len() < subspec_count {
+                            request_batches.resize_with(subspec_count, Vec::new);
+                        }
+                        for (child_idx, subspec) in partial_impl_subspecs.into_iter().enumerate() {
+                            request_batches[child_idx]
+                                .push((subspec, (working_impl_idx, child_idx)));
+                        }
                         partial_impls.push(WorkingPartialImpl::Constructing {
                             solver,
-                            subspecs: partial_impl_subspecs,
                             subspec_costs: vec![None; subspec_count],
                             producing_action_num: action_num.try_into().unwrap(),
                         });
@@ -633,9 +650,9 @@ impl<Tgt: Target> SpecTask<Tgt> {
         } else {
             SpecTask::Running {
                 reducer,
-                max_children,
                 partial_impls,
                 partial_impls_incomplete,
+                request_batches,
                 request_batches_returned: 0,
             }
         }
@@ -645,34 +662,33 @@ impl<Tgt: Target> SpecTask<Tgt> {
     ///
     /// This will return `None` when all dependencies are resolved and the goal is computed.
     /// The caller should continue to call [next_request_batch] if an empty iterator is returned.
-    fn next_request_batch(&mut self) -> Option<impl Iterator<Item = (Spec<Tgt>, RequestId)> + '_> {
+    fn next_request_batch(&mut self) -> Option<Vec<(Spec<Tgt>, RequestId)>> {
         // TODO: Define behavior for and document returning duplicates from this function.
 
         let SpecTask::Running {
             partial_impls,
+            request_batches,
             request_batches_returned,
-            max_children,
             ..
         } = self
         else {
             return None;
         };
-        if request_batches_returned == max_children {
+        if *request_batches_returned == request_batches.len() {
             return None;
         }
 
-        let subspec_idx = *request_batches_returned;
+        let batch_idx = *request_batches_returned;
         *request_batches_returned += 1;
+        let mut batch = take(&mut request_batches[batch_idx]);
+        batch.retain(|(_, (working_impl_idx, _))| {
+            matches!(
+                partial_impls[*working_impl_idx],
+                WorkingPartialImpl::Constructing { .. }
+            )
+        });
 
-        // TODO: Assert/test that we return unique Specs
-        Some(partial_impls.iter().enumerate().filter_map(move |(i, p)| {
-            let WorkingPartialImpl::Constructing { subspecs, .. } = p else {
-                return None;
-            };
-            subspecs
-                .get(subspec_idx)
-                .map(|s| (s.clone(), (i, subspec_idx)))
-        }))
+        Some(batch)
     }
 
     fn resolve_request(
@@ -688,8 +704,8 @@ impl<Tgt: Target> SpecTask<Tgt> {
             reducer,
             partial_impls,
             partial_impls_incomplete,
+            request_batches: _,
             request_batches_returned: _,
-            max_children: _,
         } = self
         else {
             panic!("Task is not running");
@@ -706,7 +722,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
         match entry {
             WorkingPartialImpl::Constructing {
                 solver,
-                subspecs: _,
                 subspec_costs,
                 producing_action_num,
             } => {
@@ -724,7 +739,9 @@ impl<Tgt: Target> SpecTask<Tgt> {
                             // Safe to move the child costs out here because this partial Impl is
                             // about to leave `Constructing` and its `subspec_costs` will not be
                             // read again.
-                            solver.compute_cost(&mut subspec_costs.iter_mut().map(|c| c.take().unwrap())),
+                            solver.compute_cost(
+                                &mut subspec_costs.iter_mut().map(|c| c.take().unwrap()),
+                            ),
                         );
                     }
                 } else {

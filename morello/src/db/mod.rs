@@ -77,6 +77,16 @@ pub struct PageId<'a> {
     pub(crate) page_id: Vec<BimapInt>, // TODO: Rename to page_pt
 }
 
+impl PartialEq for PageId<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.db, other.db)
+            && self.table_key == other.table_key
+            && self.page_id == other.page_id
+    }
+}
+
+impl Eq for PageId<'_> {}
+
 #[derive(Debug, Clone)]
 struct Page {
     contents: PageContents,
