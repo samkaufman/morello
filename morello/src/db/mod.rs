@@ -281,6 +281,22 @@ impl FilesDatabase {
 
         let mut query = query.clone();
         query.canonicalize().unwrap();
+        self.get_with_preference_canon(&query)
+    }
+
+    /// Like [Self::get_with_preference], but assumes `query` is already canonical.
+    ///
+    /// Passing a non-canonical [Spec] is a logic error.
+    pub(crate) fn get_with_preference_canon<Tgt>(
+        &self,
+        query: &Spec<Tgt>,
+    ) -> GetPreference<ActionCostVec, Vec<ActionNum>>
+    where
+        Tgt: Target,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        debug_assert!(query.is_canonical());
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = BiMap::apply(&bimap, &query);
@@ -304,6 +320,19 @@ impl FilesDatabase {
     {
         let mut query = query.clone();
         query.canonicalize().unwrap();
+        self.prefetch_canon(&query);
+    }
+
+    /// Like [Self::prefetch], but assumes `query` is already canonical.
+    ///
+    /// Passing a non-canonical [Spec] is a logic error.
+    pub(crate) fn prefetch_canon<Tgt>(&self, query: &Spec<Tgt>)
+    where
+        Tgt: Target,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        debug_assert!(query.is_canonical());
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = BiMap::apply(&bimap, &query);
@@ -346,6 +375,19 @@ impl FilesDatabase {
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         spec.canonicalize().unwrap();
+        self.put_canon(&spec, decisions);
+    }
+
+    /// Like [Self::put], but assumes `spec` is already canonical.
+    ///
+    /// Passing a non-canonical [Spec] is a logic error.
+    pub(crate) fn put_canon<Tgt>(&self, spec: &Spec<Tgt>, decisions: Vec<(ActionNum, Cost)>)
+    where
+        Tgt: Target,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        debug_assert!(spec.is_canonical());
 
         // Check that all costs in decisions have peak memory less than or equal to spec's
         // memory limits.

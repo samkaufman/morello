@@ -84,11 +84,6 @@ enum ImplReducerResults {
     Many(BTreeSet<(Cost, ActionNum)>),
 }
 
-enum RequestsMapRef<'a, Tgt: Target> {
-    Internal(&'a mut HashMap<usize, Vec<WorkingPartialImplHandle>>),
-    External(&'a mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>),
-}
-
 // Computes an optimal Impl for `goal` and stores it in `db`.
 pub fn top_down<Tgt>(db: &FilesDatabase, goal: &Spec<Tgt>, top_k: usize) -> Vec<(ActionNum, Cost)>
 where
@@ -250,7 +245,7 @@ where
                 .into_iter()
                 .zip(replace(&mut block.subblock_page_ids, new_page_ids))
                 .peekable();
-            while let Some((mut subblock, _)) = subblock_reqs_iter.next() {
+            while let Some((subblock, _)) = subblock_reqs_iter.next() {
                 // TODO: Move prefetch so that it happens after the get inside the recursive call.
                 let mut prefetch_to_push_down: Option<&Spec<Tgt>> = None;
                 match subblock_reqs_iter.peek() {
@@ -258,17 +253,30 @@ where
                     None => {
                         if let Some(prefetch_after) = prefetch_after.as_ref() {
                             if search.db.can_memoize(prefetch_after) {
-                                search.db.prefetch(prefetch_after);
+                                search.db.prefetch_canon(prefetch_after);
                             }
                         }
                     }
                 }
 
-                let subblock_goals = subblock.keys().cloned().collect::<Vec<_>>();
+                let mut subblock_goals = Vec::with_capacity(subblock.len());
+                let mut subblock_requesters = Vec::with_capacity(subblock.len());
+                for (subspec, requesters) in subblock {
+                    subblock_goals.push(subspec);
+                    subblock_requesters.push(requesters);
+                }
                 let subblock_results =
                     Self::synthesize(&subblock_goals, search, prefetch_to_push_down);
-                for (subspec, subspec_result) in subblock_goals.into_iter().zip(subblock_results) {
-                    block.resolve_request_external(&mut subblock, &subspec, subspec_result);
+                for (requesters, subspec_result) in
+                    subblock_requesters.into_iter().zip(subblock_results)
+                {
+                    Self::resolve_requesters(
+                        &block.working_set,
+                        &mut block.working_set_running,
+                        requesters,
+                        &mut block.working_block_requests,
+                        subspec_result,
+                    );
                 }
             }
 
@@ -339,7 +347,7 @@ where
             indexmap::map::Entry::Occupied(e) => (e.index(), Rc::clone(e.get())),
             indexmap::map::Entry::Vacant(e) => {
                 let preferences = if can_memoize {
-                    match self.search.db.get_with_preference(spec) {
+                    match self.search.db.get_with_preference_canon(spec) {
                         GetPreference::Hit(v) => {
                             // TODO: Re-enable search hits and misses tracking
                             // search.hits += 1;
@@ -452,24 +460,8 @@ where
         Self::inner_resolve_request(
             &self.working_set,
             &mut self.working_set_running,
-            RequestsMapRef::Internal(&mut self.working_block_requests),
+            &mut self.working_block_requests,
             None,
-            subspec,
-            results,
-        );
-    }
-
-    fn resolve_request_external(
-        &mut self,
-        subblock: &mut HashMap<Spec<Tgt>, Vec<WorkingPartialImplHandle>>,
-        subspec: &Spec<Tgt>,
-        results: ActionCostVec,
-    ) {
-        Self::inner_resolve_request(
-            &self.working_set,
-            &mut self.working_set_running,
-            RequestsMapRef::External(subblock),
-            Some(&mut self.working_block_requests),
             subspec,
             results,
         );
@@ -478,19 +470,33 @@ where
     fn inner_resolve_request(
         working_set: &IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
         working_set_running: &mut usize,
-        mut subblock: RequestsMapRef<Tgt>,
+        subblock: &mut HashMap<usize, Vec<WorkingPartialImplHandle>>,
         next_subblock: Option<&mut HashMap<usize, Vec<WorkingPartialImplHandle>>>,
         subspec: &Spec<Tgt>,
         results: ActionCostVec,
     ) {
-        let Some(rs) = subblock.remove(subspec, working_set) else {
+        let Some(rs) = subblock.remove(&working_set.get_index_of(subspec).unwrap()) else {
             return;
         };
 
-        let mut resolved_next_subblock = next_subblock
-            .map(RequestsMapRef::Internal)
-            .unwrap_or(subblock);
+        let resolved_next_subblock = next_subblock.map(|m| m).unwrap_or(subblock);
 
+        Self::resolve_requesters(
+            working_set,
+            working_set_running,
+            rs,
+            resolved_next_subblock,
+            results,
+        );
+    }
+
+    fn resolve_requesters(
+        working_set: &IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
+        working_set_running: &mut usize,
+        rs: Vec<WorkingPartialImplHandle>,
+        resolved_next_subblock: &mut HashMap<usize, Vec<WorkingPartialImplHandle>>,
+        results: ActionCostVec,
+    ) {
         let cost = results.0.into_iter().next().map(|v| v.1);
         for (requester_wb_spec_idx, request_id) in rs {
             let (wb_spec, requester_task) = working_set.get_index(requester_wb_spec_idx).unwrap();
@@ -499,18 +505,15 @@ where
             if matches!(&*requester, SpecTask::Running { .. }) {
                 requester.resolve_request(request_id, cost.clone());
                 if let SpecTask::Complete(completed_requester_results, _) = &*requester {
-                    // TODO: Avoid this clone by consuming the sub-block. (Do at the call site.)
+                    // TODO: Avoid this clone by threading completed requester results through
+                    // the recursive resolution path.
                     *working_set_running -= 1;
                     let cloned_results = completed_requester_results.clone();
                     drop(requester);
                     Self::inner_resolve_request(
                         working_set,
                         working_set_running,
-                        // TODO: Can we get rid of the following match? This is just a
-                        match &mut resolved_next_subblock {
-                            RequestsMapRef::Internal(m) => RequestsMapRef::Internal(m),
-                            RequestsMapRef::External(m) => RequestsMapRef::External(m),
-                        },
+                        &mut *resolved_next_subblock,
                         None,
                         wb_spec,
                         cloned_results,
@@ -557,7 +560,7 @@ where
                     let requesting_spec =
                         self.working_set.get_index(working_set_spec_idx).unwrap().0;
                     if self.search.db.can_memoize(requesting_spec) {
-                        self.search.db.prefetch(requesting_spec);
+                        self.search.db.prefetch_canon(requesting_spec);
                     }
                 }
                 self.new_subblock_request_set(Some(subspec_page))
@@ -857,19 +860,6 @@ impl ImplReducer {
     }
 }
 
-impl<Tgt: Target> RequestsMapRef<'_, Tgt> {
-    fn remove(
-        &mut self,
-        key: &Spec<Tgt>,
-        working_set: &IndexMap<Spec<Tgt>, Rc<RefCell<SpecTask<Tgt>>>>,
-    ) -> Option<Vec<WorkingPartialImplHandle>> {
-        match self {
-            RequestsMapRef::Internal(m) => m.remove(&working_set.get_index_of(key).unwrap()),
-            RequestsMapRef::External(m) => m.remove(key),
-        }
-    }
-}
-
 fn process_complete_task<Tgt>(
     search: &TopDownSearch<'_, Tgt>,
     spec: &Spec<Tgt>,
@@ -886,7 +876,7 @@ where
     let action_costs = take(task_result);
     if !*from_db {
         if search.db.can_memoize(spec) {
-            search.db.put(spec.clone(), action_costs.0.clone());
+            search.db.put_canon(spec, action_costs.0.clone());
         } else {
             search
                 .nonmemo_cache
