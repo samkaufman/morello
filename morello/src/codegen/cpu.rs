@@ -24,9 +24,9 @@ use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
 use crate::target::{
     cpu::{
-        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size,
-        softmax_vector_size, vector_max_loop_properties, x86_f32_horizontal_max_helper,
-        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
+        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, softmax_vector_size,
+        vector_max_loop_properties, x86_f32_horizontal_max_helper, DOT_PRODUCT_BF16_STRIP_SIZE,
+        DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
     CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
 };
@@ -92,10 +92,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
-    fn require_x86_f32_horizontal_max_helper(
-        &mut self,
-        vector_size: DimSize,
-    ) -> &'static str {
+    fn require_x86_f32_horizontal_max_helper(&mut self, vector_size: DimSize) -> &'static str {
         let helper = x86_f32_horizontal_max_helper(vector_size);
         if helper == "horizontal_max_f32" {
             self.headers.emit_max = true;
