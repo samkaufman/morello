@@ -5,7 +5,8 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::{row_major, Layout};
 use crate::scheduling::{
-    check_tile_out_applies, tile_to_apply_err, ActionT, ApplyError, NotApplicableReason,
+    check_tile_out_applies, tile_to_apply_err, ActionSolver, ActionT, ApplyError,
+    NotApplicableReason, TileOutSolver,
 };
 use crate::spec::{
     CanonicalizeError, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
@@ -40,6 +41,21 @@ pub struct Split {
     pub k: DimSize,
 }
 
+/// Shared TileOut tiling/binding data computed by [TileOut::infer_tiling].
+///
+/// [ActionT::top_down_solver] uses this to derive child Specs and loop full-step counts
+/// without building [LoopTile]s, while [ActionT::apply_unchecked_canon] uses the same
+/// data to construct the loop tiles and bodies.
+#[derive(Debug)]
+struct TileOutTilingInference {
+    output_index: usize,
+    parallel: bool,
+    main_output_tiling: Tiling,
+    main_input_tilings: Vec<(Tiling, Vec<Option<u8>>)>,
+    main_component_parameter_shapes: Vec<Vec<Shape>>,
+    boundary_region_ids: Vec<NonZeroUsize>,
+}
+
 impl TileOut {
     fn parallel(&self) -> bool {
         match self {
@@ -51,185 +67,137 @@ impl TileOut {
 
 impl<Tgt: Target> ActionT<Tgt> for TileOut {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
-        let logical_spec = &spec.0;
-        let operands = logical_spec.parameters();
-
-        let parallel = self.parallel();
-        if parallel && !operands.iter().all(|o| o.memory().can_parallel_tile()) {
-            return Err(ApplyError::NotApplicable(
-                NotApplicableReason::LevelPreventedParallel,
-            ));
-        }
-
         // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
         if let Some(daufm_result) = tile_out_daufm(spec, self) {
             return daufm_result;
-        };
-
-        let Some(output_idx) = logical_spec.unique_output_index() else {
-            return Err(ApplyError::NotApplicable(
-                NotApplicableReason::MultipleOutputs,
-            ));
-        };
-
-        let current_output = &operands[output_idx];
-        let current_out_shape = current_output.shape();
-        let rank = current_out_shape.len();
-
-        let output_shape = self.tiled_output_shape(current_out_shape);
-
-        // TODO: Move assertions into solver() as well.
-        if parallel && logical_spec.serial_only() {
-            return Err(ApplyError::NotApplicable(NotApplicableReason::SerialOnly));
         }
-        assert_eq!(
-            output_shape.len(),
-            current_out_shape.len(),
-            "Expected {} dimensions; got {}",
-            current_out_shape.len(),
-            output_shape.len()
-        );
-        check_tile_out_applies(current_out_shape, &output_shape, current_output, parallel)?;
 
-        // Tiling happens in three steps:
-        // 1. Construct the simple tile corresponding to the new output shape.
-        let output_idx_u8 = u8::try_from(output_idx).unwrap();
-        let smaller_output_tiling = Tiling::new_simple(output_shape.either_into());
-        let smaller_output = LoopTile {
-            parameter_index: output_idx_u8,
-            axes: (0..u8::try_from(rank).unwrap()).collect(),
-            tile: smaller_output_tiling
-                .apply_main(Param::new(output_idx_u8, current_output.clone()))
-                .map(|v| v.boxed_viewe())
+        let logical_spec = &spec.0;
+        let TileOutTilingInference {
+            output_index,
+            parallel,
+            main_output_tiling,
+            main_input_tilings,
+            main_component_parameter_shapes,
+            boundary_region_ids,
+        } = self.infer_tiling(spec)?;
+        let current_out_shape = logical_spec.parameter_shape(output_index);
+        let main_body_spec =
+            build_tile_out_body_spec(spec, &main_component_parameter_shapes, parallel)?;
+        let operands = logical_spec.parameters();
+        let mut main_tiles =
+            input_tiles_for_tile_out(&operands, main_input_tilings, output_index, parallel)?;
+        let output_index_u8 = u8::try_from(output_index).unwrap();
+        main_tiles.push(LoopTile {
+            parameter_index: output_index_u8,
+            axes: (0..u8::try_from(main_output_tiling.shape().len()).unwrap()).collect(),
+            tile: main_output_tiling
+                .apply_main(Param::new(output_index_u8, operands[output_index].clone()))
+                .map(|view| view.boxed_viewe())
                 .map_err(tile_to_apply_err)?,
-        };
+        });
 
-        // 2. Construct tilings which respect the data deps. of the new output tile.
-        let Some(LogicalSpecInputTilingInference {
-            input_tilings,
-            component_parameter_shapes: component_input_tilings,
-        }) = logical_spec.input_tilings_for_tile_out(&smaller_output_tiling)
-        else {
-            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                "Tiling doesn't apply to logical Spec",
-            ))));
-        };
+        let mut bodies = Vec::with_capacity(boundary_region_ids.len() + 1);
+        bodies.push(spec_app_with_tiles(main_body_spec, &main_tiles).into());
+        for region_id in boundary_region_ids {
+            let region_output_tiling =
+                create_region_output_tiling(&current_out_shape, &main_output_tiling, region_id);
+            let Some(LogicalSpecInputTilingInference {
+                input_tilings,
+                component_parameter_shapes,
+            }) = logical_spec.input_tilings_for_tile_out(&region_output_tiling)
+            else {
+                return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                    "Tiling doesn't apply to logical Spec for boundary region",
+                ))));
+            };
+            bodies.push(
+                spec_app_with_boundary_tiles(
+                    spec,
+                    output_index,
+                    &main_output_tiling,
+                    build_tile_out_body_spec(spec, &component_parameter_shapes, false)?,
+                    region_id,
+                    input_tilings.0,
+                )?
+                .into(),
+            );
+        }
 
-        // 3. Reify the tilings into Tiles we'll store with this action. Tiles objects track
-        // the index and shape of the Impl parameter being tiled.
-        let mut new_tiles =
-            input_tiles_for_tile_out(&operands, input_tilings.0, output_idx, parallel)?;
-        new_tiles.push(smaller_output);
-        tile_out_loop_spec_with_shrunken_tiles(component_input_tilings, new_tiles, parallel, spec)
+        Ok(ImplNode::Loop(Loop {
+            tiles: main_tiles,
+            bodies,
+            parallel,
+            spec: Some(spec.clone()),
+        }))
     }
 
-    // fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
-    //     if self.parallel() {
-    //         for idx in 0..spec.0.operand_count() {
-    //             if !spec.0.parameter_memory(idx).can_parallel_tile() {
-    //                 return Err(ApplyError::NotApplicable(
-    //                     NotApplicableReason::LevelPreventedParallel,
-    //                 ));
-    //             }
-    //         }
-    //     }
-    //
-    //     match &spec.0 {
-    //         LogicalSpec::Primitive(basics, ..) => {
-    //             // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
-    //             if tile_out_daufm(spec, self).is_some() {
-    //                 todo!("Implement solver for SoftmaxDenominatorAndUnscaledFromMax");
-    //             };
-    //
-    //             let Some(output_tensor) = spec.0.unique_output() else {
-    //                 return Err(ApplyError::NotApplicable(
-    //                     NotApplicableReason::MultipleOutputs,
-    //                 ));
-    //             };
-    //             let untiled_output_shape = output_tensor.shape();
-    //             let tile_shape = self.tiled_output_shape(untiled_output_shape);
-    //             let parallel = self.parallel();
-    //
-    //             check_tile_out_applies(
-    //                 untiled_output_shape,
-    //                 &tile_shape,
-    //                 &output_tensor,
-    //                 parallel,
-    //             )?;
-    //
-    //             // Check if any dimension will create boundary regions
-    //             // This happens when tile size doesn't evenly divide the untiled size
-    //             let will_have_boundaries = tile_shape
-    //                 .iter()
-    //                 .zip(untiled_output_shape.iter())
-    //                 .any(|(tile_size, untiled_size)| untiled_size.get() % tile_size.get() != 0);
-    //
-    //             match basics.typ {
-    //                 PrimitiveSpecType::Matmul { .. } => {
-    //                     if will_have_boundaries {
-    //                         // TODO: Speed up this path.
-    //                         let slow_path_impl = self.apply_unchecked_canon(spec)?;
-    //                         let mut slow_path_subspecs = Vec::new();
-    //                         collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: slow_path_subspecs,
-    //                         }
-    //                         .into());
-    //                     } else {
-    //                         let main_body_spec = ActionSolver::tiled_subspec_fast(
-    //                             [(0, 0), (1, 1), (3, 2)].into_iter(),
-    //                             spec,
-    //                             &tile_shape,
-    //                             parallel,
-    //                         )?;
-    //
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: vec![main_body_spec],
-    //                         }
-    //                         .into());
-    //                     }
-    //                 }
-    //                 PrimitiveSpecType::Move
-    //                 | PrimitiveSpecType::Fill {
-    //                     value: FillValue::Zero,
-    //                 } => {
-    //                     if will_have_boundaries {
-    //                         // TODO: Speed up this path.
-    //                         let slow_path_impl = self.apply_unchecked_canon(spec)?;
-    //                         let mut slow_path_subspecs = Vec::new();
-    //                         collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: slow_path_subspecs,
-    //                         }
-    //                         .into());
-    //                     } else {
-    //                         let rank = basics.spec_shape.len();
-    //                         let main_body_spec = ActionSolver::tiled_subspec_fast(
-    //                             (0..rank).map(|i| (i, i)),
-    //                             spec,
-    //                             &tile_shape,
-    //                             parallel,
-    //                         )?;
-    //
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: vec![main_body_spec],
-    //                         }
-    //                         .into());
-    //                     }
-    //                 }
-    //                 _ => {}
-    //             }
-    //         }
-    //         LogicalSpec::Compose { .. } => {}
-    //     };
-    //
-    //     self.apply_unchecked_canon(spec)
-    //         .map(|applied| ActionSolver::Fallback(Box::new(applied)))
-    // }
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+        if tile_out_daufm(spec, self).is_some() {
+            return self
+                .apply_unchecked_canon(spec)
+                .map(|applied| ActionSolver::Fallback(Box::new(applied)));
+        }
+
+        debug_assert!(!matches!(
+            spec.0,
+            LogicalSpec::Primitive(
+                PrimitiveBasics {
+                    typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                        accum: true,
+                        ..
+                    },
+                    ..
+                },
+                ..,
+            )
+        ));
+
+        let TileOutTilingInference {
+            output_index,
+            parallel,
+            main_output_tiling,
+            main_input_tilings,
+            main_component_parameter_shapes,
+            boundary_region_ids,
+        } = self.infer_tiling(spec)?;
+        let current_out_shape = spec.0.parameter_shape(output_index);
+        let mut body_specs = vec![build_tile_out_body_spec(
+            spec,
+            &main_component_parameter_shapes,
+            parallel,
+        )?];
+
+        for region_id in boundary_region_ids {
+            let region_output_tiling =
+                create_region_output_tiling(&current_out_shape, &main_output_tiling, region_id);
+            let Some(LogicalSpecInputTilingInference {
+                component_parameter_shapes,
+                ..
+            }) = spec.0.input_tilings_for_tile_out(&region_output_tiling)
+            else {
+                return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                    "Tiling doesn't apply to logical Spec for boundary region",
+                ))));
+            };
+            body_specs.push(build_tile_out_body_spec(
+                spec,
+                &component_parameter_shapes,
+                false,
+            )?);
+        }
+
+        Ok(ActionSolver::TileOut(Box::new(TileOutSolver {
+            body_specs,
+            loop_main_axis_full_steps: tile_out_main_loop_axis_full_steps(
+                &spec.0,
+                output_index,
+                &main_output_tiling,
+                &main_input_tilings,
+            )?,
+            parallel,
+        })))
+    }
 }
 
 impl TileOut {
@@ -252,6 +220,62 @@ impl TileOut {
                 parallel: _,
             } => Either::Right(output_shape),
         }
+    }
+
+    fn infer_tiling<Tgt: Target>(
+        &self,
+        spec: &Spec<Tgt>,
+    ) -> Result<TileOutTilingInference, ApplyError> {
+        let parallel = self.parallel();
+        if parallel
+            && (0..spec.0.operand_count())
+                .any(|idx| !spec.0.parameter_memory(idx).can_parallel_tile())
+        {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::LevelPreventedParallel,
+            ));
+        }
+
+        let Some(output_idx) = spec.0.unique_output_index() else {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::MultipleOutputs,
+            ));
+        };
+
+        let current_out_shape = spec.0.parameter_shape(output_idx);
+        let tile_output_shape = self.tiled_output_shape(&current_out_shape);
+
+        if parallel && spec.0.serial_only() {
+            return Err(ApplyError::NotApplicable(NotApplicableReason::SerialOnly));
+        }
+        check_tile_out_applies(
+            &current_out_shape,
+            &tile_output_shape,
+            spec.0.parameter_aux(output_idx),
+            parallel,
+        )?;
+
+        let main_tiled_output_tiling = Tiling::new_simple(tile_output_shape.either_into());
+        let Some(LogicalSpecInputTilingInference {
+            input_tilings,
+            component_parameter_shapes,
+        }) = spec.0.input_tilings_for_tile_out(&main_tiled_output_tiling)
+        else {
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "Tiling doesn't apply to logical Spec",
+            ))));
+        };
+
+        let boundary_region_ids =
+            boundary_region_ids(&current_out_shape, &main_tiled_output_tiling);
+        Ok(TileOutTilingInference {
+            output_index: output_idx,
+            parallel,
+            main_output_tiling: main_tiled_output_tiling,
+            main_input_tilings: input_tilings.0,
+            main_component_parameter_shapes: component_parameter_shapes,
+            boundary_region_ids,
+        })
     }
 }
 
@@ -414,7 +438,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                         .collect();
 
                     let mut bodies = Vec::<ImplNode<_>>::with_capacity(boundary_tiles.len() + 1);
-                    bodies.push(create_main_body(&tiles, &[new_shapes], false, spec)?.into());
+                    bodies.push(create_main_body(spec, &tiles, &[new_shapes], false)?.into());
 
                     for boundary_tile in boundary_tiles {
                         let boundary_new_shapes: Vec<_> =
@@ -568,7 +592,7 @@ fn tile_out_daufm<Tgt: Target>(
     if let Err(e) = check_tile_out_applies(
         current_out_shape,
         &new_output_shape,
-        current_output,
+        &current_output.aux,
         tileout.parallel(),
     ) {
         return Some(Err(e));
@@ -614,7 +638,7 @@ fn tile_out_daufm<Tgt: Target>(
                 new_output_shape.either_into(),         // parameter 3: unscaled output
             ]];
             let main_body =
-                match create_main_body(&new_tiles, &component_parameter_shapes, false, spec) {
+                match create_main_body(spec, &new_tiles, &component_parameter_shapes, false) {
                     Ok(body) => body,
                     Err(e) => return Some(Err(e)),
                 };
@@ -630,33 +654,181 @@ fn tile_out_daufm<Tgt: Target>(
     }
 }
 
-/// Returns a [Loop] with a smaller sub-Spec application.
-fn tile_out_loop_spec_with_shrunken_tiles<Tgt: Target>(
-    component_parameter_shapes: Vec<Vec<Shape>>,
-    tiles: Vec<LoopTile<Tgt>>,
-    parallel: bool,
+fn build_tile_out_body_spec<Tgt: Target>(
     spec: &Spec<Tgt>,
-) -> Result<ImplNode<Tgt>, ApplyError> {
-    let main_body = create_main_body(&tiles, &component_parameter_shapes, parallel, spec)?;
-    let boundary_bodies = create_tile_out_boundary_regions(&tiles, spec)?;
-    let bodies: Vec<_> = once(main_body.into()).chain(boundary_bodies).collect();
-    Ok(ImplNode::Loop(Loop {
-        tiles,
-        bodies,
-        parallel,
-        spec: Some(spec.clone()),
-    }))
+    component_parameter_shapes: &[Vec<Shape>],
+    parallel: bool,
+) -> Result<Spec<Tgt>, ApplyError> {
+    let mut body_logicalspec = spec.0.clone();
+    update_component_shapes(&mut body_logicalspec, component_parameter_shapes)?;
+    body_logicalspec.set_serial_only(body_logicalspec.serial_only() || parallel);
+    body_logicalspec
+        .canonicalize()
+        .map_err(spec_canonicalize_to_apply_err)?;
+    Ok(Spec(body_logicalspec, spec.1.clone()))
 }
 
-/// Creates a main body ImplNode by cloning the spec, updating component shapes, setting serial_only
-/// flag, and canonicalizing.
+fn spec_app_with_tiles<Tgt: Target>(
+    body_spec: Spec<Tgt>,
+    tiles: &[LoopTile<Tgt>],
+) -> SpecApp<ViewE<Tgt>> {
+    let mut spec_app = SpecApp::new_with_default_params(body_spec);
+    for loop_tile in tiles {
+        spec_app.1[usize::from(loop_tile.parameter_index)] = ViewE::Tile(loop_tile.tile.clone());
+    }
+    spec_app
+}
+
+/// Build the [SpecApp] body for a [TileOut]'s boundary region.
 ///
-/// Helper for [tile_out_loop_spec_with_shrunken_tiles].
+/// This starts from the default parameter views for `body_spec`, then replaces the
+/// tiled input and output arguments with [BoundaryTile] views derived from
+/// `input_tilings` and `region_id`.
+fn spec_app_with_boundary_tiles<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    output_index: usize,
+    main_output_tiling: &Tiling,
+    body_spec: Spec<Tgt>,
+    region_id: NonZeroUsize,
+    input_tilings: Vec<(Tiling, Vec<Option<u8>>)>,
+) -> Result<SpecApp<ViewE<Tgt>>, ApplyError> {
+    let operands = spec.0.parameters();
+    let mut spec_app = SpecApp::new_with_default_params(body_spec);
+
+    for (operand_idx, (original_input, (tiling, io_dim_bindings))) in
+        operands.iter().zip(input_tilings.into_iter()).enumerate()
+    {
+        if operand_idx == output_index {
+            continue;
+        }
+        if !original_input.is_valid_tile_shape(tiling.shape(), false) {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::TileShapeInvalid,
+            ));
+        }
+        if original_input.shape() == &tiling.shape()[..] {
+            continue;
+        }
+
+        let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
+        spec_app.1[operand_idx] = ViewE::BoundaryTile(convert_tile_to_boundarytile(
+            tiling
+                .apply_main(Param::new(operand_idx_u8, original_input.clone()))
+                .map(|view| view.boxed_viewe())
+                .map_err(tile_to_apply_err)?,
+            region_id,
+            original_input.shape(),
+            &io_dim_bindings,
+        ));
+    }
+
+    let output_tiling = create_region_output_tiling(
+        &spec.0.parameter_shape(output_index),
+        main_output_tiling,
+        region_id,
+    );
+    spec_app.1[output_index] = ViewE::BoundaryTile(convert_tile_to_boundarytile(
+        output_tiling
+            .apply_main(Param::new(
+                u8::try_from(output_index).unwrap(),
+                operands[output_index].clone(),
+            ))
+            .map(|view| view.boxed_viewe())
+            .map_err(tile_to_apply_err)?,
+        region_id,
+        operands[output_index].shape(),
+        &(0..output_tiling.shape().len())
+            .map(|dim| Some(u8::try_from(dim).unwrap()))
+            .collect::<Vec<_>>(),
+    ));
+
+    Ok(spec_app)
+}
+
+fn boundary_region_ids(
+    original_output_shape: &[DimSize],
+    output_tiling: &Tiling,
+) -> Vec<NonZeroUsize> {
+    let per_axis_bitvectors: Vec<_> = output_tiling
+        .shape()
+        .iter()
+        .enumerate()
+        .filter_map(|(dim_idx, &tile_size)| {
+            let original_size = original_output_shape[dim_idx].get();
+            (!original_size.is_multiple_of(tile_size.get())).then_some(1_usize << dim_idx)
+        })
+        .collect();
+    bitvector_combinations(&per_axis_bitvectors)
+        .map(|region_id| NonZeroUsize::new(region_id).unwrap())
+        .collect()
+}
+
+/// Return the per-axis full-tile iteration counts for [TileOut]'s main loop body.
+///
+/// The returned vector is indexed by loop axis, not by output tensor dimension. This
+/// matches the axis space used by [LoopTile::axes].
+fn tile_out_main_loop_axis_full_steps<Tgt: Target>(
+    logical_spec: &LogicalSpec<Tgt>,
+    output_index: usize,
+    output_tiling: &Tiling,
+    input_tilings_and_bindings: &[(Tiling, Vec<Option<u8>>)],
+) -> Result<Vec<u32>, ApplyError> {
+    let output_shape = logical_spec.parameter_shape(output_index);
+    let output_rank = output_shape.len();
+    let mut next_fresh_loop_dim = u8::try_from(output_rank).unwrap();
+    let mut full_steps_by_axis = vec![None; output_rank];
+
+    for (operand_idx, (tiling, axes_binding)) in input_tilings_and_bindings.iter().enumerate() {
+        if operand_idx == output_index {
+            continue;
+        }
+        let original_shape = logical_spec.parameter_shape(operand_idx);
+        let aux = logical_spec.parameter_aux(operand_idx);
+        if aux.memory.has_layout() && !aux.layout.applies_to_shape(tiling.shape()) {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::TileShapeInvalid,
+            ));
+        }
+        if original_shape[..] == tiling.shape()[..] {
+            continue;
+        }
+
+        for (dim_idx, binding) in axes_binding.iter().enumerate() {
+            let axis = match *binding {
+                Some(output_dim) => output_dim,
+                None => {
+                    let fresh = next_fresh_loop_dim;
+                    next_fresh_loop_dim += 1;
+                    full_steps_by_axis.push(None);
+                    fresh
+                }
+            };
+            let full_steps = original_shape[dim_idx].get() / tiling.step_sizes()[dim_idx].get();
+            let slot = &mut full_steps_by_axis[usize::from(axis)];
+            if slot.is_none() {
+                *slot = Some(full_steps);
+            }
+        }
+    }
+
+    for (dim_idx, &origin_size) in output_shape.iter().enumerate() {
+        let full_steps = origin_size.get() / output_tiling.step_sizes()[dim_idx].get();
+        let slot = &mut full_steps_by_axis[dim_idx];
+        if slot.is_none() {
+            *slot = Some(full_steps);
+        }
+    }
+
+    Ok(full_steps_by_axis.into_iter().flatten().collect())
+}
+
+/// Creates a main body [SpecApp] by cloning `spec`, updating component shapes, setting
+/// `serial_only`, and canonicalizing.
 fn create_main_body<Tgt: Target>(
+    spec: &Spec<Tgt>,
     tiles: &[LoopTile<Tgt>],
     component_parameter_shapes: &[Vec<Shape>],
     parallel: bool,
-    spec: &Spec<Tgt>,
 ) -> Result<SpecApp<ViewE<Tgt>>, ApplyError> {
     // Clone the parent and update its parameters with new shapes (passed in) from
     // [LogicalSpec::input_tilings_for_tile_out] as well as the given `parallel` flag.
@@ -666,175 +838,12 @@ fn create_main_body<Tgt: Target>(
     main_body_logicalspec
         .canonicalize()
         .map_err(spec_canonicalize_to_apply_err)?;
-    let mut spec_app_arguments = main_body_logicalspec
-        .parameters()
-        .into_iter()
-        .enumerate()
-        .map(|(i, spec)| ViewE::Param(Param::new(u8::try_from(i).unwrap(), spec)))
-        .collect::<Vec<ViewE<Tgt>>>();
+    let mut spec_app =
+        SpecApp::new_with_default_params(Spec(main_body_logicalspec, spec.1.clone()));
     for loop_tile in tiles {
-        spec_app_arguments[usize::from(loop_tile.parameter_index)] =
-            ViewE::Tile(loop_tile.tile.clone());
+        spec_app.1[usize::from(loop_tile.parameter_index)] = ViewE::Tile(loop_tile.tile.clone());
     }
-    Ok(SpecApp::new(
-        Spec(main_body_logicalspec, spec.1.clone()),
-        spec_app_arguments,
-    ))
-}
-
-/// Generate bodies for different boundary regions based on the loop tiles.
-///
-/// Returns a vector of boundary region bodies.  The main region is not included in the
-/// returned vector.
-fn create_tile_out_boundary_regions<Tgt: Target>(
-    tiles: &[LoopTile<Tgt>],
-    spec: &Spec<Tgt>,
-) -> Result<Vec<ImplNode<Tgt>>, ApplyError> {
-    let output_index = spec
-        .0
-        .unique_output_index()
-        .expect("Spec should have a unique output");
-    let output_tile = tiles
-        .iter()
-        .find(|t| usize::from(t.parameter_index) == output_index)
-        .expect("a LoopTile should be attached to the output parameter");
-    let original_shape = spec.0.parameter_shape(output_index);
-
-    // per_axis_bitvectors contains values with a single bit set. The bit's index is a
-    // Spec axis that has a remainder when tiled.
-    let per_axis_bitvectors: Vec<_> = output_tile
-        .tile
-        .shape()
-        .iter()
-        .enumerate()
-        .filter_map(|(dim_idx, &tile_size)| {
-            // Check if this dimension has a remainder when tiled
-            let original_size = original_shape[dim_idx].get();
-            if !original_size.is_multiple_of(tile_size.get()) {
-                let actual_axis = output_tile.axes[dim_idx];
-                assert!(
-                    (actual_axis as u32) < usize::BITS,
-                    "Axis {} is too large for region ID representation (max {})",
-                    actual_axis,
-                    usize::BITS - 1
-                );
-                Some(1_usize << actual_axis)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let boundary_region_ids: Vec<usize> = bitvector_combinations(&per_axis_bitvectors).collect();
-
-    // Generate bodies for boundary regions
-    let mut bodies = Vec::with_capacity(boundary_region_ids.len());
-    for &region_id in &boundary_region_ids {
-        // Create tilings for this specific region
-        let region_output_tiling =
-            create_region_output_tiling(tiles, region_id.try_into().unwrap(), spec)?;
-
-        // Use input_tilings_for_tile_out to get the correct component parameter shapes
-        let Some(input_tilings_result) = spec.0.input_tilings_for_tile_out(&region_output_tiling)
-        else {
-            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                "Tiling doesn't apply to logical Spec for boundary region",
-            ))));
-        };
-
-        // Create the region spec with the adjusted shapes (without recursing into boundary regions)
-        let mut region_logical_spec = spec.0.clone();
-        update_component_shapes(
-            &mut region_logical_spec,
-            &input_tilings_result.component_parameter_shapes,
-        )?;
-        region_logical_spec
-            .canonicalize()
-            .map_err(spec_canonicalize_to_apply_err)?;
-
-        let operands = spec.0.parameters();
-        let mut boundary_tiles = Vec::<(u8, BoundaryTile<_>)>::new();
-        for (operand_idx, (original_input, (tiling, io_dim_bindings))) in operands
-            .iter()
-            .zip(input_tilings_result.input_tilings.0)
-            .enumerate()
-        {
-            if operand_idx == output_index {
-                continue;
-            }
-            if !original_input.is_valid_tile_shape(tiling.shape(), false) {
-                return Err(ApplyError::NotApplicable(
-                    NotApplicableReason::TileShapeInvalid,
-                ));
-            }
-
-            // TODO: Can we avoid this check by construction?
-            if original_input.shape() == &tiling.shape()[..] {
-                continue;
-            }
-
-            let operand_idx_u8 = u8::try_from(operand_idx).unwrap();
-            let input_tile_axes: Vec<Option<u8>> = io_dim_bindings
-                .iter()
-                .map(|&o| o.map(|output_dim| output_tile.axes[usize::from(output_dim)]))
-                .collect();
-            boundary_tiles.push((
-                operand_idx_u8,
-                convert_tile_to_boundarytile(
-                    tiling
-                        .apply_main(Param::new(operand_idx_u8, original_input.clone()))
-                        .map(|v| v.boxed_viewe())
-                        .map_err(tile_to_apply_err)?,
-                    region_id.try_into().unwrap(),
-                    original_input.shape(),
-                    &input_tile_axes,
-                ),
-            ));
-        }
-        boundary_tiles.push((
-            u8::try_from(output_index).unwrap(),
-            convert_tile_to_boundarytile(
-                region_output_tiling
-                    .apply_main(Param::new(
-                        u8::try_from(output_index).unwrap(),
-                        spec.0.parameters()[output_index].clone(),
-                    ))
-                    .map(|v| v.boxed_viewe())
-                    .map_err(tile_to_apply_err)?,
-                region_id.try_into().unwrap(),
-                spec.0.parameters()[output_index].shape(),
-                &output_tile
-                    .axes
-                    .iter()
-                    .copied()
-                    .map(Some)
-                    .collect::<Vec<_>>(),
-            ),
-        ));
-
-        let mut body_logicalspec = spec.0.clone();
-        update_component_shapes(
-            &mut body_logicalspec,
-            &input_tilings_result.component_parameter_shapes,
-        )?;
-        body_logicalspec.set_serial_only(body_logicalspec.serial_only());
-        body_logicalspec
-            .canonicalize()
-            .map_err(spec_canonicalize_to_apply_err)?;
-        let mut spec_app_arguments = body_logicalspec
-            .parameters()
-            .into_iter()
-            .enumerate()
-            .map(|(i, spec)| ViewE::Param(Param::new(u8::try_from(i).unwrap(), spec)))
-            .collect::<Vec<ViewE<Tgt>>>();
-        for (parameter_idx, boundary_tile) in boundary_tiles {
-            spec_app_arguments[usize::from(parameter_idx)] = ViewE::BoundaryTile(boundary_tile);
-        }
-        bodies.push(SpecApp::new(Spec(body_logicalspec, spec.1.clone()), spec_app_arguments).into())
-    }
-
-    debug_assert_eq!(bodies.len(), boundary_region_ids.len());
-    Ok(bodies)
+    Ok(spec_app)
 }
 
 /// Create [LoopTile]s corresponding to a set of input [Tiling]s and bindings.
@@ -886,32 +895,25 @@ fn input_tiles_for_tile_out<Tgt: Target>(
     Ok(new_tiles)
 }
 
-/// Create an output tiling for a specific boundary region
-fn create_region_output_tiling<Tgt: Target>(
-    tiles: &[LoopTile<Tgt>],
+/// Create an output [Tiling] for a specific boundary region.
+///
+/// `output_tiling` is the main, non-boundary output [Tiling] which the boundary-region
+/// [Tiling] is derived.
+fn create_region_output_tiling(
+    original_output_shape: &[DimSize],
+    output_tiling: &Tiling,
     region_id: NonZeroUsize,
-    spec: &Spec<Tgt>,
-) -> Result<crate::tiling::Tiling, ApplyError> {
-    let output_index = spec.0.unique_output_index().unwrap();
-    let output_tile = tiles
-        .iter()
-        .find(|t| usize::from(t.parameter_index) == output_index)
-        .unwrap();
-
-    let original_param = &spec.0.parameters()[output_tile.parameter_index as usize];
-    let original_param_shape = original_param.shape();
-
-    let mut region_tile_shape = original_param_shape.to_vec();
-    for (dim_idx, &tile_size) in output_tile.tile.shape().iter().enumerate() {
-        let original_size = original_param_shape[dim_idx];
-        let actual_axis = output_tile.axes[dim_idx];
-        if region_id.get() & (1_usize << actual_axis) != 0 {
+) -> Tiling {
+    let mut region_tile_shape = original_output_shape.to_vec();
+    for (dim_idx, &tile_size) in output_tiling.shape().iter().enumerate() {
+        let original_size = original_output_shape[dim_idx];
+        if region_id.get() & (1_usize << dim_idx) != 0 {
             let remainder = DimSize::new(original_size.get() % tile_size.get()).unwrap();
             region_tile_shape[dim_idx] = remainder;
         }
     }
-    debug_assert_ne!(region_tile_shape, original_param_shape);
-    Ok(Tiling::new_simple(region_tile_shape.into()))
+    debug_assert_ne!(region_tile_shape, original_output_shape);
+    Tiling::new_simple(region_tile_shape.into())
 }
 
 /// Updates the parameter shapes of a LogicalSpec to match the provided shapes.
@@ -1342,7 +1344,6 @@ fn spec_canonicalize_to_apply_err(canon_error: CanonicalizeError) -> ApplyError 
 mod tests {
     use super::*;
     use crate::common::Dtype;
-    use crate::imp::subspecs::SpecApp;
     use crate::imp::{loops::Loop, Impl, ImplNode};
     use crate::layout::{row_major, Layout, PhysDim};
     use crate::scheduling::{Action, ActionT, ApplyError, NotApplicableReason};

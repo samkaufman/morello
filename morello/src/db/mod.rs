@@ -299,7 +299,7 @@ impl FilesDatabase {
         debug_assert!(query.is_canonical());
 
         let bimap = self.spec_bimap();
-        let (table_key, global_pt) = BiMap::apply(&bimap, &query);
+        let (table_key, global_pt) = BiMap::apply(&bimap, query);
         let global_pt_u8 = global_pt
             .iter()
             .map(|&x| u8::try_from(x).unwrap())
@@ -309,7 +309,7 @@ impl FilesDatabase {
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let page: &Page = &self.load_live_page(&page_key);
-        page.contents.get_with_preference(&query, &global_pt_u8)
+        page.contents.get_with_preference(query, &global_pt_u8)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -335,7 +335,7 @@ impl FilesDatabase {
         debug_assert!(query.is_canonical());
 
         let bimap = self.spec_bimap();
-        let (table_key, global_pt) = BiMap::apply(&bimap, &query);
+        let (table_key, global_pt) = BiMap::apply(&bimap, query);
         let page_pt = blockify_point(&global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
@@ -403,7 +403,7 @@ impl FilesDatabase {
         self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
 
         let bimap = self.spec_bimap();
-        let (table_key, (bottom, top)) = put_range_to_fill(&bimap, &spec, &decisions);
+        let (table_key, (bottom, top)) = put_range_to_fill(&bimap, spec, &decisions);
 
         // Construct an iterator over all pages (tiles) to fill.
         let rank = bottom.len();

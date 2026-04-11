@@ -5,8 +5,8 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use crate::target::Target;
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::target::{Memory, Target};
+use crate::tensorspec::TensorSpecAux;
 
 use crate::views::{Param, Tensor, TileError, View, ViewE};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ pub trait ActionT<Tgt: Target> {
     /// Spec is a logic error.
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError>;
 
-    /// Returns a value which produces sub-Spec requests and compute a [Cost].
+    /// Returns a value which produces sub-Spec requests and computes a [Cost].
     ///
     /// This is functionally equivalent to calling [Action::apply] to produce a partial Impl and
     /// then gathering its sub-Specs and computing a cost, but is usually faster.
@@ -140,15 +140,16 @@ action_dispatch! {
 
 #[derive(Debug)]
 pub enum ActionSolver<Tgt: Target> {
-    PrimitiveTileOut(Box<PrimitiveTileOutSolver<Tgt>>),
+    TileOut(Box<TileOutSolver<Tgt>>),
     Move(Box<MoveActionSolver<Tgt>>),
     Fallback(Box<ImplNode<Tgt>>),
 }
 
 #[derive(Debug)]
-pub struct PrimitiveTileOutSolver<Tgt: Target> {
-    outer_spec: Spec<Tgt>,
+pub struct TileOutSolver<Tgt: Target> {
     body_specs: Vec<Spec<Tgt>>,
+    loop_main_axis_full_steps: Vec<u32>,
+    parallel: bool,
 }
 
 #[derive(Debug)]
@@ -189,7 +190,7 @@ pub enum NotApplicableReason {
 impl<Tgt: Target> ActionSolver<Tgt> {
     pub fn subspecs(&self) -> impl Iterator<Item = Spec<Tgt>> {
         match self {
-            ActionSolver::PrimitiveTileOut(solver) => {
+            ActionSolver::TileOut(solver) => {
                 // TODO: Avoid this clone
                 solver.body_specs.clone().into_iter()
             }
@@ -214,60 +215,23 @@ impl<Tgt: Target> ActionSolver<Tgt> {
         I: Iterator<Item = Cost>,
     {
         match self {
-            ActionSolver::PrimitiveTileOut(solver) => {
-                if solver.body_specs.is_empty() {
-                    unreachable!("PrimitiveTileOut should have at least one body spec");
-                }
-
-                let parallel =
-                    !solver.outer_spec.0.serial_only() && solver.body_specs[0].0.serial_only();
-                match &solver.outer_spec.0 {
-                    LogicalSpec::Primitive(
-                        PrimitiveBasics {
-                            typ:
-                                PrimitiveSpecType::Matmul { .. }
-                                | PrimitiveSpecType::Move
-                                | PrimitiveSpecType::Fill { .. },
-                            spec_shape,
-                            ..
-                        },
-                        ..,
-                    ) => {
-                        let LogicalSpec::Primitive(
-                            PrimitiveBasics {
-                                spec_shape: main_body_shape,
-                                ..
-                            },
-                            ..,
-                        ) = &solver.body_specs[0].0
-                        else {
-                            unreachable!();
-                        };
-
-                        let mut child_main_costs = Vec::with_capacity(solver.body_specs.len());
-                        let first_cost = child_costs.next().unwrap();
-                        let mut max_depth = 0;
-                        child_main_costs.push(first_cost.main);
-                        for child_cost in child_costs {
-                            child_main_costs.push(child_cost.main);
-                            max_depth = max_depth.max(child_cost.depth);
-                        }
-                        debug_assert_eq!(child_main_costs.len(), solver.body_specs.len());
-
-                        // per-axis (steps, full_steps) pairs for cost dispatch
-                        let dims: Vec<(u32, u32)> = spec_shape
-                            .iter()
-                            .zip(main_body_shape)
-                            .map(|(o, t)| (o.get().div_ceil(t.get()), o.get() / t.get()))
-                            .collect();
-
-                        let mut combined_cost = first_cost.clone();
-                        combined_cost.main =
-                            compute_loop_main_cost::<Tgt>(&dims, parallel, &child_main_costs);
-                        combined_cost.depth = max_depth + 1;
-                        combined_cost
-                    }
-                    _ => unreachable!(),
+            ActionSolver::TileOut(solver) => {
+                let child_costs = child_costs.collect::<Vec<_>>();
+                let child_main_costs = child_costs.iter().map(|cost| cost.main).collect::<Vec<_>>();
+                let child_peaks = child_costs
+                    .iter()
+                    .map(|cost| cost.peaks.clone())
+                    .collect::<Vec<_>>();
+                Cost {
+                    main: compute_loop_main_cost::<Tgt>(
+                        &solver.loop_main_axis_full_steps,
+                        solver.parallel,
+                        &child_main_costs,
+                    ),
+                    peaks: MemoryAllocation::none()
+                        .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
+                        .snap_up_for_target::<Tgt>(),
+                    depth: child_costs.iter().map(|cost| cost.depth).max().unwrap() + 1,
                 }
             }
             ActionSolver::Move(move_solver) => {
@@ -385,15 +349,15 @@ impl<Tgt: Target> From<Box<MoveActionSolver<Tgt>>> for ActionSolver<Tgt> {
     }
 }
 
-impl<Tgt: Target> From<PrimitiveTileOutSolver<Tgt>> for ActionSolver<Tgt> {
-    fn from(tile_out_solver: PrimitiveTileOutSolver<Tgt>) -> Self {
-        ActionSolver::PrimitiveTileOut(Box::new(tile_out_solver))
+impl<Tgt: Target> From<TileOutSolver<Tgt>> for ActionSolver<Tgt> {
+    fn from(tile_out_solver: TileOutSolver<Tgt>) -> Self {
+        ActionSolver::TileOut(Box::new(tile_out_solver))
     }
 }
 
-impl<Tgt: Target> From<Box<PrimitiveTileOutSolver<Tgt>>> for ActionSolver<Tgt> {
-    fn from(tile_out_solver: Box<PrimitiveTileOutSolver<Tgt>>) -> Self {
-        ActionSolver::PrimitiveTileOut(tile_out_solver)
+impl<Tgt: Target> From<Box<TileOutSolver<Tgt>>> for ActionSolver<Tgt> {
+    fn from(tile_out_solver: Box<TileOutSolver<Tgt>>) -> Self {
+        ActionSolver::TileOut(tile_out_solver)
     }
 }
 
@@ -478,7 +442,7 @@ fn make_accum_inits_for_spec<Tgt: Target>(spec: &Spec<Tgt>) -> Vec<ImplNode<Tgt>
 fn check_tile_out_applies<Tgt: Target>(
     current_out_shape: &[DimSize],
     output_shape: &[DimSize],
-    current_output: &TensorSpec<Tgt>,
+    current_output_aux: &TensorSpecAux<Tgt>,
     parallel: bool,
 ) -> Result<(), ApplyError> {
     if current_out_shape == output_shape {
@@ -498,7 +462,17 @@ fn check_tile_out_applies<Tgt: Target>(
 
     // Abort if it's invalid to tile the original output tensor
     // to the new shape (e.g., due to layout constraints).
-    if !current_output.is_valid_tile_shape(output_shape, parallel) {
+    if parallel
+        && !current_output_aux.memory.can_parallel_tile()
+        && current_out_shape != output_shape
+    {
+        return Err(ApplyError::NotApplicable(
+            NotApplicableReason::TileShapeInvalid,
+        ));
+    }
+    if current_output_aux.memory.has_layout()
+        && !current_output_aux.layout.applies_to_shape(output_shape)
+    {
         return Err(ApplyError::NotApplicable(
             NotApplicableReason::TileShapeInvalid,
         ));
@@ -672,12 +646,16 @@ fn tile_to_apply_err(err: TileError) -> ApplyError {
 mod tests {
     use super::*;
     use crate::{
+        common::DimSize,
         imp::ImplNode,
         memorylimits::MemVec,
+        shape,
         spec::arb_canonical_spec,
         target::{ArmTarget, Avx2Target},
+        tensorspec::{TensorSpec, TensorSpecArbMaxShape},
     };
     use proptest::prelude::*;
+    use proptest::strategy::Just;
 
     proptest! {
         // TODO: Add an ARM variant
@@ -741,6 +719,45 @@ mod tests {
         ) {
             shared_test_actions_do_not_introduce_self_nested_subspec(spec)?;
         }
+
+        #[test]
+        fn test_check_tile_out_applies_matches_removed_tile_shape_check_avx2(
+            (current_output, output_shape, parallel) in arb_tensorspec_and_tile_shape::<Avx2Target>(),
+        ) {
+            shared_test_check_tile_out_applies_matches_removed_tile_shape_check(
+                current_output,
+                output_shape,
+                parallel,
+            )?;
+        }
+
+        #[test]
+        fn test_check_tile_out_applies_matches_removed_tile_shape_check_arm(
+            (current_output, output_shape, parallel) in arb_tensorspec_and_tile_shape::<ArmTarget>(),
+        ) {
+            shared_test_check_tile_out_applies_matches_removed_tile_shape_check(
+                current_output,
+                output_shape,
+                parallel,
+            )?;
+        }
+    }
+
+    fn shared_test_check_tile_out_applies_matches_removed_tile_shape_check<Tgt: Target>(
+        current_output: TensorSpec<Tgt>,
+        output_shape: Vec<DimSize>,
+        parallel: bool,
+    ) -> Result<(), TestCaseError> {
+        if !current_output.is_valid_tile_shape(&output_shape, parallel) {
+            prop_assert!(check_tile_out_applies(
+                current_output.shape(),
+                &output_shape,
+                &current_output.aux,
+                parallel,
+            )
+            .is_err());
+        }
+        Ok(())
     }
 
     /// Test that every sub-Spec application introduced by an Action (excluding Move sub-Specs,
@@ -830,5 +847,25 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    fn arb_tensorspec_and_tile_shape<Tgt: Target>(
+    ) -> impl Strategy<Value = (TensorSpec<Tgt>, Vec<DimSize>, bool)> {
+        any_with::<TensorSpec<Tgt>>(TensorSpecArbMaxShape(shape![8, 8, 8, 8])).prop_flat_map(
+            |current_output| {
+                let output_shape_strategy = current_output.shape().iter().copied().fold(
+                    Just(Vec::new()).boxed(),
+                    |output_shape_strategy, current_dim| {
+                        (output_shape_strategy, 1..=current_dim.get())
+                            .prop_map(|(mut output_shape, dim_size)| {
+                                output_shape.push(DimSize::new(dim_size).unwrap());
+                                output_shape
+                            })
+                            .boxed()
+                    },
+                );
+                (Just(current_output), output_shape_strategy, any::<bool>())
+            },
+        )
     }
 }

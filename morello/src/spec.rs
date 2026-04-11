@@ -1422,6 +1422,13 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    pub(crate) fn parameter_aux(&self, idx: usize) -> &TensorSpecAux<Tgt> {
+        match self {
+            LogicalSpec::Primitive(_, auxes, _) => &auxes[idx],
+            LogicalSpec::Compose { operand_auxes, .. } => &operand_auxes[idx],
+        }
+    }
+
     pub fn parameters(&self) -> Vec<TensorSpec<Tgt>> {
         match self {
             LogicalSpec::Primitive(basics, auxes, _) => {

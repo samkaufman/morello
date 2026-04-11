@@ -77,10 +77,10 @@ impl<Tgt: Target> Impl<Tgt> for Loop<Tgt> {
     }
 
     fn compute_main_cost(&self, child_costs: &[MainCost]) -> MainCost {
-        let all_dims: Vec<(u32, u32)> = unique_dims_per_axis(&self.tiles)
-            .map(|(lt, dim)| (lt.tile.steps_dim(dim), lt.tile.full_steps_dim(dim)))
+        let full_steps: Vec<u32> = unique_dims_per_axis(&self.tiles)
+            .map(|(lt, dim)| lt.tile.full_steps_dim(dim))
             .collect();
-        compute_loop_main_cost::<Tgt>(&all_dims, self.parallel, child_costs)
+        compute_loop_main_cost::<Tgt>(&full_steps, self.parallel, child_costs)
     }
 
     fn map_children<F, I>(self, f: F) -> Self
@@ -182,13 +182,9 @@ impl<Tgt: Target> Loop<Tgt> {
 
 /// Compute the main cost of a tile-loop by summing full and boundary regions.
 ///
-/// Panics if any boundary dimension violates the constraint that `steps == full_steps + 1`.
-///
 /// # Arguments
 ///
-/// * `dims` - slice of per-dimension `(steps, full_steps)` pairs.
-///   **Note**: For boundary dimensions, `steps` must equal `full_steps + 1`
-///   (boundary regions have exactly one iteration)
+/// * `full_steps_per_dim` - slice of per-dimension full-tile iteration counts.
 /// * `parallel` is `true` if this is a parellel loop.
 /// * `body_costs` is the cost of each region's sub-Spec. The slice
 ///   must have length 2^B, where B is the number of boundary dimensions (axes with a
@@ -200,7 +196,7 @@ impl<Tgt: Target> Loop<Tgt> {
 ///   - index 2 (`0b10`): next outer dimension's boundary only,
 ///   - index 3 (`0b11`): the corner/boundary of both dimensions.
 pub(crate) fn compute_loop_main_cost<Tgt: Target>(
-    dims: &[(u32, u32)],
+    full_steps_per_dim: &[u32],
     parallel: bool,
     body_costs: &[MainCost],
 ) -> MainCost {
@@ -209,7 +205,7 @@ pub(crate) fn compute_loop_main_cost<Tgt: Target>(
     // Initialize total with the main region's cost.
     let mut total = {
         let mut full_iterations = 1u32;
-        for &(_, full_steps) in dims {
+        for &full_steps in full_steps_per_dim {
             full_iterations = full_iterations
                 .checked_mul(full_steps)
                 .expect("number of full iterations doesn't overflow");
@@ -257,7 +253,7 @@ mod tests {
     #[test]
     fn test_compute_loop_main_cost_serial_1d() {
         // Single axis. Boundary has 1 step.
-        let cost = compute_loop_main_cost::<Avx2Target>(&[(9, 8)], false, &[5, 4]);
+        let cost = compute_loop_main_cost::<Avx2Target>(&[8], false, &[5, 4]);
         assert_eq!(cost, 5 * 8 + 4);
     }
 
@@ -265,7 +261,7 @@ mod tests {
     fn test_compute_loop_main_cost_parallel_1d() {
         // Single axis, parallel. Boundary has 1 step.
         let procs = u32::from(Avx2Target::processors());
-        let cost = compute_loop_main_cost::<Avx2Target>(&[(9, 8)], true, &[5, 5]);
+        let cost = compute_loop_main_cost::<Avx2Target>(&[8], true, &[5, 5]);
         let expected = 5 * 8u32.div_ceil(procs) + 5 + PAR_TILE_OVERHEAD;
         assert_eq!(cost, expected);
     }
@@ -273,14 +269,14 @@ mod tests {
     #[test]
     fn test_compute_loop_main_cost_serial_exact_div_1d() {
         // Single axis that divides evenly => no boundary contribution
-        let cost = compute_loop_main_cost::<Avx2Target>(&[(8, 8)], false, &[4]);
+        let cost = compute_loop_main_cost::<Avx2Target>(&[8], false, &[4]);
         assert_eq!(cost, 4 * 8);
     }
 
     #[test]
     fn test_compute_loop_main_cost_serial_2d() {
-        let dims = &[(3, 2), (5, 4)];
-        let cost = compute_loop_main_cost::<Avx2Target>(dims, false, &[7, 6, 9, 10]);
+        let full_steps = &[2, 4];
+        let cost = compute_loop_main_cost::<Avx2Target>(full_steps, false, &[7, 6, 9, 10]);
         let expected = (7 * 2 * 4) + 6 + 9 + 10; // 3 boundary regions (each executed once)
         assert_eq!(cost, expected);
     }
@@ -288,8 +284,8 @@ mod tests {
     #[test]
     fn test_compute_loop_main_cost_serial_2d_with_one_exact_axis() {
         // Only axis 1 has boundary conditions.
-        let dims = &[(8, 8), (4, 3)];
-        let cost = compute_loop_main_cost::<Avx2Target>(dims, false, &[2, 3]);
+        let full_steps = &[8, 3];
+        let cost = compute_loop_main_cost::<Avx2Target>(full_steps, false, &[2, 3]);
         let expected = (2 * 8 * 3) + 3; // 1 boundary region
         assert_eq!(cost, expected);
     }
