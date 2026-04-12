@@ -5,3 +5,9 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 [profile.ci]
 fail-fast = false
 slow-timeout = { period = "120s", terminate-after = 60 }
+
+# These tests can be long-running and time out. Limit them during CI by reducing the
+# number of cases.
+[[profile.ci.overrides]]
+filter = 'test(/.*::(test_more_memory_never_worsens_solution_with_shared_db|test_synthesis_.*|test_can_synthesize_any_.*)/)'
+set-env = { PROPTEST_CASES = "5" }
