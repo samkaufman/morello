@@ -365,9 +365,18 @@ impl MemVec {
         self.0[idx] = Self::encode_bit_length(value);
     }
 
-    pub fn checked_sub_snap_down(self, rhs: &[u64; MEMORY_COUNT]) -> Result<MemVec, usize> {
-        let mut result = self;
-        for (i, (result_entry, &r)) in result.0.iter_mut().zip(rhs).enumerate() {
+    pub fn checked_sub_snap_down<Tgt: Target>(
+        mut self,
+        rhs: &[u64; MEMORY_COUNT],
+    ) -> Result<MemVec, usize> {
+        let memories = Tgt::memories();
+        for (i, ((result_entry, &r), memory)) in self
+            .0
+            .iter_mut()
+            .zip(rhs)
+            .zip(memories.iter())
+            .enumerate()
+        {
             let value = *result_entry;
             let cur = if value & 0x80 == 0 {
                 bit_length_inverse(value.into())
@@ -379,16 +388,14 @@ impl MemVec {
                 return Err(i);
             }
 
-            let new_value = prev_power_of_two(cur - r);
-            if value & 0x80 == 0 {
-                // Was bit length encoded, encode result as bit length
-                *result_entry = Self::encode_bit_length(new_value);
+            let remaining = cur - r;
+            if memory.counts_registers() {
+                *result_entry = Self::encode_raw(remaining);
             } else {
-                // Was raw encoded, encode result as raw
-                *result_entry = Self::encode_raw(new_value);
+                *result_entry = Self::encode_bit_length(prev_power_of_two(remaining));
             }
         }
-        Ok(result)
+        Ok(self)
     }
 
     pub fn iter(&self) -> MemVecIter<'_> {
@@ -844,6 +851,20 @@ mod tests {
         assert_eq!(memvec.get_unscaled(2), 256); // next power of 2 after 200
         memvec.set_snap_up(2, 257);
         assert_eq!(memvec.get_unscaled(2), 512); // next power of 2 after 257
+    }
+
+    #[test]
+    fn test_checked_sub_snap_down_respects_counts_registers() {
+        let memvec = MemVec::new_for_target::<Avx2Target>([16, 16, 64, 64]);
+        let lowered = memvec.checked_sub_snap_down::<Avx2Target>(&[3, 5, 3, 0]).unwrap();
+
+        // RF and VRF count registers, so they subtract exactly.
+        assert_eq!(lowered.get_unscaled(0), 13);
+        assert_eq!(lowered.get_unscaled(1), 11);
+
+        // L1 and GL are binary-scaled, so they snap down to powers of two.
+        assert_eq!(lowered.get_unscaled(2), 32); // 64 - 3 = 61 -> 32
+        assert_eq!(lowered.get_unscaled(3), 64); // 64 - 0 = 64
     }
 
     proptest! {

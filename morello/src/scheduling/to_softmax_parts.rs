@@ -252,7 +252,7 @@ where
     let mut lowered_limits = MemoryLimits::Standard(match base_limits.to_owned() {
         MemoryLimits::Standard(v) => v
             .clone()
-            .checked_sub_snap_down(&new_buffer_consumption)
+            .checked_sub_snap_down::<Tgt>(&new_buffer_consumption)
             .map_err(|oom_idx| {
                 ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
                     Tgt::memories()[oom_idx].to_string(),

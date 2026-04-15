@@ -77,7 +77,7 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
             let mut m = MemoryLimits::Standard(match &spec.1 {
                 MemoryLimits::Standard(v) => v
                     .clone()
-                    .checked_sub_snap_down(&intermediate_mem_consumed_nondiscrete)
+                    .checked_sub_snap_down::<Tgt>(&intermediate_mem_consumed_nondiscrete)
                     .map_err(|oom_idx| {
                         ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
                             Tgt::memories()[oom_idx].to_string(),
