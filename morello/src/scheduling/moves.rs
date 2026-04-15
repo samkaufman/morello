@@ -3,12 +3,11 @@ use crate::imp::allocs::{alloc_memory_allocation, move_cost, Alloc};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
-use crate::memorylimits::{MemVec, MemoryLimits};
+use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionSolver, ActionT, ApplyError, MoveActionSolver, NotApplicableReason};
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Memory, Target, MEMORY_COUNT};
 use crate::tensorspec::{self, TensorSpec};
-use crate::utils::prev_power_of_two;
 use crate::views::{CacheView, Param, Tensor, ViewE};
 use serde::{Deserialize, Serialize};
 use std::mem;
@@ -212,27 +211,18 @@ fn plan_alloc<'a, Tgt: Target>(
             .position(|l| l == &destination_level)
             .unwrap();
         let additional = new_spec.memory_units();
+        let mut consumed = [0u64; MEMORY_COUNT];
+        consumed[updated_level_idx] = additional;
         match &spec.1 {
-            MemoryLimits::Standard(base) => {
-                let mut new_values: [u64; MEMORY_COUNT] =
-                    base.iter().collect::<Vec<_>>().try_into().unwrap();
-
-                let Some(level_updated) = new_values[updated_level_idx].checked_sub(additional)
-                else {
-                    return Err(ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
-                        memories[updated_level_idx].to_string(),
-                    )));
-                };
-
-                // Update the specific memory with correct value based on whether it counts registers
-                if memories[updated_level_idx].counts_registers() {
-                    new_values[updated_level_idx] = level_updated;
-                } else {
-                    new_values[updated_level_idx] = prev_power_of_two(level_updated);
-                }
-
-                MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(new_values))
-            }
+            MemoryLimits::Standard(base) => MemoryLimits::Standard(
+                base.clone()
+                    .checked_sub_snap_down::<Tgt>(&consumed)
+                    .map_err(|oom_idx| {
+                        ApplyError::NotApplicable(NotApplicableReason::OutOfMemory(
+                            memories[oom_idx].to_string(),
+                        ))
+                    })?,
+            ),
         }
     };
 
