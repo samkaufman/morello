@@ -62,7 +62,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         }
 
         // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
-        if let Some(daufm_result) = tile_out_daufm(spec, self) {
+        if let Some(daufm_result) = tile_out_sdaufm(spec, self) {
             return daufm_result;
         };
 
@@ -137,7 +137,7 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
     //     match &spec.0 {
     //         LogicalSpec::Primitive(basics, ..) => {
     //             // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
-    //             if tile_out_daufm(spec, self).is_some() {
+    //             if tile_out_sdaufm(spec, self).is_some() {
     //                 todo!("Implement solver for SoftmaxDenominatorAndUnscaledFromMax");
     //             };
     //
@@ -528,7 +528,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
 }
 
 /// A `TileOut` special case for [SoftmaxDenominatorAndUnscaledFromMax].
-fn tile_out_daufm<Tgt: Target>(
+fn tile_out_sdaufm<Tgt: Target>(
     spec: &Spec<Tgt>,
     tileout: &TileOut,
 ) -> Option<Result<ImplNode<Tgt>, ApplyError>> {
@@ -1575,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tile_out_daufm() {
+    fn test_tile_out_sdaufm() {
         // Create a SoftmaxDenominatorAndUnscaledFromMax Spec
         let mut spec = Spec::<Avx2Target>(
             LogicalSpec::Primitive(
