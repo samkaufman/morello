@@ -6,12 +6,11 @@ use crate::{
     utils::prev_power_of_two,
 };
 
-use itertools::{izip, Either, Itertools};
-use log::warn;
+use itertools::{izip, Itertools};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
-use std::{iter, ops::Sub};
+use std::ops::Sub;
 
 /// MemoryLimits are bounds on available capacity in each memory.
 ///
@@ -82,43 +81,6 @@ impl MemoryLimits {
                             mem_vec.set_bit_length(i, prev_power_of_two(mem_vec.get_unscaled(i)));
                         }
                     });
-            }
-        }
-    }
-
-    /// Produce new MemoryLimits for each child of a node after some allocation.
-    /// Returns `None` if the given memory allocation exceeds this limit.
-    ///
-    /// Not that this ignores base memory allocations at the leaves. It is intended to
-    /// be used to prune actions which consume too much memory without traversing.
-    pub fn transition<Tgt: Target>(
-        &self,
-        allocated: &MemoryAllocation,
-    ) -> Option<Vec<MemoryLimits>> {
-        warn!("Not transitioning to pipeline MemoryLimits yet");
-
-        let per_child_diffs = match allocated {
-            MemoryAllocation::Simple(v) => Either::Left(iter::repeat(v)),
-            MemoryAllocation::Inner(during_children) => Either::Right(during_children.iter()),
-            MemoryAllocation::Pipeline {
-                intermediate_consumption: _,
-            } => todo!(),
-        };
-
-        match self {
-            MemoryLimits::Standard(cur_limit) => {
-                let mut result = Vec::with_capacity(cur_limit.len());
-                for child_allocation in per_child_diffs {
-                    debug_assert_eq!(child_allocation.len(), cur_limit.len());
-                    let to_push = cur_limit
-                        .clone()
-                        .checked_sub_snap_down(child_allocation)
-                        .ok()?;
-                    let mut to_push = MemoryLimits::Standard(to_push);
-                    to_push.discretize::<Tgt>();
-                    result.push(to_push);
-                }
-                Some(result)
             }
         }
     }
