@@ -301,11 +301,6 @@ struct SameValueIntersectionSelFn<'a, const D: usize, T> {
     value: &'a T,
 }
 
-struct ContainedAndAdjacentSelFn<const D: usize, T> {
-    to_insert: RTreeRect<D, T>,
-    relevant_area: <RTreeRect<D, T> as RTreeObject>::Envelope,
-}
-
 impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
     type Item = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
     type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
@@ -435,7 +430,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     to_insert.bottom = merged_envelope.lower().clone();
 
                     // If we expand insert to merge, we'll need to start over with a new
-                    // ContainedAndAdjacentSelFn which has an updated to_insert.
+                    // scan with an updated to_insert.
                     // TODO: Starting over for every adjacent/mergeble rect has bad asymptotics!
                     break;
                 }
@@ -744,40 +739,6 @@ where
     }
 }
 
-impl<const D: usize, T> rstar::SelectionFunction<RTreeRect<D, T>>
-    for ContainedAndAdjacentSelFn<D, T>
-where
-    T: PartialEq + Eq,
-{
-    fn should_unpack_parent(&self, envelope: &<RTreeRect<D, T> as RTreeObject>::Envelope) -> bool {
-        self.relevant_area.intersects(envelope)
-    }
-
-    fn should_unpack_leaf(&self, candidate: &RTreeRect<D, T>) -> bool {
-        if candidate.value == self.to_insert.value {
-            let to_insert_envelope = self.to_insert.envelope();
-            if to_insert_envelope.contains_envelope(&candidate.envelope()) {
-                return true;
-            }
-            if all_dimensions_adjacent_or_overlap(
-                &self.to_insert.bottom.arr,
-                &self.to_insert.top.arr,
-                &candidate.bottom.arr,
-                &candidate.top.arr,
-            ) && count_matching_dimensions(
-                &self.to_insert.bottom.arr,
-                &self.to_insert.top.arr,
-                &candidate.bottom.arr,
-                &candidate.top.arr,
-            ) == D - 1
-            {
-                return true;
-            }
-        }
-        false
-    }
-}
-
 impl<'a, const D: usize, T> rstar::SelectionFunction<RTreeRect<D, T>>
     for SameValueIntersectionSelFn<'a, D, T>
 where
@@ -904,31 +865,6 @@ fn rect_partition_intersection(
         rhs_subrectangles,
         intersection: (intersection_bottom, intersection_top),
     })
-}
-
-/// Returns number of matching dimensions between two rectangles, or `None` if they are not all
-/// adjacent or overlap.
-fn count_merging_dimension(
-    new_rect_bottom: &[BimapSInt],
-    new_rect_top: &[BimapSInt],
-    candidate_bottom: &[BimapSInt],
-    candidate_top: &[BimapSInt],
-) -> Option<usize> {
-    if !all_dimensions_adjacent_or_overlap(
-        new_rect_bottom,
-        new_rect_top,
-        candidate_bottom,
-        candidate_top,
-    ) {
-        None
-    } else {
-        Some(count_matching_dimensions(
-            new_rect_bottom,
-            new_rect_top,
-            candidate_bottom,
-            candidate_top,
-        ))
-    }
 }
 
 fn count_matching_dimensions(
@@ -1359,7 +1295,7 @@ mod tests {
                 .arr
                 .iter()
                 .zip(&space_max.arr)
-                .map(|(l, h)| (*l..=*h))
+                .map(|(l, h)| *l..=*h)
                 .multi_cartesian_product();
             for pt in pts_iter {
                 let pt = RTreePt::<3> {
@@ -1654,7 +1590,7 @@ mod tests {
         bottom
             .iter()
             .zip(top)
-            .map(|(b, t)| (*b..=*t))
+            .map(|(b, t)| *b..=*t)
             .multi_cartesian_product()
             .collect()
     }

@@ -36,10 +36,6 @@ impl<const D: usize> AABB<D> {
     pub fn upper(&self) -> &RTreePt<D> {
         &self.upper
     }
-
-    pub fn into_pair(self) -> (RTreePt<D>, RTreePt<D>) {
-        (self.lower, self.upper)
-    }
 }
 
 impl<const D: usize> rstar::Envelope for AABB<D> {
