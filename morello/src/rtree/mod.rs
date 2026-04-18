@@ -39,16 +39,6 @@ trait RTreeGeneric<T> {
     ) where
         T: PartialEq + Eq + Hash + Clone;
 
-    /// Insert a rectangle into this [RTree], partitioning it and and any contained. Intersecting
-    /// sub-rectangles are combined into one with a new value computed by `fold`.
-    ///
-    /// For example:
-    ///
-    /// ```ignore
-    /// tree.insert(&[0, 0], &[1, 1], 1);
-    /// tree.fold_insert(&[1, 1], &[2, 2], 3, false, |a, b| a + b);
-    /// assert_eq!(tree.locate_at_point(&[1, 1]), Some(4));
-    /// ```
     fn fold_insert<F>(
         &mut self,
         low: &[BimapSInt],
@@ -140,6 +130,60 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
+            /// Inserts the inclusive rectangle delimited by `low` and `high` (inclusive),
+            /// splitting it and each intersecting stored rectangle into disjoint pieces which
+            /// cover the same area as the union of the original rectangles.
+            ///
+            /// The given `fold` function computes the value of intersecting rectangles.
+            ///
+            /// For example:
+            ///
+            /// ```ignore
+            /// # use std::collections::HashSet;
+            /// # use morello::RTreeDyn;
+            /// # let mut tree = RTreeDyn::empty(2);
+            /// tree.insert(&[0, 0], &[2, 2], 1);
+            /// tree.fold_insert(&[1, 1], &[3, 3], 2, false, |new, old| new + old);
+            /// let rects = tree
+            ///     .iter()
+            ///     .map(|(low, high, value)| (low.to_vec(), high.to_vec(), *value))
+            ///     .collect::<HashSet<_>>();
+            /// assert_eq!(
+            ///     rects,
+            ///     HashSet::from([
+            ///         (vec![0, 0], vec![0, 2], 1),
+            ///         (vec![1, 0], vec![2, 0], 1),
+            ///         (vec![1, 1], vec![2, 2], 3),
+            ///         (vec![1, 3], vec![2, 3], 2),
+            ///         (vec![3, 1], vec![3, 3], 2),
+            ///     ])
+            /// );
+            /// ```
+            ///
+            /// When `merge` is `true`, each piece produced by the partitioning step is
+            /// reinserted with [`RTreeGeneric::merge_insert`], so adjacent or overlapping
+            /// equal-valued rectangles are merged. For example:
+            ///
+            /// ```ignore
+            /// # use std::collections::HashSet;
+            /// # use morello::RTreeDyn;
+            /// # use std::cmp::min;
+            /// # let mut tree = RTreeDyn::empty(2);
+            /// tree.insert(&[0, 0], &[2, 2], 2);
+            /// tree.fold_insert(&[1, 1], &[3, 3], 1, true, min);
+            /// let rects = tree
+            ///     .iter()
+            ///     .map(|(low, high, value)| (low.to_vec(), high.to_vec(), *value))
+            ///     .collect::<HashSet<_>>();
+            /// assert_eq!(
+            ///     rects,
+            ///     HashSet::from([
+            ///         (vec![0, 0], vec![0, 2], 2),
+            ///         (vec![1, 0], vec![2, 0], 2),
+            ///         (vec![1, 1], vec![3, 3], 1),  // overlap [1, 1]..[2, 2] and inserted
+            ///     ])
+            /// );
+            /// ```
             pub fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool, fold: F)
             where
                 // TODO: Shouldn't need to be Clone. Instead, give references.

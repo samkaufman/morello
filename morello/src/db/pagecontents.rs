@@ -8,6 +8,7 @@ use crate::{
     target::Target,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp;
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 use std::ops::Range;
@@ -117,6 +118,32 @@ impl RTreePageContents {
                     *action_num,
                 )
             });
-        self.0.merge_insert(&bottom, &top, value, true);
+        self.0
+            .fold_insert(&bottom, &top, value, true, min_overlapping_action);
+    }
+}
+
+fn min_overlapping_action(
+    inserted: Option<(CostIntensity, MemVec, u8, ActionNum)>,
+    existing: Option<(CostIntensity, MemVec, u8, ActionNum)>,
+) -> Option<(CostIntensity, MemVec, u8, ActionNum)> {
+    match (inserted, existing) {
+        (Some(inserted), Some(existing)) => {
+            assert_eq!(
+                    inserted.0, existing.0,
+                    "Overlapping rectangles must have matching cost intensities: inserted={:?}, existing={:?}",
+                    inserted.0, existing.0
+                );
+            Some(cmp::min_by(inserted, existing, |inserted, existing| {
+                inserted
+                    .1
+                    .lex_cmp(&existing.1)
+                    .then(inserted.2.cmp(&existing.2))
+            }))
+        }
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            panic!("Overlapping rectangles must both have values or both be empty")
+        }
     }
 }

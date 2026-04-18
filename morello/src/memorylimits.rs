@@ -279,6 +279,15 @@ impl MemVec {
         }
     }
 
+    /// Compares memory values lexicographically.
+    pub fn lex_cmp(&self, other: &Self) -> Ordering {
+        debug_assert_eq!(self.len(), other.len());
+        (0..self.len())
+            .map(|i| self.get_unscaled(i).cmp(&other.get_unscaled(i)))
+            .find(|cmp| *cmp != Ordering::Equal)
+            .unwrap_or(Ordering::Equal)
+    }
+
     pub fn get_binary_scaled(&self, idx: usize) -> u8 {
         let value = self.0[idx];
         if value & 0x80 == 0 {
@@ -370,12 +379,8 @@ impl MemVec {
         rhs: &[u64; MEMORY_COUNT],
     ) -> Result<MemVec, usize> {
         let memories = Tgt::memories();
-        for (i, ((result_entry, &r), memory)) in self
-            .0
-            .iter_mut()
-            .zip(rhs)
-            .zip(memories.iter())
-            .enumerate()
+        for (i, ((result_entry, &r), memory)) in
+            self.0.iter_mut().zip(rhs).zip(memories.iter()).enumerate()
         {
             let value = *result_entry;
             let cur = if value & 0x80 == 0 {
@@ -856,7 +861,9 @@ mod tests {
     #[test]
     fn test_checked_sub_snap_down_respects_counts_registers() {
         let memvec = MemVec::new_for_target::<Avx2Target>([16, 16, 64, 64]);
-        let lowered = memvec.checked_sub_snap_down::<Avx2Target>(&[3, 5, 3, 0]).unwrap();
+        let lowered = memvec
+            .checked_sub_snap_down::<Avx2Target>(&[3, 5, 3, 0])
+            .unwrap();
 
         // RF and VRF count registers, so they subtract exactly.
         assert_eq!(lowered.get_unscaled(0), 13);
