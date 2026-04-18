@@ -94,11 +94,9 @@ impl Ord for Cost {
         // Define memory consumption ordering lexicographically, just so we have some total
         // order for Costs.
         debug_assert_eq!(self.peaks.len(), other.peaks.len());
-        for i in 0..self.peaks.len() {
-            let peaks_cmp = self.peaks.get_unscaled(i).cmp(&other.peaks.get_unscaled(i));
-            if peaks_cmp != Ordering::Equal {
-                return peaks_cmp;
-            }
+        let peaks_cmp = self.peaks.lex_cmp(&other.peaks);
+        if peaks_cmp != Ordering::Equal {
+            return peaks_cmp;
         }
 
         self.depth.cmp(&other.depth)
