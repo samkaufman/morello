@@ -1310,10 +1310,12 @@ impl CpuKernel {
                     .flat_map(|o| o.shape())
                     .all(|d| d.get() == 1);
                 if is_scalar {
-                    for o in &operands[1..] {
-                        if (o.dtype(), o.layout()) != (operands[0].dtype(), operands[0].layout()) {
+                    if !is_safe_c_widening(operands[0].dtype(), operands[1].dtype()) {
                             return false;
                         }
+
+                    if operands[0].layout() != operands[1].layout() {
+                        return false;
                     }
 
                     return operands.iter().any(|o| o.memory() == CpuMemory::RF)
@@ -2213,6 +2215,20 @@ where
         return false;
     }
     true
+}
+
+fn is_safe_c_widening(src_dtype: Dtype, dst_dtype: Dtype) -> bool {
+    src_dtype == dst_dtype
+        || matches!(
+            (src_dtype, dst_dtype),
+            (
+                Dtype::Uint8,
+                Dtype::Uint16 | Dtype::Sint16 | Dtype::Uint32 | Dtype::Sint32
+            ) | (Dtype::Sint8, Dtype::Sint16 | Dtype::Sint32)
+                | (Dtype::Uint16, Dtype::Uint32 | Dtype::Sint32)
+                | (Dtype::Sint16, Dtype::Sint32)
+                | (Dtype::Bfloat16, Dtype::Float32)
+        )
 }
 
 /// Yields versions of the given [Layout] with packed dimensions added.

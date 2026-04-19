@@ -202,7 +202,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                         .try_into()
                         .unwrap_or_else(|_| panic!("expected 2 args"));
                     // TODO: Check shape and dtype match.
-                    out.assign(&inp);
+                    out.assign_cast(&inp);
                     vec![inp, out]
                 }
                 PrimitiveSpecType::Fill { value } => {
@@ -509,6 +509,19 @@ impl<D: ndarray::Dimension> DynArray<D> {
             (DynArray::Float32(a), DynArray::Float32(b)) => a.assign(b),
             (DynArray::Bfloat16(a), DynArray::Bfloat16(b)) => a.assign(b),
             _ => panic!("Mismatched types"),
+        }
+    }
+
+    pub fn assign_cast(&mut self, rhs: &Self) {
+        match self {
+            DynArray::Uint8(a) => a.assign(&rhs.saturating_cast::<u8>()),
+            DynArray::Sint8(a) => a.assign(&rhs.saturating_cast::<i8>()),
+            DynArray::Uint16(a) => a.assign(&rhs.saturating_cast::<u16>()),
+            DynArray::Sint16(a) => a.assign(&rhs.saturating_cast::<i16>()),
+            DynArray::Uint32(a) => a.assign(&rhs.saturating_cast::<u32>()),
+            DynArray::Sint32(a) => a.assign(&rhs.saturating_cast::<i32>()),
+            DynArray::Float32(a) => a.assign(&rhs.saturating_cast::<f32>()),
+            DynArray::Bfloat16(a) => a.assign(&rhs.saturating_cast::<half::bf16>()),
         }
     }
 
