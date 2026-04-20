@@ -1311,8 +1311,8 @@ impl CpuKernel {
                     .all(|d| d.get() == 1);
                 if is_scalar {
                     if !is_safe_c_widening(operands[0].dtype(), operands[1].dtype()) {
-                            return false;
-                        }
+                        return false;
+                    }
 
                     if operands[0].layout() != operands[1].layout() {
                         return false;
