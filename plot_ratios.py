@@ -7,7 +7,7 @@
 #   "joblib",
 # ]
 # ///
-"""Plot rectangle counts from dbratios output CSV files."""
+"""Plot rectangle counts from the CSV files produced by 'dbratios'."""
 
 import sys
 import pathlib
@@ -23,6 +23,7 @@ memory = Memory(cache_dir, verbose=1)
 
 
 def cache_is_valid(metadata):
+    """Derives cache validity from modification times of CSVs in a directory."""
     current_mtime = 0.0
     for f in metadata["input_args"]["directory"].glob("**/*.csv.gz"):
         current_mtime = max(current_mtime, f.stat().st_mtime)
@@ -37,7 +38,7 @@ def read_all_csvs(directory: pathlib.Path) -> pd.DataFrame:
 
     con = duckdb.connect()
 
-    # Create a temporary view (not materialized) over all input CSVs
+    # A temporary view (not materialized) combining gzip'd CSVs
     glob_pattern = str(directory / "**" / "*.csv.gz")
     con.execute(f"""
         CREATE TEMP VIEW csv_data AS
@@ -49,7 +50,7 @@ def read_all_csvs(directory: pathlib.Path) -> pd.DataFrame:
         )
     """)
 
-    # Get the schema to identify dimension columns
+    # Identify dimension columns from the view schema
     schema_df = con.execute("SELECT * FROM csv_data LIMIT 0").df()
     dim_cols = [col for col in schema_df.columns if DIM_COL_PATTERN.match(col)]
 
