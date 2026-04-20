@@ -14,7 +14,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - run: cargo install cargo-all-features
       - run: cargo build-all-features
@@ -24,7 +24,7 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Install libomp
         run: |
@@ -50,7 +50,7 @@ jobs:
           - softmax2
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Install libomp
         run: |
@@ -69,7 +69,7 @@ jobs:
         os: [ubuntu-24.04, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Install llvm & libomp
         run: |
@@ -96,7 +96,7 @@ jobs:
           - arm
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@v2
       - run: timeout 480 cargo run -p precompute -- --target ${{ matrix.target }} 2  || code=$?; if [[ $code -ne 124 && $code -ne 0 ]]; then exit $code; fi
@@ -104,7 +104,7 @@ jobs:
   clippy-and-format:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile default --no-self-update
       - name: Check that code has no Clippy warnings
         run: cargo clippy --all-targets --all-features -- --deny warnings
@@ -117,7 +117,7 @@ jobs:
       - run: |
           sudo apt-fast update -qq
           DEBIAN_FRONTEND='noninteractive' sudo apt install --no-install-recommends -yq valgrind
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: cargo install --version 0.12.3 iai-callgrind-runner
       - name: Run benchmarks
         run: cargo bench --verbose
