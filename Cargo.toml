@@ -2,6 +2,7 @@
 members = [
     "morello",
     "dbstats",
+    "dbratios",
     "frontend",
     "precompute"
 ]
