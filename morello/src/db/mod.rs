@@ -3,7 +3,6 @@ mod pagecontents;
 use crate::common::DimSize;
 use crate::cost::{Cost, NormalizedCost};
 use crate::datadeps::SpecKey;
-use crate::db::pagecontents::PageContents;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap, SurMap};
 use crate::grid::linear::BimapInt;
@@ -15,6 +14,12 @@ use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, Spec
 use crate::target::{Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
 use pagecontents::RTreePageContents;
+
+// Re-export `PageContents` for the 'dbratios' tool if feature flag is set.
+#[cfg(feature = "dbratios-unstable-api")]
+pub use pagecontents::PageContents;
+#[cfg(not(feature = "dbratios-unstable-api"))]
+use pagecontents::PageContents;
 
 use atomic_write_file::AtomicWriteFile;
 use itertools::Itertools;
@@ -861,6 +866,22 @@ fn read_any_format(file: fs::File) -> Result<Page, ReadAnyFormatError> {
         contents,
         modified: false,
     })
+}
+
+/// Return all rectangles (just corners; sans values) contained in the given file.
+///
+/// This is for use by the 'dbratios' tool.
+#[cfg(feature = "dbratios-unstable-api")]
+#[allow(clippy::type_complexity)]
+pub fn read_rectangles(file: fs::File) -> Result<Vec<(Vec<i64>, Vec<i64>)>, String> {
+    read_any_format(file)
+        .map(|page| {
+            page.contents
+                .iter_rectangles()
+                .map(|(bottom, top)| (bottom.to_vec(), top.to_vec()))
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(feature = "db-stats")]

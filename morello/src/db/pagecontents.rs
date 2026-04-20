@@ -48,7 +48,7 @@ impl PageContents {
         }
     }
 
-    pub fn fill_region(
+    pub(crate) fn fill_region(
         &mut self,
         k: u8,
         dim_ranges: &[Range<BimapInt>],
@@ -56,6 +56,16 @@ impl PageContents {
     ) {
         match self {
             PageContents::RTree(b) => b.fill_region(k, dim_ranges, value),
+        }
+    }
+
+    /// Get an iterator over all rectangles in the R-tree.
+    ///
+    /// This is for use by the 'dbratios' tool.
+    #[cfg(feature = "dbratios-unstable-api")]
+    pub fn iter_rectangles(&self) -> Box<dyn Iterator<Item = (&[i64], &[i64])> + '_> {
+        match self {
+            PageContents::RTree(b) => Box::new(b.0.iter().map(|(bottom, top, _)| (bottom, top))),
         }
     }
 }
@@ -89,7 +99,7 @@ impl RTreePageContents {
         }))
     }
 
-    pub fn fill_region(
+    pub(crate) fn fill_region(
         &mut self,
         k: u8,
         dim_ranges: &[Range<BimapInt>],

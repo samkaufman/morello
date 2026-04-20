@@ -14,7 +14,6 @@ pub mod nameenv;
 pub mod opaque_symbol;
 pub mod pprint;
 mod reconstruct;
-mod rtree;
 pub mod scheduling;
 pub mod scheduling_sugar;
 pub mod search;
@@ -30,3 +29,9 @@ pub mod views;
 // Temporarily-export smallvec dependency
 // TODO: Wrap the Shape type instead.
 pub use smallvec;
+
+// Re-export `rtree` for the 'dbratios' tool if feature flag is set.
+#[cfg(feature = "dbratios-unstable-api")]
+pub mod rtree;
+#[cfg(not(feature = "dbratios-unstable-api"))]
+mod rtree;

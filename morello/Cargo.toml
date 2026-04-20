@@ -7,6 +7,7 @@ edition = "2021"
 default = ["verification"]
 clap = ["dep:clap"]
 db-stats = ["dep:csv"]
+dbratios-unstable-api = []
 verification = ["dep:ndarray", "dep:ndarray-conv"]
 l2-speed-gl = []
 
