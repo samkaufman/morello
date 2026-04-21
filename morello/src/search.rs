@@ -255,7 +255,7 @@ where
                     None => {
                         if let Some(prefetch_after) = prefetch_after.as_ref() {
                             if search.db.can_memoize(prefetch_after) {
-                                search.db.prefetch(prefetch_after);
+                                search.db.prefetch_canon(prefetch_after);
                             }
                         }
                     }
@@ -336,7 +336,7 @@ where
             indexmap::map::Entry::Occupied(e) => (e.index(), Rc::clone(e.get())),
             indexmap::map::Entry::Vacant(e) => {
                 let preferences = if can_memoize {
-                    match self.search.db.get_with_preference(spec) {
+                    match self.search.db.get_with_preference_canon(spec) {
                         GetPreference::Hit(v) => {
                             // TODO: Re-enable search hits and misses tracking
                             // search.hits += 1;
@@ -548,7 +548,7 @@ where
                     let requesting_spec =
                         self.working_set.get_index(working_set_spec_idx).unwrap().0;
                     if self.search.db.can_memoize(requesting_spec) {
-                        self.search.db.prefetch(requesting_spec);
+                        self.search.db.prefetch_canon(requesting_spec);
                     }
                 }
                 self.new_subblock_request_set()
@@ -868,7 +868,7 @@ where
     let action_costs = take(task_result);
     if !*from_db {
         if search.db.can_memoize(spec) {
-            search.db.put(spec.clone(), action_costs.0.clone());
+            search.db.put_canon(spec, action_costs.0.clone());
         } else {
             search
                 .nonmemo_cache
