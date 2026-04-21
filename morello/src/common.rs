@@ -37,10 +37,12 @@ impl Dtype {
 
     pub fn higher_precision_types(&self) -> &[Dtype] {
         match self {
-            Dtype::Uint8 => &[Dtype::Uint16, Dtype::Uint32, Dtype::Sint16, Dtype::Sint32],
-            Dtype::Sint8 => &[Dtype::Sint16, Dtype::Sint32],
-            Dtype::Uint16 => &[Dtype::Uint32, Dtype::Sint32],
-            Dtype::Sint16 => &[Dtype::Sint32],
+            // TODO: Enable the following once we have a more principled way of
+            //        pruning useless casts.
+            // Dtype::Uint8 => &[Dtype::Uint16, Dtype::Uint32, Dtype::Sint16, Dtype::Sint32],
+            // Dtype::Sint8 => &[Dtype::Sint16, Dtype::Sint32],
+            // Dtype::Uint16 => &[Dtype::Uint32, Dtype::Sint32],
+            // Dtype::Sint16 => &[Dtype::Sint32],
             Dtype::Bfloat16 => &[Dtype::Float32],
             _ => &[],
         }
