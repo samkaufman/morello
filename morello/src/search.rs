@@ -471,7 +471,7 @@ where
             return;
         };
 
-        let resolved_next_subblock = next_subblock.map(|m| m).unwrap_or(subblock);
+        let resolved_next_subblock = next_subblock.unwrap_or(subblock);
 
         Self::resolve_requesters(
             working_set,
