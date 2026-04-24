@@ -6,11 +6,13 @@ use crate::datadeps::SpecKey;
 use crate::db::pagecontents::PageContents;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap, SurMap};
-use crate::grid::linear::BimapInt;
+use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::reconstruct::reconstruct_impls_from_actions;
+use crate::rtree::RTreeDyn;
+use crate::spatial_query::SpatialQuery;
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
@@ -39,7 +41,14 @@ use {
 type DbKey = (TableKey, Vec<BimapInt>);
 type TableKey = (SpecKey, Vec<(Layout,)>);
 type PageKey = DbKey;
+type SpatialQueryPageResult = (Vec<BimapSInt>, Vec<BimapSInt>, Option<NormalizedCost>);
 pub type ActionNum = u16;
+
+#[cfg(test)]
+type MemoizedThroughputsByPoint =
+    std::collections::HashMap<Vec<BimapInt>, Option<crate::cost::CostIntensity>>;
+#[cfg(test)]
+type MemoizedThroughputsByTable = std::collections::HashMap<TableKey, MemoizedThroughputsByPoint>;
 
 /// The number of shards/locks per thread.
 const THREAD_SHARDS: usize = 2;
@@ -408,7 +417,7 @@ impl FilesDatabase {
         let normalized_decisions =
             ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
 
-        // Reuse the follow two values to avoid some allocations.
+        // Reuse the following two values to avoid some allocations.
         let mut key_tuple = (table_key, vec![]);
         let mut dim_ranges = vec![];
         for joined_row in pages_iter {
@@ -447,8 +456,9 @@ impl FilesDatabase {
         Some(self.k.into())
     }
 
+    // TODO: Make spec_bimap private again
     /// Return a bidirectional map from [Spec]s to tuples of table keys and their coordinates.
-    fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
+    pub(crate) fn spec_bimap<Tgt>(&self) -> impl BiMap<Domain = Spec<Tgt>, Codomain = DbKey>
     where
         Tgt: Target,
         Tgt::Memory: CanonicalBimap,
@@ -479,25 +489,187 @@ impl FilesDatabase {
         SurMap::defined_for(&self.spec_bimap(), spec)
     }
 
+    pub fn spatial_query<Tgt, B>(
+        &self,
+        query: &SpatialQuery<Tgt, B, TableKey>,
+        mut visit: impl FnMut(&TableKey, &[BimapSInt], &[BimapSInt], Option<NormalizedCost>),
+    ) where
+        Tgt: Target,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
+        B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
+    {
+        for (query_table_key, query_tree) in query.tables() {
+            let rank = query_tree.dim_count();
+            let Some((query_bottom, query_top)) = query_tree.envelope() else {
+                continue;
+            };
+
+            // This overapproximates the query by visiting pages in the union envelope.
+            // It could prune pages that fall entirely inside holes in the query,
+            // avoiding some calls to for_each_spatial_query_page_result.
+            query_bottom
+                .iter()
+                .zip(&query_top)
+                .enumerate()
+                .map(|(dim, (&bottom, &top))| {
+                    let bottom = BimapInt::try_from(bottom).unwrap();
+                    let top = BimapInt::try_from(top).unwrap();
+                    iter_blocks_in_single_dim_range(bottom, top, block_size_dim(dim, rank))
+                        .map(|(page_pt, _range)| page_pt)
+                })
+                .multi_cartesian_product() // TODO: Use a faster helper here
+                .for_each(|page_point| {
+                    self.for_each_spatial_query_page_result(
+                        query_table_key,
+                        query_tree,
+                        page_point,
+                        |(bottom, top, memoized_cost)| {
+                            visit(query_table_key, &bottom, &top, memoized_cost);
+                        },
+                    );
+                });
+        }
+    }
+
+    fn for_each_spatial_query_page_result(
+        &self,
+        query_table_key: &TableKey,
+        query_tree: &RTreeDyn<()>,
+        page_point: Vec<BimapInt>,
+        mut visit: impl FnMut(SpatialQueryPageResult),
+    ) {
+        let page_key = self
+            .prehasher
+            .prehash((query_table_key.clone(), page_point));
+
+        let Some(page) = self.try_load_live_page(&page_key) else {
+            return;
+        };
+        let PageContents::RTree(page_tree) = &page.contents;
+        query_tree
+            .intersection_candidates_with_other_tree(page_tree.tree())
+            .for_each(
+                |((query_bottom, query_top, ()), (memo_bottom, memo_top, memo_value))| {
+                    let bottom: Vec<_> = query_bottom
+                        .iter()
+                        .zip(memo_bottom)
+                        .map(|(lhs, rhs)| *lhs.max(rhs))
+                        .collect();
+                    let top: Vec<_> = query_top
+                        .iter()
+                        .zip(memo_top)
+                        .map(|(lhs, rhs)| *lhs.min(rhs))
+                        .collect();
+                    debug_assert!(bottom.iter().zip(&top).all(|(bottom, top)| bottom <= top));
+
+                    let memoized_cost =
+                        memo_value
+                            .as_ref()
+                            .map(|(intensity, peaks, depth, _)| NormalizedCost {
+                                intensity: *intensity,
+                                peaks: peaks.clone(), // TODO: Avoid this clone
+                                depth: *depth,
+                            });
+                    visit((bottom, top, memoized_cost));
+                },
+            );
+    }
+
+    #[cfg(test)]
+    pub fn assert_same_memoized_points_and_throughputs(&self, other: &Self) {
+        use std::collections::HashSet;
+
+        let lhs = self.all_throughputs();
+        let rhs = other.all_throughputs();
+        assert_eq!(
+            lhs.keys().collect::<HashSet<_>>(),
+            rhs.keys().collect::<HashSet<_>>(),
+            "database table sets differ"
+        );
+        assert_eq!(lhs, rhs, "database memoized points or throughputs differ");
+    }
+
+    #[cfg(test)]
+    fn all_throughputs(&self) -> MemoizedThroughputsByTable {
+        let mut result = MemoizedThroughputsByTable::new();
+
+        for shard in &self.shards.0 {
+            let mut shard_guard = shard.lock();
+            shard_guard.process_available_bg_thread_msgs();
+            for (page_key, page) in shard_guard.cache.iter() {
+                let (table_key, _) = Prehashed::as_inner(page_key);
+                let PageContents::RTree(page_tree) = &page.contents;
+                let table = result.entry(table_key.clone()).or_default();
+                for (bottom, top, memoized_cost) in page_tree.tree().iter() {
+                    let throughput = memoized_cost
+                        .as_ref()
+                        .map(|(intensity, _peaks, _depth, _action)| *intensity);
+                    // TODO: Replace points_in_rect_int with a shared helper
+                    for point in points_in_rect_int(bottom, top) {
+                        let previous = table.insert(point, throughput);
+                        assert!(
+                            previous.is_none_or(|previous| previous == throughput),
+                            "overlapping memoized rectangles disagree on throughput"
+                        );
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Returns a [Page] if present or an empty [Page] if not.
+    ///
+    /// If an empty page is made, it's kept in the in-memory cache. Missing pages are
+    /// not persisted unless later modified.
     fn load_live_page<'a>(&'a self, key: &Prehashed<PageKey>) -> impl Deref<Target = Page> + 'a {
         self.load_live_page_mut(key)
     }
 
+    /// Like [Self::load_live_page], but returns a mutable reference.
     fn load_live_page_mut<'a>(
         &'a self,
         key: &Prehashed<PageKey>,
     ) -> impl DerefMut<Target = Page> + 'a {
+        self.load_live_page_mut_inner(key, false).unwrap()
+    }
+
+    /// Returns a [Page] if it is already cached or exists on disk.
+    ///
+    /// Unlike [Self::load_live_page], this does not materialize a missing page as an empty cache
+    /// entry.
+    fn try_load_live_page<'a>(
+        &'a self,
+        key: &Prehashed<PageKey>,
+    ) -> Option<impl Deref<Target = Page> + 'a> {
+        self.load_live_page_mut_inner(key, true)
+    }
+
+    fn load_live_page_mut_inner<'a>(
+        &'a self,
+        key: &Prehashed<PageKey>,
+        check_page_file_exists: bool,
+    ) -> Option<impl DerefMut<Target = Page> + 'a> {
         let shard = &self.shards.0[self.shard_index(key)];
         let mut shard_guard = shard.lock();
 
         shard_guard.process_available_bg_thread_msgs();
 
+        // Fast path if page is already in cache
         let shard_guard = match MutexGuard::try_map(shard_guard, |s| s.cache.get_mut(key)) {
-            Ok(mapped) => return mapped,
+            Ok(mapped) => return Some(mapped),
             Err(s) => s,
         };
 
-        MutexGuard::map(shard_guard, |s| {
+        if check_page_file_exists
+            && !page_file_path(self.dir_handle.path(), Prehashed::as_inner(key)).exists()
+        {
+            return None;
+        }
+
+        Some(MutexGuard::map(shard_guard, |s| {
             s.async_get(key);
             s.process_bg_thread_msgs_until(|resp| match resp {
                 ShardThreadResponse::Loaded(k, _) => k != key,
@@ -505,7 +677,7 @@ impl FilesDatabase {
             s.cache
                 .get_mut(key)
                 .unwrap_or_else(|| panic!("just-requested key in cache: {key:?}"))
-        })
+        }))
     }
 
     fn shard_index(&self, key: &Prehashed<PageKey>) -> usize {
@@ -1058,7 +1230,11 @@ pub fn iter_blocks_in_single_dim_range(
 }
 
 fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
-    let ((spec_key, table_key_rest), block_pt) = page_key;
+    table_dir_path(root, &page_key.0).join(page_key.1.iter().map(|p| p.to_string()).join("_"))
+}
+
+fn table_dir_path(root: &Path, table_key: &TableKey) -> path::PathBuf {
+    let (spec_key, table_key_rest) = table_key;
     let mut spec_key_dir_name = match spec_key {
         SpecKey::OnePrefix { rank, dtypes } => root
             .join(format!("OnePrefix{}", rank))
@@ -1178,7 +1354,7 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
     for (l,) in table_key_rest {
         spec_key_dir_name = spec_key_dir_name.join(l.to_string());
     }
-    spec_key_dir_name.join(block_pt.iter().map(|p| p.to_string()).join("_"))
+    spec_key_dir_name
 }
 
 fn write_page_atomic(path: &Path, contents: &PageContents) {
@@ -1228,6 +1404,20 @@ fn validate_target_file<Tgt: Target>(db_path: &Path) -> Result<(), String> {
 fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
     let (inner, h) = Prehashed::as_parts(value);
     Prehashed::new(inner.clone(), *h)
+}
+
+#[cfg(test)]
+fn points_in_rect_int<'a>(
+    bottom: &'a [BimapSInt],
+    top: &'a [BimapSInt],
+) -> impl Iterator<Item = Vec<BimapInt>> + 'a {
+    bottom
+        .iter()
+        .zip(top)
+        .map(|(&bottom, &top)| {
+            BimapInt::try_from(bottom).unwrap()..=BimapInt::try_from(top).unwrap()
+        })
+        .multi_cartesian_product()
 }
 
 #[cfg(test)]

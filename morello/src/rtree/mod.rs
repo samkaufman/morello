@@ -23,6 +23,8 @@ trait RTreeGeneric<T> {
 
     fn size(&self) -> usize;
 
+    fn envelope(&self) -> Option<(Vec<BimapSInt>, Vec<BimapSInt>)>;
+
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T>;
 
     fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_>;
@@ -98,6 +100,13 @@ macro_rules! rtreedyn_cases {
             pub fn size(&self) -> usize {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::size(t), )*
+                }
+            }
+
+            /// Returns the smallest rectangle containing every rectangle in the tree.
+            pub fn envelope(&self) -> Option<(Vec<BimapSInt>, Vec<BimapSInt>)> {
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::envelope(t), )*
                 }
             }
 
@@ -365,6 +374,17 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
     fn size(&self) -> usize {
         self.size()
+    }
+
+    fn envelope(&self) -> Option<(Vec<BimapSInt>, Vec<BimapSInt>)> {
+        if self.size() == 0 {
+            return None;
+        }
+
+        let envelope = self.root().envelope();
+        let bottom = envelope.lower().arr.to_vec();
+        let top = envelope.upper().arr.to_vec();
+        Some((bottom, top))
     }
 
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {

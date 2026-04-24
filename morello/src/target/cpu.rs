@@ -17,8 +17,10 @@ use crate::scheduling::to_max_and_denom::ToMaxAndDenominator;
 use crate::scheduling::to_max_and_unscaled::ToMaxAndUnscaled;
 use crate::scheduling::to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 use crate::scheduling::Action;
+use crate::search::ImplReducer;
 use crate::shape;
-use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+use crate::spatial_action_solver::fallback::FallbackSpatialActionSolver;
+use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Kernel, Memory, Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::gen_vector_sizes_opt;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -156,6 +158,18 @@ impl<T: CpuTarget> Target for T {
     type Memory = <Self as CpuTarget>::Memory;
     type Kernel = <Self as CpuTarget>::Kernel;
     type ActionsIter<'a> = Box<dyn Iterator<Item = Action<Self>> + 'a>;
+    type SpatialSolver<'r> = FallbackSpatialActionSolver<'r, Self>;
+
+    fn spatial_solvers<'r>(
+        spec: &Spec<Self>,
+        reducer: &'r mut ImplReducer,
+    ) -> impl Iterator<Item = Self::SpatialSolver<'r>> {
+        iter::once(FallbackSpatialActionSolver::from_actions(
+            reducer,
+            spec,
+            Self::actions(&spec.0),
+        ))
+    }
 
     fn line_size() -> u32 {
         32
@@ -2252,7 +2266,6 @@ fn is_safe_c_widening(src_dtype: Dtype, dst_dtype: Dtype) -> bool {
 ///
 /// The specific sizes of the inner/packed dimension depend on the given layout, tensor
 /// shape, and tensor [Dtype].
-#[allow(dead_code)]
 fn packed_layouts_for_standard_layout<'a>(
     original_layout: &'a Layout,
     shape: &'a [DimSize],

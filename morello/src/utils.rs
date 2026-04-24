@@ -253,6 +253,15 @@ pub fn sum_seqs<T: PrimInt + Send + 'static>(maxes: &[T], total: T) -> SumSeqs<T
     }
 }
 
+pub fn rect_contains_inclusive<T: PrimInt>(top: &[T], bottom: &[T], point: &[T]) -> bool {
+    debug_assert_eq!(top.len(), bottom.len());
+    debug_assert_eq!(top.len(), point.len());
+    point
+        .iter()
+        .zip(top.iter().zip(bottom.iter()))
+        .all(|(&p, (&t, &b))| b <= p && p <= t)
+}
+
 pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &str) -> String {
     c.into_iter()
         .map(|d| d.to_string())

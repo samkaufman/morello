@@ -1,6 +1,6 @@
 use super::{ActionCostVec, ActionNormalizedCostVec, ActionNum, GetPreference};
 use crate::{
-    cost::{Cost, CostIntensity},
+    cost::{CostIntensity, NormalizedCost},
     grid::{canon::CanonicalBimap, general::BiMap, linear::BimapInt},
     memorylimits::MemVec,
     rtree::RTreeDyn,
@@ -66,6 +66,10 @@ impl RTreePageContents {
         RTreePageContents(RTreeDyn::empty(rank))
     }
 
+    pub fn tree(&self) -> &RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>> {
+        &self.0
+    }
+
     #[cfg(feature = "db-stats")]
     pub fn rect_count(&self) -> usize {
         self.0.size()
@@ -79,11 +83,12 @@ impl RTreePageContents {
         let value = self.0.locate_at_point(&arr)?;
         Some(ActionCostVec(match &value {
             Some((cost_intensity, peaks, depth, action_num)) => {
-                let cost = Cost {
-                    main: cost_intensity.into_main_cost_for_volume(spec_volume),
+                let cost = NormalizedCost {
+                    intensity: *cost_intensity,
                     peaks: peaks.clone(),
                     depth: *depth,
-                };
+                }
+                .into_cost(spec_volume);
                 vec![(*action_num, cost)]
             }
             None => vec![],

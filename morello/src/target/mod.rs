@@ -15,7 +15,9 @@ use crate::cost::MainCost;
 use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
-use crate::spec::LogicalSpec;
+use crate::search::ImplReducer;
+use crate::spatial_action_solver::SpatialActionSolverT;
+use crate::spec::{LogicalSpec, Spec};
 use crate::views::View;
 use crate::{codegen::c_utils::VecType, common::Dtype};
 
@@ -33,6 +35,15 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     type Memory: Memory;
     type Kernel: Kernel<Tgt = Self>;
     type ActionsIter<'a>: Iterator<Item = Action<Self>> + 'a;
+    type SpatialSolver<'r>: SpatialActionSolverT<Self>
+    where
+        Self: 'r;
+
+    // TODO: Rename fn and return type once there's only one kind of solver.
+    fn spatial_solvers<'r>(
+        spec: &Spec<Self>,
+        reducer: &'r mut ImplReducer,
+    ) -> impl Iterator<Item = Self::SpatialSolver<'r>>;
 
     fn line_size() -> u32;
     fn max_mem() -> MemoryLimits;

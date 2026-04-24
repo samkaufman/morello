@@ -832,7 +832,8 @@ impl ImplReducer {
         }
     }
 
-    fn finalize(self) -> Vec<(ActionNum, Cost)> {
+    // TODO: Drop `pub(crate)` once spatial_search.rs is the only search algo.
+    pub(crate) fn finalize(self) -> Vec<(ActionNum, Cost)> {
         match self.results {
             ImplReducerResults::One(None) => vec![],
             ImplReducerResults::One(Some((cost, action_num))) => vec![(action_num, cost)],
