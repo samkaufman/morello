@@ -260,7 +260,7 @@ mod tests {
             lspec!(Move([5], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
-        let result = top_down(&db, &spec_5, 1);
+        let result = top_down(&db, &spec_5);
         assert!(!result.is_empty(), "Should be able to synthesize Move([5])");
         assert!(
             db.get(&spec_5).is_some(),
@@ -273,7 +273,7 @@ mod tests {
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
         assert!(
-            db.get(&spec_2).is_some(),
+            db.get(&spec_3).is_some(),
             "Database should contain Move([3]) after synthesizing Move([5])"
         );
 

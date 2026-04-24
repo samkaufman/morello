@@ -26,7 +26,7 @@ struct ActionCandidate<Tgt: Target> {
     /// The order is critical because [ActionSolver::compute_cost] expects cost order to
     /// match [ActionSolver::subspecs].
     subspecs: Vec<Spec<Tgt>>,
-    /// Per-child resolution state aligned by index with `subspecs`.  If `child_costs`
+    /// Per-child resolution state aligned by index with `subspecs`. If `child_costs`
     /// is `None`, then this action is unsatisfiable or was already fed into the
     /// [ImplReducer].
     child_costs: Option<Vec<Option<Cost>>>,
@@ -91,8 +91,6 @@ impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<Tgt> {
                     .map(|&coord| BimapInt::try_from(coord).unwrap()),
             );
             let spec = BiMap::apply_inverse(bimap, &query_key);
-            // TODO: Do we need to run `contains_key`? resolve_spec is already going to access
-            //       dependency_index.
             if self.dependency_index.contains_key(&spec) {
                 self.resolve_spec(
                     reducer,
@@ -185,12 +183,12 @@ impl<Tgt: Target> FallbackSpatialActionSolver<Tgt> {
         }
     }
 
-    /// Like [ActionCandidate::reject], but also updates removes the candidate's dependencies from
+    /// Like [ActionCandidate::reject], but also removes the candidate's dependencies from
     /// `dependency_index`.
     fn reject_candidate(&mut self, candidate_idx: usize) {
         for spec in self.candidates[candidate_idx].reject() {
             let Some(handles) = self.dependency_index.get_mut(&spec) else {
-                return;
+                continue;
             };
             handles.retain(|handle| handle.candidate_idx != candidate_idx);
             if handles.is_empty() {
@@ -251,7 +249,7 @@ impl<Tgt: Target> ActionCandidate<Tgt> {
     }
 
     /// Computes this action's cost if all children are resolved, then marks it
-    /// complete.  If any children are unresolved, or if the candidate was already
+    /// complete. If any children are unresolved, or if the candidate was already
     /// rejected because a child had no implementation, returns `None` and leaves the
     /// candidate unchanged.
     fn try_complete(&mut self) -> Option<(ActionNum, Cost)> {

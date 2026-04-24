@@ -874,7 +874,15 @@ impl FilesDatabase {
             return None;
         }
 
-        Some(MutexGuard::map(shard_guard, |s| s.load_live_page_mut(key)))
+        Some(MutexGuard::map(shard_guard, |s| {
+            s.async_get(key);
+            s.process_bg_thread_msgs_until(|resp| match resp {
+                ShardThreadResponse::Loaded(k, _) => k != key,
+            });
+            s.cache
+                .get_mut(key)
+                .unwrap_or_else(|| panic!("just-requested key in cache: {key:?}"))
+        }))
     }
 
     fn shard_index(&self, key: &Prehashed<PageKey>) -> usize {
@@ -1609,7 +1617,7 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
 }
 
 fn table_dir_path(root: &Path, table_key: &TableKey) -> path::PathBuf {
-    let ((spec_key, _), block_pt) = page_key;
+    let (spec_key, _): &(SpecKey, Vec<()>) = table_key;
     let spec_key_dir_name = match spec_key {
         SpecKey::OnePrefix { rank, dtypes } => root
             .join(format!("OnePrefix{}", rank))

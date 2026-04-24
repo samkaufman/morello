@@ -20,6 +20,7 @@ pub mod scheduling_sugar;
 pub mod search;
 mod spatial_action_solver;
 mod spatial_query;
+pub mod spatial_search;
 pub mod spec;
 pub mod target;
 pub mod tensorspec;

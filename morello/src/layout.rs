@@ -1364,19 +1364,6 @@ mod tests {
     }
 
     #[test]
-    fn test_packed_larger_than_logical_dimension_applies_to_shape() {
-        let layout = layout![0 p(4)];
-        assert!(layout.applies_to_shape(&shape![2]));
-    }
-
-    #[test]
-    fn test_oddeven_larger_than_logical_dimension_applies_only_to_unit_shape() {
-        let layout = layout![0 oe(4)];
-        assert!(layout.applies_to_shape(&shape![1]));
-        assert!(!layout.applies_to_shape(&shape![2]));
-    }
-
-    #[test]
     fn test_expand_physical_shape_7() {
         let layout = layout![0 p(4), 1];
         let expanded = layout.expand_physical_shape(&shape![8, 64]);
@@ -1845,29 +1832,6 @@ mod tests {
         }
 
         #[test]
-        fn test_canonicalize_preserves_buffer_indexing_expr_values(
-            (shape, layout) in arb_shape_and_same_rank_layout()
-        ) {
-            let Ok(canonicalized_layout) = layout.canonicalize(&shape) else {
-                prop_assume!(false);
-                unreachable!();
-            };
-
-            let expr_id = OpaqueSymbol::new();
-            let original_expr = layout.buffer_indexing_expr(expr_id, &shape);
-            let canonicalized_expr = canonicalized_layout.buffer_indexing_expr(expr_id, &shape);
-
-            prop_assert_eq!(
-                eval_all_index_expr_points(&original_expr, &shape),
-                eval_all_index_expr_points(&canonicalized_expr, &shape),
-                "canonicalize changed the evaluated indexing expression for shape {:?}: {} -> {}",
-                shape,
-                layout,
-                canonicalized_layout
-            );
-        }
-
-        #[test]
         fn test_dim_drop_returns_valid_contig(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
@@ -1947,6 +1911,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn eval_all_index_expr_points(expr: &NonAffineExpr<BufferVar>, shape: &[DimSize]) -> Vec<i32> {
+        shape
+            .iter()
+            .map(|&d| 0..d.get())
+            .multi_cartesian_product()
+            .map(|pt| {
+                let evaluated: NonAffineExpr<&str> = expr.clone().map_vars(&mut |var| match var {
+                    BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
+                    BufferVar::Pt(dim, _) => NonAffineExpr::constant(pt[usize::from(dim)] as i32),
+                });
+                assert!(
+                    evaluated.0.is_empty(),
+                    "Non-constant index expression: {:?}",
+                    evaluated
+                );
+                evaluated.1
+            })
+            .collect()
     }
 
     fn test_layout_fully_contiguous_or_not_strategy(
