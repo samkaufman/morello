@@ -24,7 +24,7 @@ pub trait SpatialActionSolverT<Tgt: Target> {
         normalized_cost: Option<&NormalizedCost>,
     ) where
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
-        K: Eq + Hash;
+        K: Clone + Eq + Hash;
 
     fn resolve_unmemoizable_dependency(&mut self, spec: &Spec<Tgt>, result: &ActionCostVec);
 

@@ -8,12 +8,15 @@ use crate::spatial_action_solver::SpatialActionSolverT;
 use crate::spatial_query::SpatialQuery;
 use crate::spec::Spec;
 use crate::target::Target;
-use crate::utils::rect_contains_inclusive;
+use itertools::Itertools;
+use std::collections::HashMap;
 use std::hash::Hash;
 
 pub struct FallbackSpatialActionSolver<'r, Tgt: Target> {
     reducer: &'r mut ImplReducer,
     candidates: Vec<ActionCandidate<Tgt>>,
+    /// Pending candidate actions keyed by a sub-Spec they require.
+    dependency_index: HashMap<Spec<Tgt>, Vec<DependencyHandle>>,
 }
 
 struct ActionCandidate<Tgt: Target> {
@@ -28,6 +31,12 @@ struct ActionCandidate<Tgt: Target> {
     /// is `None`, then this action is unsatisfiable or was already fed into the
     /// [ImplReducer].
     child_costs: Option<Vec<Option<Cost>>>,
+}
+
+#[derive(Clone, Copy)]
+struct DependencyHandle {
+    candidate_idx: usize,
+    child_idx: usize,
 }
 
 impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
@@ -59,14 +68,7 @@ impl<Tgt: Target> SpatialActionSolverT<Tgt> for FallbackSpatialActionSolver<'_, 
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
         K: Eq + Hash,
     {
-        SpatialQuery::from_subspecs(
-            bimap,
-            self.candidates.iter().flat_map(|x| {
-                // TODO: unresolved_children can probably be replaced by assuming
-                //       everything is unresolve
-                x.unresolved_children().cloned()
-            }),
-        )
+        SpatialQuery::from_subspecs(bimap, self.dependency_index.keys().cloned())
     }
 
     fn resolve<B, K>(
@@ -78,32 +80,38 @@ impl<Tgt: Target> SpatialActionSolverT<Tgt> for FallbackSpatialActionSolver<'_, 
         normalized_cost: Option<&NormalizedCost>,
     ) where
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
-        K: Eq + Hash,
+        K: Clone + Eq + Hash,
     {
-        // TODO: Iterating over all candidates is very inefficient.
-        for candidate in &mut self.candidates {
-            if let Some((action_num, cost)) =
-                candidate.resolve(bimap, table_key, bottom, top, normalized_cost)
-            {
-                self.reducer.insert(action_num, cost);
-            }
-        }
+        bottom
+            .iter()
+            .zip(top)
+            .map(|(&bottom, &top)| {
+                let bottom = BimapInt::try_from(bottom).unwrap();
+                let top = BimapInt::try_from(top).unwrap();
+                bottom..=top
+            })
+            .multi_cartesian_product()
+            .for_each(|global_pt| {
+                let spec = BiMap::apply_inverse(bimap, &(table_key.clone(), global_pt));
+                // TODO: Do we need to run `contains_key`? resolve_spec is already going to access
+                //       dependency_index.
+                if self.dependency_index.contains_key(&spec) {
+                    self.resolve_spec(
+                        &spec,
+                        normalized_cost.map(|cost| cost.clone().into_cost(spec.0.volume())),
+                    );
+                }
+            });
     }
 
     fn resolve_unmemoizable_dependency(&mut self, spec: &Spec<Tgt>, result: &ActionCostVec) {
         assert!(result.len() < 2);
         let cost = result.iter().next().map(|(_, cost)| cost.clone());
-        // TODO: Iterating over all candidates is very inefficient.
-        for candidate in &mut self.candidates {
-            if let Some((action_num, cost)) =
-                candidate.resolve_unmemoizable_dependency(spec, cost.clone())
-            {
-                self.reducer.insert(action_num, cost);
-            }
-        }
+        self.resolve_spec(spec, cost);
     }
 
     fn finalize(self) {
+        debug_assert!(self.dependency_index.is_empty());
         debug_assert!(self
             .candidates
             .iter()
@@ -113,16 +121,79 @@ impl<Tgt: Target> SpatialActionSolverT<Tgt> for FallbackSpatialActionSolver<'_, 
 
 impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
     fn new(reducer: &'r mut ImplReducer, candidates: Vec<ActionCandidate<Tgt>>) -> Self {
+        let mut dependency_index = HashMap::<_, Vec<_>>::new();
+        for (candidate_idx, candidate) in candidates.iter().enumerate() {
+            for (child_idx, subspec) in candidate.unresolved_dependencies() {
+                dependency_index
+                    .entry(subspec.clone())
+                    .or_default()
+                    .push(DependencyHandle {
+                        candidate_idx,
+                        child_idx,
+                    });
+            }
+        }
+
         let mut solver = FallbackSpatialActionSolver {
             reducer,
             candidates,
+            dependency_index,
         };
+
+        // Immediately complete any dependency-free candidates.
         for candidate in &mut solver.candidates {
             if let Some((action_num, cost)) = candidate.try_complete() {
                 solver.reducer.insert(action_num, cost);
             }
         }
         solver
+    }
+
+    /// Resolves the given dependency Spec, updating all depending candidates.
+    ///
+    /// This will remove the key from `dependency_index`. Any candidate for which this is the final
+    /// outstanding dependency will be fed into the [ImplReducer]. If the cost is `None`, then the
+    /// candidates depending on this Spec are rejected: they are not fed into the [ImplReducer], and
+    /// their other dependencies are removed from `dependency_index`.
+    fn resolve_spec(&mut self, spec: &Spec<Tgt>, cost: Option<Cost>) {
+        let Some(handles) = self.dependency_index.remove(spec) else {
+            return;
+        };
+
+        match cost {
+            Some(cost) => {
+                for handle in handles {
+                    debug_assert_eq!(
+                        &self.candidates[handle.candidate_idx].subspecs[handle.child_idx],
+                        spec
+                    );
+                    if let Some((action_num, cost)) = self.candidates[handle.candidate_idx]
+                        .resolve_child(handle.child_idx, cost.clone())
+                    {
+                        self.reducer.insert(action_num, cost);
+                    }
+                }
+            }
+            None => {
+                for handle in handles {
+                    self.reject_candidate(handle.candidate_idx);
+                }
+            }
+        }
+    }
+
+    /// Like [ActionCandidate::reject], but also updates removes the candidate's dependencies from
+    /// `dependency_index`.
+    fn reject_candidate(&mut self, candidate_idx: usize) {
+        for spec in self.candidates[candidate_idx].reject() {
+            let Some(handles) = self.dependency_index.get_mut(&spec) else {
+                return;
+            };
+            handles.retain(|handle| handle.candidate_idx != candidate_idx);
+            if handles.is_empty() {
+                self.dependency_index.remove(&spec);
+            }
+        }
     }
 }
 
@@ -139,7 +210,7 @@ impl<Tgt: Target> ActionCandidate<Tgt> {
         }
     }
 
-    fn unresolved_children(&self) -> impl Iterator<Item = &Spec<Tgt>> {
+    fn unresolved_dependencies(&self) -> impl Iterator<Item = (usize, &Spec<Tgt>)> {
         let costs = self.child_costs.as_ref();
         self.subspecs
             .iter()
@@ -147,68 +218,33 @@ impl<Tgt: Target> ActionCandidate<Tgt> {
             .filter_map(move |(idx, subspec)| {
                 costs
                     .is_some_and(|costs| costs[idx].is_none())
-                    .then_some(subspec)
+                    .then_some((idx, subspec))
             })
     }
 
-    fn resolve<B, K>(
-        &mut self,
-        bimap: &B,
-        table_key: &K,
-        bottom: &[BimapSInt],
-        top: &[BimapSInt],
-        normalized_cost: Option<&NormalizedCost>,
-    ) -> Option<(ActionNum, Cost)>
-    where
-        B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
-        K: Eq + Hash,
-    {
+    fn resolve_child(&mut self, child_idx: usize, cost: Cost) -> Option<(ActionNum, Cost)> {
         let costs = self.child_costs.as_mut()?;
-        for (idx, subspec) in self.subspecs.iter().enumerate() {
-            debug_assert!(BiMap::defined_for(bimap, subspec));
-            if costs[idx].is_some() {
-                log::warn!(
-                    "Candidate for action {} received multiple \
-                    resolutions for child {idx}: ignoring subsequent resolution",
-                    self.action_num
-                );
-                continue;
-            }
-            let (subspec_table_key, global_pt) = BiMap::apply(bimap, subspec);
-            let global_pt_sint = global_pt
-                .iter()
-                .map(|&p| BimapSInt::from(p))
-                .collect::<Vec<_>>();
-            if subspec_table_key == *table_key
-                && rect_contains_inclusive(top, bottom, &global_pt_sint)
-            {
-                let Some(normalized_cost) = normalized_cost else {
-                    self.child_costs = None;
-                    return None;
-                };
-                costs[idx] = Some(normalized_cost.clone().into_cost(subspec.0.volume()));
-            }
-        }
+        assert!(
+            costs[child_idx].is_none(),
+            "Candidate for action {} received multiple resolutions for child {child_idx}",
+            self.action_num
+        );
+        costs[child_idx] = Some(cost);
         self.try_complete()
     }
 
-    fn resolve_unmemoizable_dependency(
-        &mut self,
-        spec: &Spec<Tgt>,
-        cost: Option<Cost>,
-    ) -> Option<(ActionNum, Cost)> {
-        let costs = self.child_costs.as_mut()?;
-        for (idx, subspec) in self.subspecs.iter().enumerate() {
-            if costs[idx].is_some() || subspec != spec {
-                continue;
-            }
-            let Some(cost) = &cost else {
-                self.child_costs = None;
-                return None;
-            };
-            costs[idx] = Some(cost.clone());
+    /// Sets `child_costs` to `None` to indicate this candidate is unsatisfiable or already fed into
+    /// the [ImplReducer], then returns the list of unresolved sub-Specs.
+    fn reject(&mut self) -> Vec<Spec<Tgt>> {
+        match self.child_costs.take() {
+            Some(costs) => self
+                .subspecs
+                .iter()
+                .zip(costs)
+                .filter_map(|(subspec, cost)| cost.is_none().then_some(subspec.clone()))
+                .collect(),
+            None => vec![],
         }
-        self.try_complete()
     }
 
     /// Computes this action's cost if all children are resolved, then marks it
