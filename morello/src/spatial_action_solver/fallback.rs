@@ -4,7 +4,7 @@ use crate::grid::general::BiMap;
 use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::scheduling::{Action, ActionSolver, ActionT as _, ApplyError};
 use crate::search::ImplReducer;
-use crate::spatial_action_solver::SpatialActionSolverT;
+use crate::spatial_action_solver::SpatialSolver;
 use crate::spatial_query::SpatialQuery;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -62,7 +62,7 @@ impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
     }
 }
 
-impl<Tgt: Target> SpatialActionSolverT<Tgt> for FallbackSpatialActionSolver<'_, Tgt> {
+impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<'_, Tgt> {
     fn spatial_query<B, K>(&self, bimap: &B) -> SpatialQuery<Tgt, B, K>
     where
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,

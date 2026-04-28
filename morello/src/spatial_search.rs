@@ -4,7 +4,7 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::grid::linear::BimapSInt;
 use crate::search::ImplReducer;
-use crate::spatial_action_solver::SpatialActionSolverT;
+use crate::spatial_action_solver::SpatialSolver;
 use crate::spec::Spec;
 use crate::target::Target;
 use std::collections::HashMap;
