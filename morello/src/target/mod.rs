@@ -16,7 +16,7 @@ use crate::layout::Layout;
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::Action;
 use crate::search::ImplReducer;
-use crate::spatial_action_solver::SpatialActionSolverT;
+use crate::spatial_action_solver::SpatialSolver;
 use crate::spec::{LogicalSpec, Spec};
 use crate::views::View;
 use crate::{codegen::c_utils::VecType, common::Dtype};
@@ -35,7 +35,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     type Memory: Memory;
     type Kernel: Kernel<Tgt = Self>;
     type ActionsIter<'a>: Iterator<Item = Action<Self>> + 'a;
-    type SpatialSolver<'r>: SpatialActionSolverT<Self>
+    type SpatialSolver<'r>: SpatialSolver<Self>
     where
         Self: 'r;
 

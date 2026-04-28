@@ -9,7 +9,7 @@ use std::hash::Hash;
 
 pub mod fallback;
 
-pub trait SpatialActionSolverT<Tgt: Target> {
+pub trait SpatialSolver<Tgt: Target> {
     fn spatial_query<B, K>(&self, bimap: &B) -> SpatialQuery<Tgt, B, K>
     where
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
