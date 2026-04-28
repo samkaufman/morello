@@ -2,6 +2,7 @@ use crate::cost::NormalizedCost;
 use crate::db::ActionCostVec;
 use crate::grid::general::BiMap;
 use crate::grid::linear::{BimapInt, BimapSInt};
+use crate::search::ImplReducer;
 use crate::spatial_query::SpatialQuery;
 use crate::spec::Spec;
 use crate::target::Target;
@@ -22,11 +23,17 @@ pub trait SpatialSolver<Tgt: Target> {
         bottom: &[BimapSInt],
         top: &[BimapSInt],
         normalized_cost: Option<&NormalizedCost>,
+        reducer: &mut ImplReducer,
     ) where
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
         K: Clone + Eq + Hash;
 
-    fn resolve_unmemoizable_dependency(&mut self, spec: &Spec<Tgt>, result: &ActionCostVec);
+    fn resolve_unmemoizable_dependency(
+        &mut self,
+        spec: &Spec<Tgt>,
+        result: &ActionCostVec,
+        reducer: &mut ImplReducer,
+    );
 
     fn finalize(self);
 }
