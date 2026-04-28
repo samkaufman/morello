@@ -81,7 +81,14 @@ where
 
             self.db
                 .spatial_query(&query, |table_key, bottom, top, memoized_cost| {
-                    solver.resolve(&bimap, table_key, bottom, top, memoized_cost.as_ref());
+                    solver.resolve(
+                        &bimap,
+                        table_key,
+                        bottom,
+                        top,
+                        memoized_cost.as_ref(),
+                        &mut reducer,
+                    );
                     missing_query.subtract_rect(table_key, bottom, top);
                 });
 
@@ -103,13 +110,14 @@ where
                     &global_pt,
                     &global_pt,
                     normalized_cost.as_ref(),
+                    &mut reducer,
                 );
             });
 
             for subspec in query.unmemoizable_specs() {
                 assert!(subspec.is_canonical());
                 let subspec_result = self.solve_canonical(subspec);
-                solver.resolve_unmemoizable_dependency(subspec, &subspec_result);
+                solver.resolve_unmemoizable_dependency(subspec, &subspec_result, &mut reducer);
             }
 
             solver.finalize();

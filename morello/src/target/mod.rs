@@ -1,14 +1,14 @@
 mod arm;
 mod avx2;
 mod avx512;
-mod common_actions;
+pub(crate) mod common_actions;
 pub(crate) mod cpu;
 mod x86;
 
 pub use arm::ArmTarget;
 pub use avx2::Avx2Target;
 pub use avx512::Avx512Target;
-pub use cpu::{CpuKernel, CpuMemory, CpuTarget};
+pub use cpu::{CpuKernel, CpuMemory, CpuSolver, CpuTarget};
 
 use crate::common::DimSize;
 use crate::cost::MainCost;
@@ -35,15 +35,13 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     type Memory: Memory;
     type Kernel: Kernel<Tgt = Self>;
     type ActionsIter<'a>: Iterator<Item = Action<Self>> + 'a;
-    type SpatialSolver<'r>: SpatialSolver<Self>
-    where
-        Self: 'r;
+    type SpatialSolver: SpatialSolver<Self>;
 
     // TODO: Rename fn and return type once there's only one kind of solver.
-    fn spatial_solvers<'r>(
-        spec: &Spec<Self>,
-        reducer: &'r mut ImplReducer,
-    ) -> impl Iterator<Item = Self::SpatialSolver<'r>>;
+    fn spatial_solvers<'s>(
+        spec: &'s Spec<Self>,
+        reducer: &mut ImplReducer,
+    ) -> impl Iterator<Item = Self::SpatialSolver> + 's;
 
     fn line_size() -> u32;
     fn max_mem() -> MemoryLimits;

@@ -12,8 +12,7 @@ use itertools::Itertools;
 use std::collections::HashMap;
 use std::hash::Hash;
 
-pub struct FallbackSpatialActionSolver<'r, Tgt: Target> {
-    reducer: &'r mut ImplReducer,
+pub struct FallbackSpatialActionSolver<Tgt: Target> {
     candidates: Vec<ActionCandidate<Tgt>>,
     /// Pending candidate actions keyed by a sub-Spec they require.
     dependency_index: HashMap<Spec<Tgt>, Vec<DependencyHandle>>,
@@ -39,9 +38,9 @@ struct DependencyHandle {
     child_idx: usize,
 }
 
-impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
+impl<Tgt: Target> FallbackSpatialActionSolver<Tgt> {
     pub fn from_actions(
-        reducer: &'r mut ImplReducer,
+        reducer: &mut ImplReducer,
         goal: &Spec<Tgt>,
         actions: impl IntoIterator<Item = Action<Tgt>>,
     ) -> Self {
@@ -62,7 +61,7 @@ impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
     }
 }
 
-impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<'_, Tgt> {
+impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<Tgt> {
     fn spatial_query<B, K>(&self, bimap: &B) -> SpatialQuery<Tgt, B, K>
     where
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
@@ -78,6 +77,7 @@ impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<'_, Tgt> {
         bottom: &[BimapSInt],
         top: &[BimapSInt],
         normalized_cost: Option<&NormalizedCost>,
+        reducer: &mut ImplReducer,
     ) where
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
         K: Clone + Eq + Hash,
@@ -97,6 +97,7 @@ impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<'_, Tgt> {
                 //       dependency_index.
                 if self.dependency_index.contains_key(&spec) {
                     self.resolve_spec(
+                        reducer,
                         &spec,
                         normalized_cost.map(|cost| cost.clone().into_cost(spec.0.volume())),
                     );
@@ -104,10 +105,15 @@ impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<'_, Tgt> {
             });
     }
 
-    fn resolve_unmemoizable_dependency(&mut self, spec: &Spec<Tgt>, result: &ActionCostVec) {
+    fn resolve_unmemoizable_dependency(
+        &mut self,
+        spec: &Spec<Tgt>,
+        result: &ActionCostVec,
+        reducer: &mut ImplReducer,
+    ) {
         assert!(result.len() < 2);
         let cost = result.iter().next().map(|(_, cost)| cost.clone());
-        self.resolve_spec(spec, cost);
+        self.resolve_spec(reducer, spec, cost);
     }
 
     fn finalize(self) {
@@ -119,8 +125,8 @@ impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<'_, Tgt> {
     }
 }
 
-impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
-    fn new(reducer: &'r mut ImplReducer, candidates: Vec<ActionCandidate<Tgt>>) -> Self {
+impl<Tgt: Target> FallbackSpatialActionSolver<Tgt> {
+    fn new(reducer: &mut ImplReducer, candidates: Vec<ActionCandidate<Tgt>>) -> Self {
         let mut dependency_index = HashMap::<_, Vec<_>>::new();
         for (candidate_idx, candidate) in candidates.iter().enumerate() {
             for (child_idx, subspec) in candidate.unresolved_dependencies() {
@@ -135,7 +141,6 @@ impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
         }
 
         let mut solver = FallbackSpatialActionSolver {
-            reducer,
             candidates,
             dependency_index,
         };
@@ -143,7 +148,7 @@ impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
         // Immediately complete any dependency-free candidates.
         for candidate in &mut solver.candidates {
             if let Some((action_num, cost)) = candidate.try_complete() {
-                solver.reducer.insert(action_num, cost);
+                reducer.insert(action_num, cost);
             }
         }
         solver
@@ -155,7 +160,7 @@ impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
     /// outstanding dependency will be fed into the [ImplReducer]. If the cost is `None`, then the
     /// candidates depending on this Spec are rejected: they are not fed into the [ImplReducer], and
     /// their other dependencies are removed from `dependency_index`.
-    fn resolve_spec(&mut self, spec: &Spec<Tgt>, cost: Option<Cost>) {
+    fn resolve_spec(&mut self, reducer: &mut ImplReducer, spec: &Spec<Tgt>, cost: Option<Cost>) {
         let Some(handles) = self.dependency_index.remove(spec) else {
             return;
         };
@@ -170,7 +175,7 @@ impl<'r, Tgt: Target> FallbackSpatialActionSolver<'r, Tgt> {
                     if let Some((action_num, cost)) = self.candidates[handle.candidate_idx]
                         .resolve_child(handle.child_idx, cost.clone())
                     {
-                        self.reducer.insert(action_num, cost);
+                        reducer.insert(action_num, cost);
                     }
                 }
             }

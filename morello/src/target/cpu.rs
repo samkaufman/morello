@@ -20,6 +20,7 @@ use crate::scheduling::Action;
 use crate::search::ImplReducer;
 use crate::shape;
 use crate::spatial_action_solver::fallback::FallbackSpatialActionSolver;
+use crate::spatial_action_solver::SpatialSolver;
 use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Kernel, Memory, Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::gen_vector_sizes_opt;
@@ -154,21 +155,91 @@ pub enum CpuMemory {
 #[derive(Debug, Clone, Copy)]
 pub struct CpuMemoryBimap;
 
+macro_rules! spatialsolver_dispatch {
+    (
+        $(#[$meta:meta])* $name:ident,
+        $( $(#[$var_meta:meta])* ($variant:ident, $innertype:ty) ),* $(,)?
+    ) => {
+        $(#[$meta])*
+        pub enum $name<Tgt: Target> {
+            $( $(#[$var_meta])* $variant($innertype) ),*
+        }
+
+        impl<Tgt: Target> SpatialSolver<Tgt> for $name<Tgt> {
+            fn spatial_query<B, K>(&self, bimap: &B) -> crate::spatial_query::SpatialQuery<Tgt, B, K>
+            where
+                B: crate::grid::general::BiMap<Domain = crate::spec::Spec<Tgt>, Codomain = (K, Vec<crate::grid::linear::BimapInt>)>,
+                K: Eq + std::hash::Hash,
+            {
+                match self {
+                    $( Self::$variant(solver) => solver.spatial_query(bimap) ),*
+                }
+            }
+
+            fn resolve<B, K>(
+                &mut self,
+                bimap: &B,
+                table_key: &K,
+                bottom: &[crate::grid::linear::BimapSInt],
+                top: &[crate::grid::linear::BimapSInt],
+                normalized_cost: Option<&crate::cost::NormalizedCost>,
+                reducer: &mut crate::search::ImplReducer,
+            )
+            where
+                B: crate::grid::general::BiMap<Domain = crate::spec::Spec<Tgt>, Codomain = (K, Vec<crate::grid::linear::BimapInt>)>,
+                K: Clone + Eq + std::hash::Hash,
+            {
+                match self {
+                    $( Self::$variant(solver) => solver.resolve(bimap, table_key, bottom, top, normalized_cost, reducer) ),*
+                }
+            }
+
+            fn resolve_unmemoizable_dependency(
+                &mut self,
+                spec: &crate::spec::Spec<Tgt>,
+                result: &crate::db::ActionCostVec,
+                reducer: &mut crate::search::ImplReducer,
+            ) {
+                match self {
+                    $( Self::$variant(solver) => solver.resolve_unmemoizable_dependency(spec, result, reducer) ),*
+                }
+            }
+
+            fn finalize(self) {
+                match self {
+                    $( Self::$variant(solver) => solver.finalize() ),*
+                }
+            }
+        }
+
+        $(
+        impl<Tgt: Target> From<$innertype> for $name<Tgt> {
+            fn from(value: $innertype) -> Self {
+                Self::$variant(value)
+            }
+        }
+        )*
+    };
+}
+
+spatialsolver_dispatch! {
+    CpuSolver,
+    (Fallback, FallbackSpatialActionSolver<Tgt>),
+}
+
 impl<T: CpuTarget> Target for T {
     type Memory = <Self as CpuTarget>::Memory;
     type Kernel = <Self as CpuTarget>::Kernel;
     type ActionsIter<'a> = Box<dyn Iterator<Item = Action<Self>> + 'a>;
-    type SpatialSolver<'r> = FallbackSpatialActionSolver<'r, Self>;
+    type SpatialSolver = CpuSolver<Self>;
 
-    fn spatial_solvers<'r>(
-        spec: &Spec<Self>,
-        reducer: &'r mut ImplReducer,
-    ) -> impl Iterator<Item = Self::SpatialSolver<'r>> {
-        iter::once(FallbackSpatialActionSolver::from_actions(
-            reducer,
-            spec,
-            Self::actions(&spec.0),
-        ))
+    fn spatial_solvers<'s>(
+        spec: &'s Spec<Self>,
+        reducer: &mut ImplReducer,
+    ) -> impl Iterator<Item = Self::SpatialSolver> + 's {
+        iter::once(
+            FallbackSpatialActionSolver::from_actions(reducer, spec, Self::actions(&spec.0)).into(),
+        )
     }
 
     fn line_size() -> u32 {
