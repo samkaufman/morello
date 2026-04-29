@@ -65,6 +65,7 @@ crate::target::x86::define_x86_vec_types!(
     },
 );
 
+/// x86 AVX-512 CPU target with AVX512F, AVX512BW, and FMA.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Default, Debug, Serialize)]
 pub struct Avx512Target;
 

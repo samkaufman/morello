@@ -955,7 +955,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 Vec::with_capacity(reduced_accum_names.len().div_ceil(2));
                             for pair in reduced_accum_names.chunks(2) {
                                 if pair.len() == 2 {
-                                    writeln!(w, "{0}{1} += {2};", indent(depth), pair[0], pair[1],)?;
+                                    writeln!(w, "{}{} += {};", indent(depth), pair[0], pair[1])?;
                                 }
                                 next_round.push(pair[0].clone());
                             }
@@ -1586,7 +1586,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             let concat_name = self.namer.fresh_name();
                             let broad_name = self.namer.fresh_name();
 
-                            let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(vector_size_bf16);
+                            let (shift_fn, _, _, _) = vec_func_names(vector_size_bf16);
                             let (shift_fn_out, _, _, broadcast16_out) =
                                 vec_func_names(vector_size_bf16 * 2);
 
@@ -1608,28 +1608,31 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 odd_name,
                                 vf8.native_type_name,
                                 exprs[1],
-                                8 * vector_size_bf16 / 4
+                                16
                             )?;
                             writeln!(
                                 w,
-                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                                "{}{} {} = {};",
                                 indent(depth),
                                 vf8.name,
                                 even_name,
-                                vf8.native_type_name,
-                                exprs[1],
+                                bf16_even_lanes_expr(
+                                    vector_size_bf16,
+                                    vf8.name,
+                                    vf8.native_type_name,
+                                    &exprs[1],
+                                ),
                             )?;
 
-                            // TODO: Combine!
-                            // TODO: Indices below should be generic in vector size
                             writeln!(
                                 w,
-                                "{}{} {} = __builtin_shufflevector({}, {}, 0, 4, 1, 5, 2, 6, 3, 7);",
+                                "{}{} {} = __builtin_shufflevector({}, {}, {});",
                                 indent(depth),
                                 vfc.name,
                                 concat_name,
                                 odd_name,
                                 even_name,
+                                interleave_vector_halves_shuffle_indices(vector_size_bf16),
                             )?;
 
                             // TODO: Don't inline `short` below.
@@ -1660,6 +1663,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
 
                             self.headers.vector_type_defs.insert(vf8);
+                            self.headers.vector_type_defs.insert(vfc);
                         }
                         Ok(())
                     }
@@ -1829,7 +1833,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             })
                             .collect::<Vec<_>>();
 
-                        let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+                        let (shift_fn, _, _, _) = vec_func_names(16);
 
                         let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
                         let vbf16 = get_vector(
@@ -1890,11 +1894,16 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 )?;
                                 writeln!(
                                     w,
-                                    "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), ({3}){compressed_name}, 0xAA);",
+                                    "{}{} {} = {};",
                                     indent(depth + 1),
                                     vf32.name,
                                     even_name,
-                                    vf32.native_type_name,
+                                    bf16_even_lanes_expr(
+                                        16,
+                                        vf32.name,
+                                        vf32.native_type_name,
+                                        &compressed_name,
+                                    ),
                                 )?;
                             }
 
@@ -2128,7 +2137,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
 
-                            let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+                            let (shift_fn, _, _, _) = vec_func_names(16);
                             writeln!(
                                 w,
                                 "{0}{1} {2} = ({1}){shift_fn}(({3}){4}, 16);",
@@ -2140,12 +2149,16 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
                             writeln!(
                                 w,
-                                "{0}{1} {2} = ({1}){blend_fn}({zero_fn}(), ({3}){4}, 0xAA);",
+                                "{0}{1} {2} = {3};",
                                 indent(depth + 1),
                                 vf32.name,
                                 lower_rhs_name,
-                                vf32.native_type_name,
-                                compressed_name
+                                bf16_even_lanes_expr(
+                                    16,
+                                    vf32.name,
+                                    vf32.native_type_name,
+                                    &compressed_name,
+                                ),
                             )?;
 
                             for (lhs, rhs, a) in [
@@ -2295,7 +2308,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let even_name = self.c_index_vec(rhs_buffer, &rhs0_iexpr, None);
                         let odd_name = self.c_index_vec(rhs_buffer, &rhs1_iexpr, None);
 
-                        let (shift_fn, blend_fn, zero_fn, _) = vec_func_names(16);
+                        let (shift_fn, _, _, _) = vec_func_names(16);
 
                         let vf8 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
                         writeln!(
@@ -2309,12 +2322,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         writeln!(
                             w,
-                            "{0}{2} = ({1}){blend_fn}({zero_fn}(), *({3}*)(&{4}), 0xAA);",
+                            "{}{} = {};",
                             indent(depth),
-                            vf8.name,
                             odd_name,
-                            vf8.native_type_name,
-                            src_name
+                            bf16_even_lanes_expr(16, vf8.name, vf8.native_type_name, &src_name),
                         )?;
                         Ok(())
                     }
@@ -2889,7 +2900,7 @@ impl<Tgt: Target> Default for CpuCodeGenerator<Tgt> {
     }
 }
 
-fn vec_func_names(
+const fn vec_func_names(
     vector_size_bf16: u32,
 ) -> (&'static str, &'static str, &'static str, &'static str) {
     match vector_size_bf16 {
@@ -2905,8 +2916,60 @@ fn vec_func_names(
             "_mm256_setzero_si256",
             "_mm256_set1_epi16",
         ),
-        32 => todo!(),
+        32 => (
+            "_mm512_slli_epi32",
+            "_mm512_mask_blend_epi16",
+            "_mm512_setzero_si512",
+            "_mm512_set1_epi16",
+        ),
         _ => unimplemented!(),
+    }
+}
+
+/// Builds `__builtin_shufflevector` indices that interleave the lower and upper
+/// halves of two vectors into logical lane order.
+fn interleave_vector_halves_shuffle_indices(vector_size: u32) -> String {
+    debug_assert_eq!(vector_size % 2, 0);
+    let half = vector_size / 2;
+    (0..half)
+        .flat_map(|i| [i, i + half])
+        .map(|idx| idx.to_string())
+        .join(", ")
+}
+
+/// Returns a vector expression that keeps bf16 values from even logical lanes
+/// and zeros the odd lanes before the result is reinterpreted as f32.
+///
+/// For 32 bf16 lanes this uses the AVX512BW masked-blend intrinsic, whose mask
+/// argument comes first:
+///
+/// ```c
+/// (vf16)_mm512_mask_blend_epi16((__mmask32)0xAAAAAAAAu,
+///                               _mm512_setzero_si512(),
+///                               *(__m512i*)(&input))
+/// ```
+///
+/// For narrower x86 vector widths, the SSE/AVX2 blend intrinsics use an
+/// immediate mask argument at the end:
+///
+/// ```c
+/// (vf8)_mm256_blend_epi16(_mm256_setzero_si256(), *(__m256i*)(&input), 0xAA)
+/// ```
+fn bf16_even_lanes_expr(
+    vector_size_bf16: u32,
+    vector_type_name: &str,
+    native_type_name: &str,
+    input_expr: &str,
+) -> String {
+    let (_, blend_fn, zero_fn, _) = vec_func_names(vector_size_bf16);
+    if vector_size_bf16 == 32 {
+        format!(
+            "({vector_type_name}){blend_fn}((__mmask32)0xAAAAAAAAu, {zero_fn}(), *({native_type_name}*)(&{input_expr}))"
+        )
+    } else {
+        format!(
+            "({vector_type_name}){blend_fn}({zero_fn}(), *({native_type_name}*)(&{input_expr}), 0xAA)"
+        )
     }
 }
 
@@ -3014,7 +3077,7 @@ const fn endian_convert_fn(dtype: Dtype) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::expr_to_c;
+    use super::*;
     use crate::codegen::c_utils::CName;
     use crate::expr::{AffineForm, NonAffine, Term};
 
@@ -3062,6 +3125,22 @@ mod tests {
                 3
             )),
             "(2 * ((y) % 4) + 3)"
+        );
+    }
+
+    #[test]
+    fn test_interleave_vector_halves_shuffle_indices_8() {
+        assert_eq!(
+            interleave_vector_halves_shuffle_indices(8),
+            "0, 4, 1, 5, 2, 6, 3, 7"
+        );
+    }
+
+    #[test]
+    fn test_interleave_vector_halves_shuffle_indices_16() {
+        assert_eq!(
+            interleave_vector_halves_shuffle_indices(16),
+            "0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15"
         );
     }
 }
