@@ -73,13 +73,18 @@ trait RTreeGeneric<T> {
     ) -> Box<dyn Iterator<Item = (RTreeEntryRef<'a, T>, RTreeEntryRef<'a, A>)> + 'a>;
 }
 
+// Defines the `RTreeDyn` type, backed by `rstar::RTree`s specialized to fixed ranks.
+//
+// The `=>` maps a logical, externally visible rank to the underlying rank. By mapping multiple
+// logical ranks to the same underlying rank, we reduce the number of specializations and,
+// therefore, code generated. This reduces compilation time.
 macro_rules! rtreedyn_cases {
-    ($(#[$meta:meta])* $($n:expr, $name:ident),*) => {
+    ($(#[$meta:meta])* $($n:expr => $underlying:expr, $name:ident),* $(,)?) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Serialize, Deserialize)]
         #[allow(private_interfaces)]
         pub enum RTreeDyn<T> {
-            $( $name(RTree<RTreeRect<$n, T>>), )*
+            $( $name(RTree<RTreeRect<$underlying, T>>), )*
         }
 
         impl<T> RTreeDyn<T> {
@@ -103,6 +108,7 @@ macro_rules! rtreedyn_cases {
             }
 
             pub fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {
+                debug_assert_eq!(pt.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::locate_at_point(t, pt), )*
                 }
@@ -110,12 +116,15 @@ macro_rules! rtreedyn_cases {
 
 
             pub fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_> {
+                debug_assert_eq!(pt.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::locate_all_at_point(t, pt), )*
                 }
             }
 
             pub fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
+                debug_assert_eq!(low.len(), self.dim_count());
+                debug_assert_eq!(high.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::insert(t, low, high, value), )*
                 }
@@ -125,6 +134,8 @@ macro_rules! rtreedyn_cases {
             where
                 T: PartialEq + Eq + Hash + Clone,
             {
+                debug_assert_eq!(low.len(), self.dim_count());
+                debug_assert_eq!(high.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::merge_insert(t, low, high, value, disallow_overlap), )*
                 }
@@ -190,6 +201,8 @@ macro_rules! rtreedyn_cases {
                 T: Clone + Eq + Hash,  // Eq needed if `merge` is set
                 F: FnMut(T, T) -> T,
             {
+                debug_assert_eq!(low.len(), self.dim_count());
+                debug_assert_eq!(high.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::fold_insert(t, low, high, value, merge, fold), )*
                 }
@@ -201,6 +214,8 @@ macro_rules! rtreedyn_cases {
             where
                 T: Clone, // TODO: Remove this bound. Shouldn't be needed.
             {
+                debug_assert_eq!(low.len(), self.dim_count());
+                debug_assert_eq!(high.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::subtract(t, low, high), )*
                 }
@@ -217,6 +232,7 @@ macro_rules! rtreedyn_cases {
                 T: Clone,
                 V: Clone,
             {
+                debug_assert_eq!(self.dim_count(), subtrahend_tree.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::subtract_tree(t, subtrahend_tree), )*
                 }
@@ -225,7 +241,7 @@ macro_rules! rtreedyn_cases {
             pub fn iter(&self) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
                 match self {
                     $( RTreeDyn::$name(t) => Box::new(
-                        t.iter().map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value))
+                        t.iter().map(|r| (&r.bottom.arr[..$n], &r.top.arr[..$n], &r.value))
                     ), )*
                 }
             }
@@ -235,12 +251,14 @@ macro_rules! rtreedyn_cases {
                 bottom: &[BimapSInt],
                 top: &[BimapSInt],
             ) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
+                debug_assert_eq!(bottom.len(), self.dim_count());
+                debug_assert_eq!(top.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => {
                         Box::new(t.locate_in_envelope_intersecting(&AABB::from_corners(
-                            bottom.try_into().unwrap(),
-                            top.try_into().unwrap(),
-                        )).map(|r| (&r.bottom.arr[..], &r.top.arr[..], &r.value)))
+                            padded_pt::<$underlying>(bottom),
+                            padded_pt::<$underlying>(top),
+                        )).map(|r| (&r.bottom.arr[..$n], &r.top.arr[..$n], &r.value)))
                     } )*
                 }
             }
@@ -251,7 +269,16 @@ macro_rules! rtreedyn_cases {
             ) -> Box<dyn Iterator<Item = (RTreeEntryRef<'a, T>, RTreeEntryRef<'a, A>)> + 'a> {
                 match (self, other) {
                     $( (RTreeDyn::$name(t), RTreeDyn::$name(o)) => {
-                        RTreeGeneric::intersection_candidates_with_other_tree(t, o)
+                        Box::new(
+                            RTreeGeneric::intersection_candidates_with_other_tree(t, o).map(
+                                |((lhs_bottom, lhs_top, lhs_value), (rhs_bottom, rhs_top, rhs_value))| {
+                                    (
+                                        (&lhs_bottom[..$n], &lhs_top[..$n], lhs_value),
+                                        (&rhs_bottom[..$n], &rhs_top[..$n], rhs_value),
+                                    )
+                                },
+                            ),
+                        )
                     }, )*
                     _ => panic!("Mismatched ranks: {} and {}", self.dim_count(), other.dim_count()),
                 }
@@ -261,11 +288,22 @@ macro_rules! rtreedyn_cases {
 }
 
 rtreedyn_cases!(
-    2, D2, 3, D3, 4, D4, 5, D5, 6, D6, 7, D7, 8, D8, 9, D9, 10, D10, 11, D11, 12, D12, 13, D13, 14,
-    D14, 15, D15, 16, D16, 17, D17, 18, D18, 19, D19, 20, D20, 21, D21, 22, D22, 23, D23, 24, D24,
-    25, D25, 26, D26, 27, D27, 28, D28, 29, D29, 30, D30, 31, D31, 32, D32, 33, D33, 34, D34, 35,
-    D35, 36, D36, 37, D37, 38, D38, 39, D39, 40, D40, 41, D41, 42, D42, 43, D43, 44, D44, 45, D45,
-    46, D46, 47, D47, 48, D48, 49, D49, 50, D50, 51, D51, 52, D52, 53, D53, 54, D54
+    2 => 4, D2, 3 => 4, D3, 4 => 4, D4,
+    5 => 8, D5, 6 => 8, D6, 7 => 8, D7, 8 => 8, D8,
+    9 => 16, D9, 10 => 16, D10, 11 => 16, D11, 12 => 16, D12,
+    13 => 16, D13, 14 => 16, D14, 15 => 16, D15, 16 => 16, D16,
+    17 => 32, D17, 18 => 32, D18, 19 => 32, D19, 20 => 32, D20,
+    21 => 32, D21, 22 => 32, D22, 23 => 32, D23, 24 => 32, D24,
+    25 => 32, D25, 26 => 32, D26, 27 => 32, D27, 28 => 32, D28,
+    29 => 32, D29, 30 => 32, D30, 31 => 32, D31, 32 => 32, D32,
+    33 => 64, D33, 34 => 64, D34, 35 => 64, D35, 36 => 64, D36,
+    37 => 64, D37, 38 => 64, D38, 39 => 64, D39, 40 => 64, D40,
+    41 => 64, D41, 42 => 64, D42, 43 => 64, D43, 44 => 64, D44,
+    45 => 64, D45, 46 => 64, D46, 47 => 64, D47, 48 => 64, D48,
+    49 => 64, D49, 50 => 64, D50, 51 => 64, D51, 52 => 64, D52,
+    53 => 64, D53, 54 => 64, D54, 55 => 64, D55, 56 => 64, D56,
+    57 => 64, D57, 58 => 64, D58, 59 => 64, D59, 60 => 64, D60,
+    61 => 64, D61, 62 => 64, D62, 63 => 64, D63, 64 => 64, D64,
 );
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -310,6 +348,18 @@ impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
     }
 }
 
+fn padded_pt<const D: usize>(pt: &[BimapSInt]) -> RTreePt<D> {
+    debug_assert!(
+        pt.len() <= D,
+        "point has {} dimensions, but underlying RTree has {} dimensions",
+        pt.len(),
+        D
+    );
+    let mut arr = [0; D];
+    arr[..pt.len()].copy_from_slice(pt);
+    RTreePt { arr }
+}
+
 impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     type Intersectable<A> = RTree<RTreeRect<D, A>>;
 
@@ -318,20 +368,21 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     }
 
     fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {
-        self.locate_at_point(&pt.try_into().unwrap())
+        self.locate_at_point(&padded_pt::<D>(pt))
             .map(|rect| &rect.value)
     }
 
     fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_> {
         Box::new(
-            self.locate_all_at_point(&pt.try_into().unwrap())
+            self.locate_all_at_point(&padded_pt::<D>(pt))
                 .map(|rect| &rect.value),
         )
     }
 
     fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
-        let bottom = low.try_into().unwrap();
-        let top = high.try_into().unwrap();
+        debug_assert_eq!(low.len(), high.len());
+        let bottom = padded_pt::<D>(low);
+        let top = padded_pt::<D>(high);
         self.insert(RTreeRect { top, bottom, value });
     }
 
@@ -344,9 +395,10 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     ) where
         T: PartialEq + Eq + Hash + Clone,
     {
+        debug_assert_eq!(low.len(), high.len());
         let new_rect = RTreeRect {
-            top: high.try_into().unwrap(),
-            bottom: low.try_into().unwrap(),
+            top: padded_pt::<D>(high),
+            bottom: padded_pt::<D>(low),
             value,
         };
 
@@ -461,7 +513,12 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         T: Clone + Eq + Hash,
         F: FnMut(T, T) -> T,
     {
-        let mut worklist = vec![(low.to_vec(), high.to_vec(), value)];
+        debug_assert_eq!(low.len(), high.len());
+        let mut worklist = vec![(
+            padded_pt::<D>(low).arr.to_vec(),
+            padded_pt::<D>(high).arr.to_vec(),
+            value,
+        )];
         while let Some((r_low, r_high, r_value)) = worklist.pop() {
             let mut rhs_subrects = vec![];
             let intersectee_option = self
@@ -545,13 +602,16 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     {
         let mut subtracted_partitions = vec![];
         let mut new_subrectangles = vec![];
+        let logical_dims = subtrahend_tree.dim_count();
         for (rhs_bottom, rhs_top, rhs_value) in subtrahend_tree.iter() {
             debug_assert!(new_subrectangles.is_empty());
-            let rhs_envelope =
-                AABB::from_corners(rhs_bottom.try_into().unwrap(), rhs_top.try_into().unwrap());
+            let rhs_bottom = padded_pt::<D>(rhs_bottom);
+            let rhs_top = padded_pt::<D>(rhs_top);
+            let rhs_envelope = AABB::from_corners(rhs_bottom.clone(), rhs_top.clone());
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
                 let RTreeRect { bottom, top, value } = intersecting_rect;
-                let subrectangles = rect_subtract(&bottom.arr, &top.arr, rhs_bottom, rhs_top);
+                let subrectangles =
+                    rect_subtract(&bottom.arr, &top.arr, &rhs_bottom.arr, &rhs_top.arr);
                 new_subrectangles.extend(
                     subrectangles
                         .into_iter()
@@ -560,13 +620,15 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 let intersection_bottom = bottom
                     .arr
                     .iter()
-                    .zip(rhs_bottom)
+                    .zip(&rhs_bottom.arr)
+                    .take(logical_dims)
                     .map(|(b, rb)| *b.max(rb))
                     .collect::<Vec<_>>();
                 let intersection_top = top
                     .arr
                     .iter()
-                    .zip(rhs_top)
+                    .zip(&rhs_top.arr)
+                    .take(logical_dims)
                     .map(|(t, rt)| *t.min(rt))
                     .collect::<Vec<_>>();
                 subtracted_partitions.push((
@@ -922,6 +984,35 @@ mod tests {
     }
 
     #[test]
+    fn test_rtreedyn_iter_reports_logical_rank() {
+        let mut tree = RTreeDyn::empty(2);
+        tree.insert(&[1, 2], &[3, 4], 7);
+
+        let entries = tree.iter().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, &[1, 2]);
+        assert_eq!(entries[0].1, &[3, 4]);
+        assert_eq!(entries[0].2, &7);
+        assert_eq!(tree.locate_at_point(&[2, 3]), Some(&7));
+    }
+
+    #[test]
+    fn test_rtreedyn_serde_round_trips_underlying_tree() {
+        let mut original = RTreeDyn::empty(2);
+        original.insert(&[1, 2], &[3, 4], 9u8);
+        let bytes = bincode::serialize(&original).unwrap();
+
+        let tree: RTreeDyn<u8> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(tree.dim_count(), 2);
+        assert_eq!(
+            tree.iter()
+                .map(|(bottom, top, value)| (bottom.to_vec(), top.to_vec(), *value))
+                .collect::<Vec<_>>(),
+            vec![(vec![1, 2], vec![3, 4], 9)]
+        );
+    }
+
+    #[test]
     #[should_panic]
     fn test_merge_insert_corners_touch_panics() {
         assert_merged(&[([0, 0], [1, 1]), ([1, 1], [2, 2])]);
@@ -1100,11 +1191,11 @@ mod tests {
         let mut minuhend: RTree<RTreeRect<2, ()>> = RTree::new();
         minuhend.merge_insert(&[1, 1], &[3, 3], (), true);
 
-        let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
+        let mut subtrahend = RTreeDyn::empty(2);
         subtrahend.merge_insert(&[1, 1], &[2, 2], (), true);
         subtrahend.merge_insert(&[1, 1], &[2, 2], (), true);
 
-        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
+        let intersections = minuhend.subtract_tree(&subtrahend);
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
@@ -1129,10 +1220,10 @@ mod tests {
         minuhend.merge_insert(&[1, 1], &[3, 3], "a", true);
         minuhend.merge_insert(&[5, 1], &[5, 7], "b", true);
 
-        let mut subtrahend: RTree<RTreeRect<2, _>> = RTree::new();
+        let mut subtrahend = RTreeDyn::empty(2);
         subtrahend.merge_insert(&[1, 1], &[9, 9], "c", true);
 
-        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
+        let intersections = minuhend.subtract_tree(&subtrahend);
         assert_eq!(minuhend.into_iter().count(), 0);
         assert_eq!(
             intersections,
@@ -1149,10 +1240,10 @@ mod tests {
         minuhend.merge_insert(&[1, 1], &[3, 7], "a", true);
         minuhend.merge_insert(&[5, 1], &[7, 7], "b", true);
 
-        let mut subtrahend: RTree<RTreeRect<2, ()>> = RTree::new();
+        let mut subtrahend = RTreeDyn::empty(2);
         subtrahend.merge_insert(&[1, 2], &[7, 3], (), true);
 
-        let intersections = minuhend.subtract_tree(&RTreeDyn::D2(subtrahend));
+        let intersections = minuhend.subtract_tree(&subtrahend);
         assert_eq!(
             minuhend.into_iter().collect::<HashSet<_>>(),
             HashSet::from([
