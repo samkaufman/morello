@@ -69,7 +69,7 @@ fn main() {
                 .subschedule(&[0], |s| {
                     s.move_param(0, L1)
                         .move_param(0, RF)
-                        .subschedule(&[0], |s| s.select(CpuKernel::MemsetZero))
+                        .subschedule(&[0], |s| s.select(CpuKernel::ValueZero))
                         .subschedule(&[1], |s| s.select(CpuKernel::Assign))
                 })
                 .subschedule(&[1], |s| {

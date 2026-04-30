@@ -128,6 +128,7 @@ pub enum CpuKernel {
     DivideVecScalarReciprocal,
     Assign,
     MemsetZero,
+    ValueZero,
     /// Lowers to Clang vector extensions' zero-assignment, which, on x86, should emit `vxorps`.
     VectorZero,
     ValueNegInf,
@@ -421,8 +422,11 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Fill {
                     value: FillValue::Zero,
                 } => {
-                    const ZERO_KERNELS: [CpuKernel; 2] =
-                        [CpuKernel::MemsetZero, CpuKernel::VectorZero];
+                    const ZERO_KERNELS: [CpuKernel; 3] = [
+                        CpuKernel::MemsetZero,
+                        CpuKernel::ValueZero,
+                        CpuKernel::VectorZero,
+                    ];
                     &ZERO_KERNELS
                 }
                 PrimitiveSpecType::Fill {
@@ -655,6 +659,7 @@ impl CpuKernel {
             | CpuKernel::VectorCastBf16F32
             | CpuKernel::VecScalarAssign => 2,
             CpuKernel::MemsetZero
+            | CpuKernel::ValueZero
             | CpuKernel::VectorZero
             | CpuKernel::ValueNegInf
             | CpuKernel::VectorNegInf
@@ -1425,8 +1430,19 @@ impl CpuKernel {
                     PrimitiveSpecType::Fill {
                         value: FillValue::Zero
                     }
-                ) && operands[0].memory() == CpuMemory::RF
+                ) && operands[0].memory() != CpuMemory::RF
+                    && operands[0].memory() != CpuMemory::VRF
                     && operands[0].is_contiguous()
+            }
+            CpuKernel::ValueZero => {
+                debug_assert_eq!(operands.len(), 1);
+                matches!(
+                    typ,
+                    PrimitiveSpecType::Fill {
+                        value: FillValue::Zero
+                    }
+                ) && operands[0].volume().get() == 1
+                    && operands[0].memory() == CpuMemory::RF
             }
             CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
                 let expected_fill_value = match self {
@@ -1640,6 +1656,7 @@ impl CpuKernel {
             CpuKernel::VectorInterleaveBf16F32
             | CpuKernel::VectorDeinterleaveF32Bf16
             | CpuKernel::ValueMax
+            | CpuKernel::ValueZero
             | CpuKernel::ValueNegInf
             | CpuKernel::ValueMin => {
                 // TODO: Measure throughput!

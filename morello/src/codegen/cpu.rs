@@ -1494,10 +1494,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             vtype.name
                         )
                     }
-                    CpuKernel::ValueNegInf | CpuKernel::ValueMin => {
+                    CpuKernel::ValueZero | CpuKernel::ValueNegInf | CpuKernel::ValueMin => {
                         let exprs = self
                             .param_args_to_c_indices(arguments, |_, a, b| self.c_index(a, b, None));
                         match cpu_kernel {
+                            CpuKernel::ValueZero => {
+                                writeln!(w, "{}{} = 0;  /* ValueZero */", indent(depth), exprs[0],)
+                            }
                             CpuKernel::ValueNegInf => {
                                 self.headers.emit_math_include = true;
                                 writeln!(

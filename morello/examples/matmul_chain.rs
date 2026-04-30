@@ -208,7 +208,7 @@ fn schedule_zero(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .tile_out(&[1, 16, 1])
         .move_param(0, RF)
         .subschedule(&[0], |s| {
-            s.tile_out(&[1, 1, 1]).select(CpuKernel::MemsetZero)
+            s.tile_out(&[1, 1, 1]).select(CpuKernel::ValueZero)
         })
         .subschedule(&[1], |s| s.tile_out(&[1, 1, 1]).select(CpuKernel::Assign))
 }

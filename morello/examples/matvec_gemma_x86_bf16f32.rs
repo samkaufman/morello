@@ -54,7 +54,7 @@ fn main() {
         .move_param(2, L1)
         .move_param(2, RF)
         .to_accum()
-        .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::MemsetZero))
+        .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::ValueZero))
         .move_param(1, L1)
         .select(CpuKernel::DotProductLoopF32InterleavedBf16F32)
         .subschedule(&[1, 1], |body| body.select(CpuKernel::Assign));

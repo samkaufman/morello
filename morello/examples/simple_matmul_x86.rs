@@ -102,7 +102,7 @@ fn main() {
         .move_param(2, CpuMemory::RF)
         .subschedule(&[1, 1, 1, 0], move_schedule)
         .subschedule(&[1, 1, 1, 2], move_schedule)
-        // ...and compute the 1x1x1 matix multiply with `+= a * b`.
+        // ...and compute the 1x1x1 matrix multiply with `+= a * b`.
         .split(1)
         .select(CpuKernel::MultAdd);
 
@@ -113,7 +113,7 @@ fn main() {
     //         alloc af: (16×16, u32, L1, c1) <- ac
     //           tile (ag: (1×64, u32, L1) <-[0, 2]- ad, ah: (64×1, u32, L1, c1) <-[3, 1]- ae, ai: (1×1, u32, L1) <-[0, 1]- af)
     //               alloc aj: (1×1, u32, RF)
-    //                 MemsetZero(aj)
+    //                 ValueZero(aj)
     //                 Assign(aj, ai)
     //               tile (ak: (1×4, u32, L1) <-[0, 1]- ag, al: (4×1, u32, L1, c1) <-[1, 2]- ah)
     //                 alloc am: (1×4, u32, RF)
@@ -214,8 +214,12 @@ fn main() {
 //  l1_tile[index] = v;
 /// ```
 fn zero_schedule(zero: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
-    zero.move_param(0, CpuMemory::RF)
-        .subschedule(&[0], |z| z.select(CpuKernel::MemsetZero))
+    let output = zero.0.unique_output().unwrap();
+    let mut zero = zero.move_param(0, CpuMemory::RF);
+    if output.shape().iter().any(|d| d.get() != 1) {
+        zero = zero.subschedule(&[0], |z| z.tile_out(&[1, 1, 1]));
+    }
+    zero.subschedule(&[0], |z| z.select(CpuKernel::ValueZero))
         .subschedule(&[1], |move_back| move_back.select(CpuKernel::Assign))
 }
 
