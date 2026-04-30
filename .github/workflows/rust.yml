@@ -103,11 +103,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build frontend binary
         run: cargo build -p frontend --bin morello
-      - name: Measure frontend peak RSS
+      - name: Measure frontend peak RSS and database size
         run: |
           set -euo pipefail
-          /usr/bin/time -f 'peak_rss_kib=%M' -o peak-rss.txt ./target/debug/morello run matmul 2
+          db_path="$(mktemp -d)"
+          /usr/bin/time -f 'peak_rss_kib=%M' -o peak-rss.txt ./target/debug/morello --db "$db_path" run matmul 2
           cat peak-rss.txt
+          db_size_bytes="$(du -sb "$db_path" | cut -f1)"
+          echo "db_size_bytes=${db_size_bytes}" | tee db-size.txt
       - name: Compare against previous committed measurement
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
@@ -115,10 +118,14 @@ jobs:
         run: |
           set -euo pipefail
           peak_rss_kib="$(cut -d= -f2 peak-rss.txt)"
-          notes_ref="refs/notes/frontend-peak-rss-kib-matmul-2"
+          db_size_bytes="$(cut -d= -f2 db-size.txt)"
+          peak_rss_notes_ref="refs/notes/frontend-peak-rss-kib-matmul-2"
+          db_size_notes_ref="refs/notes/frontend-db-size-bytes-matmul-2"
           previous_peak_rss_kib=""
+          previous_db_size_bytes=""
 
-          git fetch origin "${notes_ref}:${notes_ref}" || true
+          git fetch origin "${peak_rss_notes_ref}:${peak_rss_notes_ref}" || true
+          git fetch origin "${db_size_notes_ref}:${db_size_notes_ref}" || true
           git fetch origin "$DEFAULT_BRANCH" --depth=1
 
           previous_sha=""
@@ -132,8 +139,11 @@ jobs:
             previous_sha="$(git rev-parse "origin/$DEFAULT_BRANCH")"
           fi
 
-          if git notes --ref="$notes_ref" show "$previous_sha" >/tmp/previous-note.txt 2>/dev/null; then
-            previous_peak_rss_kib="$(cat /tmp/previous-note.txt | tr -d '[:space:]')"
+          if git notes --ref="$peak_rss_notes_ref" show "$previous_sha" >/tmp/previous-peak-rss-note.txt 2>/dev/null; then
+            previous_peak_rss_kib="$(cat /tmp/previous-peak-rss-note.txt | tr -d '[:space:]')"
+          fi
+          if git notes --ref="$db_size_notes_ref" show "$previous_sha" >/tmp/previous-db-size-note.txt 2>/dev/null; then
+            previous_db_size_bytes="$(cat /tmp/previous-db-size-note.txt | tr -d '[:space:]')"
           fi
 
           {
@@ -144,6 +154,15 @@ jobs:
               echo "- Previous peak RSS note (${previous_sha}): ${previous_peak_rss_kib} KiB"
             else
               echo "- Previous peak RSS note (${previous_sha}): (none found)"
+            fi
+            echo
+            echo "### Frontend database size"
+            echo
+            echo "- Measured database size: ${db_size_bytes} bytes"
+            if [ -n "$previous_db_size_bytes" ]; then
+              echo "- Previous database size note (${previous_sha}): ${previous_db_size_bytes} bytes"
+            else
+              echo "- Previous database size note (${previous_sha}): (none found)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -158,17 +177,33 @@ jobs:
               echo "::warning::Frontend peak RSS increased (+${delta_kib} KiB): ${peak_rss_kib} KiB vs previous ${previous_peak_rss_kib} KiB"
             fi
           fi
+          if [ -n "$previous_db_size_bytes" ] && [ "$db_size_bytes" -gt "$previous_db_size_bytes" ]; then
+            delta_bytes="$(( db_size_bytes - previous_db_size_bytes ))"
+            if [ "$previous_db_size_bytes" -gt 0 ]; then
+              increase_pct="$(( delta_bytes * 100 / previous_db_size_bytes ))"
+              if [ "$increase_pct" -ge 7 ]; then
+                echo "::warning::Frontend database size regression detected (+${delta_bytes} bytes, +${increase_pct}%): ${db_size_bytes} bytes vs previous ${previous_db_size_bytes} bytes"
+              fi
+            else
+              echo "::warning::Frontend database size increased (+${delta_bytes} bytes): ${db_size_bytes} bytes vs previous ${previous_db_size_bytes} bytes"
+            fi
+          fi
       - name: Store measurement as a git note (push events only)
         if: github.event_name == 'push'
         run: |
           set -euo pipefail
-          notes_ref="refs/notes/frontend-peak-rss-kib-matmul-2"
+          peak_rss_notes_ref="refs/notes/frontend-peak-rss-kib-matmul-2"
+          db_size_notes_ref="refs/notes/frontend-db-size-bytes-matmul-2"
           peak_rss_kib="$(cut -d= -f2 peak-rss.txt)"
+          db_size_bytes="$(cut -d= -f2 db-size.txt)"
           git config user.name "${GITHUB_ACTOR}"
           git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
-          git fetch origin "${notes_ref}:${notes_ref}" || true
-          git notes --ref="$notes_ref" add -f -m "$peak_rss_kib" HEAD
-          git push origin "$notes_ref"
+          git fetch origin "${peak_rss_notes_ref}:${peak_rss_notes_ref}" || true
+          git fetch origin "${db_size_notes_ref}:${db_size_notes_ref}" || true
+          git notes --ref="$peak_rss_notes_ref" add -f -m "$peak_rss_kib" HEAD
+          git notes --ref="$db_size_notes_ref" add -f -m "$db_size_bytes" HEAD
+          git push origin "$peak_rss_notes_ref"
+          git push origin "$db_size_notes_ref"
 
   smoke-test-precompute:
     strategy:
