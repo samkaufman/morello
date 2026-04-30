@@ -87,6 +87,89 @@ jobs:
       - name: Smoke-test 1x1x1 matrix multiplication synthesis & run
         run: cargo run -- run matmul 1
 
+  frontend-memory-regression:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Install libomp
+        run: |
+          sudo apt update
+          sudo apt-get install -y libomp-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build frontend binary
+        run: cargo build -p frontend --bin morello
+      - name: Measure frontend peak RSS
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'peak_rss_kib=%M' -o peak-rss.txt ./target/debug/morello run matmul 2
+          cat peak-rss.txt
+      - name: Compare against previous committed measurement
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          peak_rss_kib="$(cut -d= -f2 peak-rss.txt)"
+          notes_ref="refs/notes/frontend-peak-rss-kib-matmul-2"
+          previous_peak_rss_kib=""
+
+          git fetch origin "${notes_ref}:${notes_ref}" || true
+          git fetch origin "$DEFAULT_BRANCH" --depth=1
+
+          previous_sha=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ -z "$BASE_SHA" ]; then
+              echo "Expected BASE_SHA to be set for pull_request events" >&2
+              exit 1
+            fi
+            previous_sha="$BASE_SHA"
+          else
+            previous_sha="$(git rev-parse "origin/$DEFAULT_BRANCH")"
+          fi
+
+          if git notes --ref="$notes_ref" show "$previous_sha" >/tmp/previous-note.txt 2>/dev/null; then
+            previous_peak_rss_kib="$(cat /tmp/previous-note.txt | tr -d '[:space:]')"
+          fi
+
+          {
+            echo "### Frontend peak memory"
+            echo
+            echo "- Measured peak RSS: ${peak_rss_kib} KiB"
+            if [ -n "$previous_peak_rss_kib" ]; then
+              echo "- Previous peak RSS note (${previous_sha}): ${previous_peak_rss_kib} KiB"
+            else
+              echo "- Previous peak RSS note (${previous_sha}): (none found)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$previous_peak_rss_kib" ] && [ "$peak_rss_kib" -gt "$previous_peak_rss_kib" ]; then
+            delta_kib="$(( peak_rss_kib - previous_peak_rss_kib ))"
+            if [ "$previous_peak_rss_kib" -gt 0 ]; then
+              increase_pct="$(( delta_kib * 100 / previous_peak_rss_kib ))"
+              if [ "$increase_pct" -ge 7 ]; then
+                echo "::warning::Frontend peak RSS regression detected (+${delta_kib} KiB, +${increase_pct}%): ${peak_rss_kib} KiB vs previous ${previous_peak_rss_kib} KiB"
+              fi
+            else
+              echo "::warning::Frontend peak RSS increased (+${delta_kib} KiB): ${peak_rss_kib} KiB vs previous ${previous_peak_rss_kib} KiB"
+            fi
+          fi
+      - name: Store measurement as a git note (push events only)
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          notes_ref="refs/notes/frontend-peak-rss-kib-matmul-2"
+          peak_rss_kib="$(cut -d= -f2 peak-rss.txt)"
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git fetch origin "${notes_ref}:${notes_ref}" || true
+          git notes --ref="$notes_ref" add -f -m "$peak_rss_kib" HEAD
+          git push origin "$notes_ref"
+
   smoke-test-precompute:
     strategy:
       matrix:
