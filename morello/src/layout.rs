@@ -24,9 +24,18 @@ pub trait LayoutBuilder {
 /// As a result, a single [Layout] abstracts over both a tensor and its tilings: only the shape
 /// (and potentially the contiguousness) change.
 ///
-/// Layouts are not defined for all shapes. They may only be defined for shapes which are size-one
-/// in some dimensions or require some dimensions to be multiples of some size (e.g., evenly
-/// divisible by some packing factor).
+/// A layout is defined (valid) for a shape if:
+///
+/// - If a logical dimension has no associated [PhysDim], that dimension's size must be one.
+/// - A logical dimension may have at most one [PhysDim::Dynamic] dimension.
+/// - Any [PhysDim::Dynamic] dimension must appear outside any [PhysDim::Packed] or
+///   [PhysDim::OddEven] for a logical dimension.
+/// - The physical dimensions assigned to a logical dimension must fully cover its size.
+/// - Every [PhysDim::Packed] and [PhysDim::OddEven] dimension must evenly divide the remaining
+///   logical dimension size (from innermost to outermost), unless the remaining size is strictly
+///   smaller than the packing size.
+/// - A logical dimension may have at most one packing that is strictly larger than its remaining
+///   logical size.
 ///
 /// Layouts have canonical forms with respect to concrete shapes. The canonical form is logically
 /// equivalent for that shape, but not necessarily other shapes.
@@ -1425,6 +1434,29 @@ mod tests {
         }
 
         #[test]
+        fn test_canonicalize_preserves_buffer_indexing_expr_values(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let Ok(canonicalized_layout) = layout.canonicalize(&shape) else {
+                prop_assume!(false);
+                unreachable!();
+            };
+
+            let expr_id = OpaqueSymbol::new();
+            let original_expr = layout.buffer_indexing_expr(expr_id, &shape);
+            let canonicalized_expr = canonicalized_layout.buffer_indexing_expr(expr_id, &shape);
+
+            prop_assert_eq!(
+                eval_all_index_expr_points(&original_expr, &shape),
+                eval_all_index_expr_points(&canonicalized_expr, &shape),
+                "canonicalize changed the evaluated indexing expression for shape {:?}: {} -> {}",
+                shape,
+                layout,
+                canonicalized_layout
+            );
+        }
+
+        #[test]
         fn test_dim_drop_returns_valid_contig(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
@@ -1683,6 +1715,24 @@ mod tests {
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
         })
+    }
+
+    fn eval_all_index_expr_points(expr: &NonAffineExpr<BufferVar>, shape: &[DimSize]) -> Vec<i32> {
+        shape
+            .iter()
+            .map(|&d| 0..d.get())
+            .multi_cartesian_product()
+            .map(|pt| {
+                let evaluated: NonAffineExpr<BufferVar> =
+                    expr.clone().map_vars(&mut |var| match var {
+                        BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
+                        BufferVar::Pt(dim, _) => {
+                            AffineForm::constant(pt[usize::from(dim)].try_into().unwrap())
+                        }
+                    });
+                evaluated.as_constant().unwrap()
+            })
+            .collect()
     }
 
     #[test]
