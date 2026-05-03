@@ -2328,14 +2328,44 @@ where
         Tgt: Target,
     {
         match spec {
-            LogicalSpec::Primitive(basics, _, _) => {
-                BiMap::defined_for(&self.primitive_basics_bimap, basics)
+            LogicalSpec::Primitive(basics, auxes, _) => {
+                if !BiMap::defined_for(&self.primitive_basics_bimap, basics) {
+                    return false;
+                }
+
+                let parameter_shapes = basics.parameter_shapes();
+                assert_eq!(auxes.len(), parameter_shapes.len());
+                auxes.iter().zip(parameter_shapes).zip(&basics.dtypes).all(
+                    |((tensor_aux, tensor_shape), dtype)| {
+                        let aux_surmap = (self.aux_surmap_fn)(&tensor_shape, *dtype);
+                        SurMap::defined_for(&aux_surmap, tensor_aux)
+                    },
+                )
             }
-            LogicalSpec::Compose { components, .. } => {
+            LogicalSpec::Compose {
+                components,
+                operand_auxes,
+                ..
+            } => {
                 let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
-                components
+                if !components
                     .iter()
                     .all(|c| BiMap::defined_for(&shape_bimap, &c.spec_shape))
+                {
+                    return false;
+                }
+
+                let parameter_shapes = compose_parameter_shapes(components);
+                let parameter_dtypes = compose_parameter_dtypes(components);
+                assert_eq!(operand_auxes.len(), parameter_shapes.len());
+                operand_auxes
+                    .iter()
+                    .zip(parameter_shapes)
+                    .zip(parameter_dtypes)
+                    .all(|((tensor_aux, parameter_shape), parameter_dtype)| {
+                        let aux_surmap = (self.aux_surmap_fn)(&parameter_shape, parameter_dtype);
+                        SurMap::defined_for(&aux_surmap, tensor_aux)
+                    })
             }
         }
     }
