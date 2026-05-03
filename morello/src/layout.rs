@@ -1832,6 +1832,29 @@ mod tests {
         }
 
         #[test]
+        fn test_canonicalize_preserves_buffer_indexing_expr_values(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let Ok(canonicalized_layout) = layout.canonicalize(&shape) else {
+                prop_assume!(false);
+                unreachable!();
+            };
+
+            let expr_id = OpaqueSymbol::new();
+            let original_expr = layout.buffer_indexing_expr(expr_id, &shape);
+            let canonicalized_expr = canonicalized_layout.buffer_indexing_expr(expr_id, &shape);
+
+            prop_assert_eq!(
+                eval_all_index_expr_points(&original_expr, &shape),
+                eval_all_index_expr_points(&canonicalized_expr, &shape),
+                "canonicalize changed the evaluated indexing expression for shape {:?}: {} -> {}",
+                shape,
+                layout,
+                canonicalized_layout
+            );
+        }
+
+        #[test]
         fn test_dim_drop_returns_valid_contig(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
@@ -2112,22 +2135,6 @@ mod tests {
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
         })
-    }
-
-    fn eval_all_index_expr_points(expr: &NonAffineExpr<BufferVar>, shape: &[DimSize]) -> Vec<i32> {
-        let bottom = vec![0; shape.len()];
-        let top = shape.iter().map(|&d| d.get() - 1).collect::<Vec<_>>();
-        let mut results = Vec::new();
-        multi_range_product(&bottom, &top, |pt: &[u32]| {
-            let evaluated: NonAffineExpr<BufferVar> = expr.clone().map_vars(&mut |var| match var {
-                BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
-                BufferVar::Pt(dim, _) => {
-                    AffineForm::constant(pt[usize::from(dim)].try_into().unwrap())
-                }
-            });
-            results.push(evaluated.as_constant().unwrap());
-        });
-        results
     }
 
     #[test]
