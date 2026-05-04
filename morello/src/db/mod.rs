@@ -1605,6 +1605,10 @@ pub fn iter_blocks_in_single_dim_range(
 }
 
 fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
+    table_dir_path(root, &page_key.0).join(page_key.1.iter().map(|p| p.to_string()).join("_"))
+}
+
+fn table_dir_path(root: &Path, table_key: &TableKey) -> path::PathBuf {
     let ((spec_key, _), block_pt) = page_key;
     let spec_key_dir_name = match spec_key {
         SpecKey::OnePrefix { rank, dtypes } => root
@@ -1722,7 +1726,7 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
                     .join("_"),
             ),
     };
-    spec_key_dir_name.join(block_pt.iter().map(|p| p.to_string()).join("_"))
+    spec_key_dir_name
 }
 
 fn write_page_atomic(path: &Path, contents: &PageContents) {
