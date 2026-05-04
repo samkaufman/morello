@@ -32,10 +32,11 @@ pub trait LayoutBuilder {
 ///   [PhysDim::OddEven] for a logical dimension.
 /// - The physical dimensions assigned to a logical dimension must fully cover its size.
 /// - Every [PhysDim::Packed] and [PhysDim::OddEven] dimension must evenly divide the remaining
-///   logical dimension size (from innermost to outermost), unless the remaining size is strictly
-///   smaller than the packing size.
-/// - A logical dimension may have at most one packing that is strictly larger than its remaining
-///   logical size.
+///   logical dimension size (from innermost to outermost). Alternately, in the case of
+///   [PhysDim::Packed], remaining size may be smaller than the packing size; in the case of
+///   [PhysDim::OddEven], remaining size may be one.
+///   - At most one [PhysDim::Packed] or [PhysDim::OddEven] per logical dimension may use one of the
+///     smaller-remaining-size exceptions.
 ///
 /// Layouts have canonical forms with respect to concrete shapes. The canonical form is logically
 /// equivalent for that shape, but not necessarily other shapes.
@@ -550,7 +551,7 @@ impl Layout {
                             }
                         }
                         *rem /= fixed_size.get();
-                    } else if *rem != 0 && fixed_size.get() % *rem == 0 {
+                    } else if *rem != 0 && fixed_size.get() >= *rem {
                         if !outer_oe_exists[idx] {
                             dims[idx] = (logical_dim, PhysDim::Dynamic);
                             if logical_dims_noneified[logical_dim_us].is_none() {
@@ -616,7 +617,9 @@ impl Layout {
             match phys_dim {
                 PhysDim::OddEven(pack_size) | PhysDim::Packed(pack_size) => {
                     if *remaining_size < pack_size.get() {
-                        if tiled_packing[usize::from(*dim)] {
+                        let smaller_remaining_allowed =
+                            matches!(phys_dim, PhysDim::Packed(_)) || *remaining_size == 1;
+                        if !smaller_remaining_allowed || tiled_packing[usize::from(*dim)] {
                             return Err(LayoutError::InvalidShape(logical_shape.into()));
                         }
                         physical_shape.push((*remaining_size).try_into().unwrap());
@@ -678,6 +681,9 @@ impl Layout {
             match fixed_size {
                 PhysDim::OddEven(s) | PhysDim::Packed(s) => {
                     if remaining_size < s.get() {
+                        if !matches!(fixed_size, PhysDim::Packed(_)) && remaining_size != 1 {
+                            return Err(LayoutError::InvalidShape(logical_shape.into()));
+                        }
                         physical_shape.push((idx, remaining_size.try_into().unwrap()));
                         remaining_size = 1;
                         continue;
@@ -1007,6 +1013,19 @@ mod tests {
     }
 
     #[test]
+    fn test_packed_larger_than_logical_dimension_applies_to_shape() {
+        let layout = layout![0 p(4)];
+        assert!(layout.applies_to_shape(&shape![2]));
+    }
+
+    #[test]
+    fn test_oddeven_larger_than_logical_dimension_applies_only_to_unit_shape() {
+        let layout = layout![0 oe(4)];
+        assert!(layout.applies_to_shape(&shape![1]));
+        assert!(!layout.applies_to_shape(&shape![2]));
+    }
+
+    #[test]
     fn test_expand_physical_shape_7() {
         let layout = layout![0 p(4), 1];
         let expanded = layout.expand_physical_shape(&shape![8, 64]);
@@ -1100,6 +1119,17 @@ mod tests {
             result_layout.is_fully_contiguous(),
             "Layout should be contiguous after tiling"
         );
+    }
+
+    #[test]
+    fn test_cannot_tile_if_splits_an_oddeven() {
+        let layout = layout![0 oe(4), 1];
+        for dim0_tile_size in [2, 3] {
+            assert!(matches!(
+                layout.update_for_tiling(&shape![4, 64], &shape![dim0_tile_size, 1]),
+                Err(LayoutError::InvalidShape(_)),
+            ));
+        }
     }
 
     #[test]
