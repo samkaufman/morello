@@ -134,12 +134,17 @@ fn min_overlapping_action(
                     "Overlapping rectangles must have matching cost intensities: inserted={:?}, existing={:?}",
                     inserted.0, existing.0
                 );
-            Some(cmp::min_by(inserted, existing, |inserted, existing| {
-                inserted
-                    .1
-                    .lex_cmp(&existing.1)
-                    .then(inserted.2.cmp(&existing.2))
-            }))
+            Some(cmp::min_by(
+                inserted,
+                existing,
+                |(_, peaks_i, depth_i, action_num_i),
+                 (_, peaks_e, depth_e, action_num_e)| {
+                    peaks_i
+                        .lex_cmp(peaks_e)
+                        .then(depth_i.cmp(depth_e))
+                        .then(action_num_i.cmp(action_num_e))
+                },
+            ))
         }
         (None, None) => None,
         (Some(_), None) | (None, Some(_)) => {
