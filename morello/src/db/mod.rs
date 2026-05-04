@@ -1295,7 +1295,7 @@ mod tests {
         let db_path = tempfile::tempdir().unwrap();
 
         let mut spec: Spec<Avx2Target> =
-            spec!(Move([2, 2], (f32, L1, row_major), (f32, L1, row_major)));
+            spec!(Move([1, 1], (f32, L1, row_major), (f32, L1, row_major)));
         spec.canonicalize().unwrap();
 
         {
