@@ -1364,6 +1364,19 @@ mod tests {
     }
 
     #[test]
+    fn test_packed_larger_than_logical_dimension_applies_to_shape() {
+        let layout = layout![0 p(4)];
+        assert!(layout.applies_to_shape(&shape![2]));
+    }
+
+    #[test]
+    fn test_oddeven_larger_than_logical_dimension_applies_only_to_unit_shape() {
+        let layout = layout![0 oe(4)];
+        assert!(layout.applies_to_shape(&shape![1]));
+        assert!(!layout.applies_to_shape(&shape![2]));
+    }
+
+    #[test]
     fn test_expand_physical_shape_7() {
         let layout = layout![0 p(4), 1];
         let expanded = layout.expand_physical_shape(&shape![8, 64]);
