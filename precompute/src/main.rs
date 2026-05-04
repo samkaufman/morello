@@ -47,7 +47,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 type JobFingerprint = (usize, u64);
 
 const META_FILENAME: &str = "PRECOMPUTE";
-const DB_PROGRESS_VERSION: usize = 2;
+const DB_PROGRESS_VERSION: usize = 4;
 const K: u8 = 1;
 const SUBWORKLIST_MAX_SIZE: usize = 5000;
 const TWOS: [u32; 32] = [2; 32];

@@ -1,9 +1,14 @@
 use crate::{
     common::{Contig, DimSize, Dtype, Shape},
     expr::{AffineForm, Atom, Bounds, NonAffineExpr},
+    grid::{general::BiMap, linear::BimapInt},
     layout,
     opaque_symbol::OpaqueSymbol,
     target::Target,
+    utils::{
+        length_grouped_coordinate_to_radix_digits, pair, radix_digits_to_length_grouped_coordinate,
+        unpair,
+    },
 };
 use itertools::Itertools;
 use nonzero::nonzero as nz;
@@ -11,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 use std::{collections::HashSet, fmt::Display, hash::Hash};
+
+const MIN_PACKING_SIZE: u32 = 2;
 
 pub trait LayoutBuilder {
     fn build(self, shape: &[DimSize]) -> Layout;
@@ -57,24 +64,56 @@ pub enum PhysDim {
     OddEven(DimSize),
 }
 
+#[derive(Clone)]
+pub struct LayoutBimap {
+    pub tensor_shape: Shape,
+}
+
 #[cfg(test)]
 #[derive(Default)]
 pub struct LayoutArbRankBounds {
-    dims: Option<Vec<u8>>,
+    tensor_shape: Option<Shape>,
+}
+
+impl PhysDim {
+    const DYNAMIC_KIND: BimapInt = 0;
+    const PACKED_KIND: BimapInt = 1;
+    const ODD_EVEN_KIND: BimapInt = 2;
+    const KIND_COUNT: BimapInt = 3;
+
+    /// Returns a number which identifies this value's variant, ignoring other data.
+    /// It is guaranteed to be be an integer in the range `[0, Self::KIND_COUNT)`.
+    ///
+    /// This is used by [LayoutBimap].
+    fn kind_number(self) -> BimapInt {
+        match self {
+            PhysDim::Dynamic => Self::DYNAMIC_KIND,
+            PhysDim::Packed(_) => Self::PACKED_KIND,
+            PhysDim::OddEven(_) => Self::ODD_EVEN_KIND,
+        }
+    }
+
+    /// Returns a [PhysDim] from a kind number. If this `PhysDim` takes a packing size, that will be
+    /// drawn from `pack_sizes`.
+    fn from_kind_number(kind: BimapInt, pack_sizes: &mut impl Iterator<Item = DimSize>) -> PhysDim {
+        match kind {
+            Self::DYNAMIC_KIND => PhysDim::Dynamic,
+            Self::PACKED_KIND => PhysDim::Packed(pack_sizes.next().unwrap()),
+            Self::ODD_EVEN_KIND => PhysDim::OddEven(pack_sizes.next().unwrap()),
+            _ => panic!("invalid kind number: {kind}"),
+        }
+    }
+
+    fn kind_has_pack_size(kind: BimapInt) -> bool {
+        matches!(kind, Self::PACKED_KIND | Self::ODD_EVEN_KIND)
+    }
 }
 
 #[cfg(test)]
 impl LayoutArbRankBounds {
     pub fn for_shape(shape: &[DimSize]) -> LayoutArbRankBounds {
         LayoutArbRankBounds {
-            dims: Some(
-                shape
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, d)| d.get() != 1)
-                    .map(|(logical_dim, _)| u8::try_from(logical_dim).unwrap())
-                    .collect(),
-            ),
+            tensor_shape: Some(shape.into()),
         }
     }
 }
@@ -747,20 +786,23 @@ impl proptest::arbitrary::Arbitrary for Layout {
             strategy::{Just, Strategy},
         };
 
-        let possible_dims = args.dims.unwrap_or_else(|| (1..5).collect());
+        let tensor_shape = args.tensor_shape;
+        let nonone_dims: Vec<u8> = tensor_shape
+            .as_ref()
+            .map_or_else(|| 1..5, |s| 0..u8::try_from(s.len()).unwrap())
+            .collect();
 
-        let packed_st = (2..=8u32).prop_map(|s| PhysDim::Packed(s.try_into().unwrap()));
+        let packed_st =
+            (MIN_PACKING_SIZE..=8u32).prop_map(|s| PhysDim::Packed(s.try_into().unwrap()));
         let interleaved_st = (1..=4u32).prop_map(|s| PhysDim::OddEven((s * 2).try_into().unwrap()));
         let non_dynamic_st = prop_oneof![packed_st, interleaved_st];
 
-        let base = Just(possible_dims.clone())
+        let base = Just(nonone_dims.clone())
             .prop_shuffle()
             .prop_map(|dims| Layout::new(dims.into_iter().map(|d| (d, PhysDim::Dynamic)).collect()))
             .prop_flat_map(move |dynamic_only_layout| {
-                use proptest::prop_oneof;
-
                 let last_logical_dim = dynamic_only_layout.dims.last().map(|(dim, _)| *dim);
-                let available_dims: Vec<u8> = possible_dims
+                let available_dims: Vec<u8> = nonone_dims
                     .iter()
                     .copied()
                     .filter(|&d| Some(d) != last_logical_dim)
@@ -790,6 +832,20 @@ impl proptest::arbitrary::Arbitrary for Layout {
             .prop_map(|(mut layout, contig)| {
                 layout.set_contig(contig);
                 layout
+            })
+            .prop_filter("Layout must be valid and apply to shape", move |layout| {
+                tensor_shape.as_ref().is_none_or(|shape| {
+                    layout
+                        .dims
+                        .iter()
+                        .all(|&(logical_dim, phys_dim)| match phys_dim {
+                            PhysDim::Dynamic => true,
+                            PhysDim::Packed(size) | PhysDim::OddEven(size) => {
+                                size.get() <= shape[usize::from(logical_dim)].get()
+                            }
+                        })
+                        && layout.applies_to_shape(shape)
+                })
             });
         // TODO: Add non-Dynamic dimensions too.
         base.boxed()
@@ -831,6 +887,180 @@ fn layout_dim_shorthand((logical_dim, phys_dim): &(u8, PhysDim)) -> String {
         PhysDim::Dynamic => logical_dim.to_string(),
         PhysDim::Packed(size) => format!("{logical_dim} p({size})"),
         PhysDim::OddEven(size) => format!("{logical_dim} oe({size})"),
+    }
+}
+
+impl LayoutBimap {
+    fn tensor_rank(&self) -> u8 {
+        self.tensor_shape
+            .len()
+            .try_into()
+            .expect("tensor rank must fit in u8")
+    }
+
+    /// Number of leading pack-size coordinates reserved for powers of two in a logical dimension.
+    ///
+    /// The count covers powers of two from [MIN_PACKING_SIZE] through the corresponding logical
+    /// dimension size, so it is typically much smaller than the full `u32` range.
+    fn power_of_two_pack_size_coordinate_count(&self, logical_dim: u8) -> BimapInt {
+        let max_size = self.tensor_shape[usize::from(logical_dim)].get();
+        if max_size < MIN_PACKING_SIZE {
+            return 0;
+        }
+        max_size.ilog2() - MIN_PACKING_SIZE.ilog2() + 1
+    }
+
+    fn pack_size_value_from_coordinate(&self, logical_dim: u8, coordinate: BimapInt) -> DimSize {
+        let max_size = self.tensor_shape[usize::from(logical_dim)].get();
+        let power_count = self.power_of_two_pack_size_coordinate_count(logical_dim);
+        let size = if coordinate < power_count {
+            1u32 << (coordinate + MIN_PACKING_SIZE.ilog2())
+        } else {
+            let non_power_idx = coordinate - power_count;
+            let rank = u64::from(non_power_idx) + 1;
+            let log_correction = (rank + u64::from(rank.ilog2()) + 1).ilog2();
+            u32::try_from(rank + u64::from(log_correction) + 1).unwrap()
+        };
+        assert!(
+            size <= max_size,
+            "pack-size coordinate exceeds the logical dimension size"
+        );
+        DimSize::new(size).unwrap()
+    }
+
+    /// Computes the coordinate for the layout's `PhysDim` order and kinds.
+    ///
+    /// The actual sizes of Packed/OddEven dimensions are omitted; they are
+    /// encoded separately by [Self::pack_size_coordinate].
+    fn physdim_coordinate(&self, layout: &Layout) -> BimapInt {
+        let tensor_rank = self.tensor_rank();
+        let digits = layout.dims.iter().map(|&(logical_dim, phys_dim)| {
+            debug_assert!(logical_dim < tensor_rank);
+            u32::from(logical_dim) * PhysDim::KIND_COUNT + phys_dim.kind_number()
+        });
+        let radix = BimapInt::from(tensor_rank) * PhysDim::KIND_COUNT;
+        radix_digits_to_length_grouped_coordinate(digits, radix)
+    }
+
+    /// Rebuilds `(logical_dim, PhysDim)` entries from a physical-dimension
+    /// coordinate and the already-decoded non-Dynamic dimension sizes.
+    ///
+    /// The coordinate supplies the logical dimension and [PhysDim] kind for
+    /// each physical dimension. `pack_sizes` supplies the size payloads for
+    /// Packed and OddEven dimensions in the same order they appear.
+    fn layout_dims_from_coordinate(
+        &self,
+        physdim_coordinate: BimapInt,
+        pack_sizes: impl IntoIterator<Item = DimSize>,
+    ) -> Vec<(u8, PhysDim)> {
+        let radix = BimapInt::from(self.tensor_rank()) * PhysDim::KIND_COUNT;
+        let mut pack_sizes = pack_sizes.into_iter();
+        let dims = length_grouped_coordinate_to_radix_digits(physdim_coordinate, radix)
+            .into_iter()
+            .map(|digit| {
+                let logical_dim = (digit / PhysDim::KIND_COUNT).try_into().unwrap();
+                let kind = digit % PhysDim::KIND_COUNT;
+                let phys_dim = PhysDim::from_kind_number(kind, &mut pack_sizes);
+                (logical_dim, phys_dim)
+            })
+            .collect();
+        debug_assert!(pack_sizes.next().is_none());
+        dims
+    }
+
+    /// Returns an integer encoding the sizes of the non-Dynamic dimensions in
+    /// `layout`. This does not carry information whether those dimensions are
+    /// Packed or OddEven.
+    fn pack_size_coordinate(&self, layout: &Layout) -> BimapInt {
+        fn code_pack_size(bimap: &LayoutBimap, logical_dim: u8, size: u32) -> BimapInt {
+            let power_count = bimap.power_of_two_pack_size_coordinate_count(logical_dim);
+            if size.is_power_of_two() {
+                size.trailing_zeros() - MIN_PACKING_SIZE.trailing_zeros()
+            } else {
+                let power_count_before = (u32::BITS - (size - 1).leading_zeros()) - 1;
+                power_count + size - MIN_PACKING_SIZE - power_count_before
+            }
+        }
+
+        let (_, coordinate) = layout.dims.iter().rev().fold(
+            (false, 0),
+            |(has_pack_size, rest), &(logical_dim, phys_dim)| match phys_dim {
+                PhysDim::Dynamic => (has_pack_size, rest),
+                PhysDim::Packed(size) | PhysDim::OddEven(size) => {
+                    let size = size.get();
+                    debug_assert!(size >= MIN_PACKING_SIZE);
+                    debug_assert!(
+                        size <= self.tensor_shape[usize::from(logical_dim)].get(),
+                        "{phys_dim:?} of {layout} exceeds size {:?} in tensor shape {:?}",
+                        self.tensor_shape[usize::from(logical_dim)],
+                        self.tensor_shape,
+                    );
+                    let mut coordinate = code_pack_size(self, logical_dim, size);
+                    if has_pack_size {
+                        coordinate = pair(coordinate, rest);
+                    }
+                    (true, coordinate)
+                }
+            },
+        );
+        coordinate
+    }
+
+    fn pack_sizes_from_coordinate(
+        &self,
+        physdim_coordinate: BimapInt,
+        mut pack_size_coordinate: BimapInt,
+    ) -> Vec<DimSize> {
+        let radix = BimapInt::from(self.tensor_rank()) * PhysDim::KIND_COUNT;
+        let packed_logical_dims =
+            length_grouped_coordinate_to_radix_digits(physdim_coordinate, radix)
+                .into_iter()
+                .filter(|&digit| PhysDim::kind_has_pack_size(digit % PhysDim::KIND_COUNT))
+                .map(|digit| u8::try_from(digit / PhysDim::KIND_COUNT).unwrap())
+                .collect::<Vec<_>>();
+        let packed_dims_count = packed_logical_dims.len();
+
+        debug_assert!(packed_dims_count != 0 || pack_size_coordinate == 0);
+
+        let mut sizes = Vec::with_capacity(packed_dims_count);
+        if packed_dims_count != 0 {
+            for &logical_dim in &packed_logical_dims[..packed_dims_count - 1] {
+                let (size_int, rest) = unpair(pack_size_coordinate);
+                sizes.push(self.pack_size_value_from_coordinate(logical_dim, size_int));
+                pack_size_coordinate = rest;
+            }
+            sizes.push(self.pack_size_value_from_coordinate(
+                packed_logical_dims[packed_dims_count - 1],
+                pack_size_coordinate,
+            ));
+        }
+        sizes
+    }
+}
+
+impl BiMap for LayoutBimap {
+    type Domain = Layout;
+    type Codomain = [BimapInt; 2];
+
+    fn apply(&self, layout: &Layout) -> [BimapInt; 2] {
+        [
+            self.physdim_coordinate(layout),
+            self.pack_size_coordinate(layout),
+        ]
+    }
+
+    fn apply_inverse(&self, [physdim_coordinate, pack_size_coordinate]: &[BimapInt; 2]) -> Layout {
+        let pack_sizes =
+            self.pack_sizes_from_coordinate(*physdim_coordinate, *pack_size_coordinate);
+        Layout::new(self.layout_dims_from_coordinate(*physdim_coordinate, pack_sizes))
+    }
+
+    fn defined_for(&self, layout: &Layout) -> bool {
+        let tensor_rank = self.tensor_rank();
+        layout
+            .dims
+            .iter()
+            .all(|&(logical_dim, _)| logical_dim < tensor_rank)
     }
 }
 
@@ -955,6 +1185,97 @@ mod tests {
             (1, PhysDim::Dynamic),
         ]);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_layoutbimap_roundtrips_packed_and_oddeven_layout() {
+        let bimap = LayoutBimap {
+            tensor_shape: shape![64, 64],
+        };
+        let layout = layout![0, 1, 0 p(8), 1 oe(16)];
+        let encoded = bimap.apply(&layout);
+        assert_eq!(BiMap::apply_inverse(&bimap, &encoded), layout);
+    }
+
+    #[test]
+    fn test_layoutbimap_power_of_two_sizes_map_to_consecutive_integers() {
+        let bimap = LayoutBimap {
+            tensor_shape: shape![512, 2],
+        };
+        let mut last_pack_size_code = None;
+        for n in 0..8 {
+            let power_of_two = 2u32.pow(n + 1);
+            let layout = Layout::new(vec![
+                (0, PhysDim::Dynamic),
+                (1, PhysDim::Dynamic),
+                (0, PhysDim::Packed(power_of_two.try_into().unwrap())),
+            ]);
+            let [_, pack_size_code] = bimap.apply(&layout);
+            if let Some(last) = last_pack_size_code {
+                assert_eq!(pack_size_code, last + 1);
+            }
+            last_pack_size_code = Some(pack_size_code);
+        }
+    }
+
+    #[test]
+    fn test_layoutbimap_non_power_coordinates_start_after_shape_local_powers() {
+        let bimap = LayoutBimap {
+            tensor_shape: shape![12, 2],
+        };
+
+        for (pack_size, expected_code) in (2..).zip([0, 3, 1, 4, 5, 6]) {
+            let layout = Layout::new(vec![
+                (0, PhysDim::Dynamic),
+                (1, PhysDim::Dynamic),
+                (0, PhysDim::Packed(DimSize::new(pack_size).unwrap())),
+            ]);
+            let [_, pack_size_code] = bimap.apply(&layout);
+            assert_eq!(pack_size_code, expected_code);
+        }
+    }
+
+    #[test]
+    fn test_layoutbimap_non_power_of_two_sizes_roundtrip() {
+        for size in [3u32, 5, 6, 7, 9, 33, 1023, 1025, 2_147_483_647] {
+            for offset in 0..2 {
+                let bimap = LayoutBimap {
+                    tensor_shape: shape![size * 2 + offset, 2],
+                };
+                let layout = Layout::new(vec![
+                    (0, PhysDim::Dynamic),
+                    (1, PhysDim::Dynamic),
+                    (0, PhysDim::Packed(DimSize::new(size).unwrap())),
+                ]);
+                let encoded = bimap.apply(&layout);
+                assert_eq!(bimap.apply_inverse(&encoded), layout);
+            }
+        }
+    }
+
+    #[test]
+    fn test_from_kind_number_consumes_iterator_only_is_kind_has_pack_size() {
+        struct CountingIter {
+            next_calls: usize,
+        }
+
+        impl Iterator for CountingIter {
+            type Item = DimSize;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.next_calls += 1;
+                Some(nz!(2u32))
+            }
+        }
+
+        for kind in 0..PhysDim::KIND_COUNT {
+            let mut pack_sizes = CountingIter { next_calls: 0 };
+            let _ = PhysDim::from_kind_number(kind, &mut pack_sizes);
+            assert_eq!(
+                pack_sizes.next_calls,
+                usize::from(PhysDim::kind_has_pack_size(kind)),
+            );
+        }
     }
 
     #[test]
@@ -1322,6 +1643,13 @@ mod tests {
 
     proptest! {
         #[test]
+        fn test_layout_arbitrary_for_shape_always_applies_to_shape(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            prop_assert!(layout.applies_to_shape(&shape));
+        }
+
+        #[test]
         fn test_expand_physical_shape_preserves_volume(
             (shape, layout) in arb_shape_and_same_rank_layout()
         ) {
@@ -1542,6 +1870,28 @@ mod tests {
                     dims[idx].0,
                     dims
                 );
+            }
+        }
+
+        #[test]
+        fn test_canonicalized_layouts_have_no_oversize_physdims(
+            (shape, layout) in arb_shape_and_same_rank_layout()
+        ) {
+            let canonicalized = layout.canonicalize(&shape).unwrap();
+            for &(logical_dim, phys_dim) in &canonicalized.dims {
+                match phys_dim {
+                    PhysDim::Dynamic => {}
+                    PhysDim::Packed(size) | PhysDim::OddEven(size) => {
+                        prop_assert!(
+                            size.get() <= shape[usize::from(logical_dim)].get(),
+                            "Canonicalized layout dimension {:?} with size {:?} exceeds logical dimension {} size {:?}",
+                            phys_dim,
+                            size.get(),
+                            logical_dim,
+                            shape[usize::from(logical_dim)].get()
+                        );
+                    }
+                }
             }
         }
     }
