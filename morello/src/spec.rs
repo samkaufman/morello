@@ -2841,7 +2841,7 @@ pub fn arb_primitive_logical_spec<Tgt: Target>(
             (Just(basics), auxes_strategy, Just(serial_only))
         })
         .prop_map(|(basics, auxes, serial_only)| LogicalSpec::Primitive(basics, auxes, serial_only))
-        .prop_filter("Layout must be applicable to TensorSpec shape", |s| {
+        .prop_filter("LogicalSpec must be canonicalizable", |s| {
             s.clone().canonicalize().is_ok()
         })
 }
@@ -4179,7 +4179,7 @@ mod tests {
         let surmap = SpecSurMap::<Tgt, _, _, _> {
             logical_spec_surmap: LogicalSpecSurMap::new(
                 PrimitiveBasicsBimap { tile_scale },
-                |_: &[DimSize], dt| TensorSpecAuxNonDepBimap::new(dt),
+                |shape: &[DimSize], dt| TensorSpecAuxNonDepBimap::new(shape, dt),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };

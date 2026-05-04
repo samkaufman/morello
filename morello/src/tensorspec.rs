@@ -10,7 +10,7 @@ use crate::common::{Contig, DimSize, Dtype, Shape};
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
-use crate::layout::{Layout, LayoutBuilder, LayoutError, PhysDim};
+use crate::layout::{Layout, LayoutBimap, LayoutBuilder, LayoutError, PhysDim};
 use crate::target::{Memory, Target};
 use crate::utils::join_into_string;
 
@@ -41,6 +41,7 @@ pub struct TensorSpecAuxSurMap<Tgt: Target> {
 #[derive(Clone)]
 pub struct TensorSpecAuxNonDepBimap<Tgt: Target> {
     pub dtype: Dtype,
+    layout_bimap: LayoutBimap,
     pub phantom: std::marker::PhantomData<Tgt>,
 }
 
@@ -484,9 +485,12 @@ where
 }
 
 impl<Tgt: Target> TensorSpecAuxNonDepBimap<Tgt> {
-    pub fn new(dtype: Dtype) -> Self {
+    pub fn new(tensor_shape: &[DimSize], dtype: Dtype) -> Self {
         Self {
             dtype,
+            layout_bimap: LayoutBimap {
+                tensor_shape: tensor_shape.into(),
+            },
             phantom: std::marker::PhantomData,
         }
     }
@@ -499,10 +503,13 @@ where
     <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
 {
     type Domain = TensorSpecAux<Tgt>;
-    type Codomain = ((Layout,), [BimapInt; 3]);
+    type Codomain = ((), [BimapInt; 5]);
 
     fn apply(&self, aux: &TensorSpecAux<Tgt>) -> Self::Codomain {
+        debug_assert!(BiMap::defined_for(self, aux));
+
         let level_int = BiMap::apply(&Tgt::Memory::bimap(), &aux.memory);
+        let [physdim_value, pack_size_value] = BiMap::apply(&self.layout_bimap, &aux.layout);
         let tgt_vector_bytes = Tgt::Memory::vector_bytes(&aux.memory);
         debug_assert!(
             tgt_vector_bytes.iter().tuple_windows().all(|(a, b)| a <= b),
@@ -516,17 +523,19 @@ where
             })
             .unwrap_or(0);
         (
-            (aux.layout.clone(),),
+            (),
             [
                 level_int.into(),
-                aux.layout.contig().into(),
+                physdim_value,
+                pack_size_value,
+                (aux.layout.contiguous_full() - aux.layout.contig()).into(),
                 vector_size_idx.try_into().unwrap(),
             ],
         )
     }
 
     fn apply_inverse(&self, v: &Self::Codomain) -> Self::Domain {
-        let ((ref layout,), [level_val, contig, vector_size_idx]) = *v;
+        let ((), [level_val, physdim_val, pack_size_val, contig, vector_size_idx]) = *v;
 
         // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
         let memory = BiMap::apply_inverse(&Tgt::Memory::bimap(), &level_val.try_into().unwrap());
@@ -541,13 +550,18 @@ where
             Some(DimSize::new(b).unwrap())
         };
 
-        let mut layout = layout.clone();
-        layout.set_contig(contig.try_into().unwrap());
+        let mut layout = BiMap::apply_inverse(&self.layout_bimap, &[physdim_val, pack_size_val]);
+        let contig: Contig = contig.try_into().unwrap();
+        layout.set_contig(layout.contiguous_full() - contig);
         TensorSpecAux {
             layout,
             memory,
             vector_size,
         }
+    }
+
+    fn defined_for(&self, aux: &TensorSpecAux<Tgt>) -> bool {
+        BiMap::defined_for(&self.layout_bimap, &aux.layout)
     }
 }
 
@@ -760,13 +774,41 @@ mod tests {
                     (Just(d), any_with::<TensorSpecAux<Avx2Target>>((Default::default(), Some(d))))
                 })
         ) {
-            let bimap = TensorSpecAuxNonDepBimap::<Avx2Target> {
+            let bimap = TensorSpecAuxNonDepBimap::<Avx2Target>::new(
+                &TensorSpecArbMaxShape::default().0,
                 dtype,
-                phantom: std::marker::PhantomData,
-            };
+            );
+            prop_assume!(BiMap::defined_for(&bimap, &aux));
             let output = BiMap::apply(&bimap, &aux);
             assert_eq!(aux, BiMap::apply_inverse(&bimap, &output));
         }
+    }
+
+    /// Test that the contig. coordinate doesn't change when tiling sets a dimeension to one.
+    ///
+    /// This is useful for improving the compression of the dependency R*-Tree when it contains all
+    /// tilings of a Spec.
+    #[test]
+    fn test_tensorspecauxnondepbimap_contig_code_unchanged_when_tiling_dim_to_one() {
+        let mut layout = layout![0, 1];
+        layout.set_contig(1);
+        let mut spec = TensorSpec::<Avx2Target>::new_noncanon(
+            shape![4, 4],
+            Dtype::Float32,
+            CpuMemory::GL,
+            layout,
+            None,
+        );
+
+        let before_bimap = TensorSpecAuxNonDepBimap::<Avx2Target>::new(spec.shape(), spec.dtype());
+        let ((), before_encoding) = BiMap::apply(&before_bimap, &spec.aux);
+
+        spec.shrink(&shape![4, 1]).unwrap();
+
+        let after_bimap = TensorSpecAuxNonDepBimap::<Avx2Target>::new(spec.shape(), spec.dtype());
+        let ((), after_encoding) = BiMap::apply(&after_bimap, &spec.aux);
+
+        assert_eq!(before_encoding[3], after_encoding[3]);
     }
 
     #[test]
