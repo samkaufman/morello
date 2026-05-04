@@ -10,6 +10,7 @@ use serde_with::serde_as;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::mem::swap;
 
 mod aabb;
 
@@ -513,64 +514,82 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         T: Clone + Eq + Hash,
         F: FnMut(T, T) -> T,
     {
-        debug_assert_eq!(low.len(), high.len());
-        let mut worklist = vec![(
-            padded_pt::<D>(low).arr.to_vec(),
-            padded_pt::<D>(high).arr.to_vec(),
-            value,
-        )];
-        while let Some((r_low, r_high, r_value)) = worklist.pop() {
-            let mut rhs_subrects = vec![];
-            let intersectee_option = self
-                .drain_in_envelope_intersecting(AABB::from_corners(
-                    r_low.clone().try_into().unwrap(),
-                    r_high.clone().try_into().unwrap(),
-                ))
-                .take(1)
-                .next();
-            if let Some(intersectee) = intersectee_option {
-                let result = rect_partition_intersection(
-                    &r_low,
-                    &r_high,
-                    &intersectee.bottom.arr,
-                    &intersectee.top.arr,
-                )
-                .unwrap();
-                rhs_subrects.extend(result.rhs_subrectangles.into_iter().map(|(bottom, top)| {
-                    RTreeRect {
-                        bottom: bottom.try_into().unwrap(),
-                        top: top.try_into().unwrap(),
-                        value: intersectee.value.clone(),
-                    }
-                }));
-                worklist.extend(
-                    result
-                        .lhs_subrectangles
-                        .into_iter()
-                        .map(|(bottom, top)| (bottom, top, r_value.clone())),
-                );
-                worklist.push((
-                    result.intersection.0,
-                    result.intersection.1,
-                    fold(r_value.clone(), intersectee.value),
-                ));
-            } else if merge {
-                self.merge_insert(&r_low, &r_high, r_value, true);
-            } else {
-                self.insert(RTreeRect {
-                    bottom: r_low.try_into().unwrap(),
-                    top: r_high.try_into().unwrap(),
-                    value: r_value,
-                });
-            }
+        let insert_low = padded_pt::<D>(low).arr.to_vec();
+        let insert_high = padded_pt::<D>(high).arr.to_vec();
 
-            if merge {
-                rhs_subrects.into_iter().for_each(|r| {
-                    let RTreeRect { top, bottom, value } = r;
-                    self.merge_insert(&bottom.arr, &top.arr, value, true)
-                })
-            } else {
-                rhs_subrects.into_iter().for_each(|r| self.insert(r));
+        // Every later lhs piece is contained by the original insert envelope, so this one drain
+        // finds all stored rectangles it can intersect.
+        let mut lhs_rects = vec![(insert_low.clone(), insert_high.clone(), value)];
+        let mut next_lhs_rects = vec![]; // double-buffer lhs_rects'
+        let mut rhs_subrects = vec![];
+
+        let insert_envelope = AABB::from_corners(
+            insert_low.clone().try_into().unwrap(),
+            insert_high.clone().try_into().unwrap(),
+        );
+
+        // Only rectangles which overlap (excluding touching edges/corners!) are relevant, so we
+        // don't use `drain_in_envelope_intersecting`. Remember that any later calls to
+        // merge_insert will still merge with those adjacent rectangles.
+        self.drain_with_selection_function(SelectInExclusiveEnvelopeFunction::new(insert_envelope))
+            .for_each(|intersectee| {
+                let RTreeRect {
+                    bottom,
+                    top,
+                    value: rhs_value,
+                } = intersectee;
+                let rhs_bottom = bottom.arr.to_vec();
+                let rhs_top = top.arr.to_vec();
+
+                // The overlap with the original insert is represented by folded lhs pieces below.
+                rhs_subrects.extend(
+                    rect_subtract(&rhs_bottom, &rhs_top, &insert_low, &insert_high)
+                        .into_iter()
+                        .map(|(bottom, top)| RTreeRect {
+                            bottom: bottom.try_into().unwrap(),
+                            top: top.try_into().unwrap(),
+                            value: rhs_value.clone(),
+                        }),
+                );
+
+                debug_assert!(next_lhs_rects.is_empty());
+                for (lhs_bottom, lhs_top, lhs_value) in lhs_rects.drain(..) {
+                    if let Some(result) =
+                        rect_partition_intersection(&lhs_bottom, &lhs_top, &rhs_bottom, &rhs_top)
+                    {
+                        for (bottom, top) in result.lhs_subrectangles {
+                            next_lhs_rects.push((bottom, top, lhs_value.clone()));
+                        }
+                        next_lhs_rects.push((
+                            result.intersection.0,
+                            result.intersection.1,
+                            fold(lhs_value, rhs_value.clone()),
+                        ));
+                    } else {
+                        next_lhs_rects.push((lhs_bottom, lhs_top, lhs_value));
+                    }
+                }
+                swap(&mut lhs_rects, &mut next_lhs_rects);
+            });
+
+        if merge {
+            for r in rhs_subrects {
+                let RTreeRect { top, bottom, value } = r;
+                self.merge_insert(&bottom.arr, &top.arr, value, true);
+            }
+            for (bottom, top, value) in lhs_rects {
+                self.merge_insert(&bottom, &top, value, true);
+            }
+        } else {
+            for r in rhs_subrects {
+                self.insert(r);
+            }
+            for (bottom, top, value) in lhs_rects {
+                self.insert(RTreeRect {
+                    bottom: bottom.try_into().unwrap(),
+                    top: top.try_into().unwrap(),
+                    value,
+                });
             }
         }
     }
@@ -1339,14 +1358,11 @@ mod tests {
     fn test_fold_insert_multiple_intersections() {
         let mut tree = RTreeDyn::empty(2);
         tree.insert(&[0, 0], &[2, 2], 1);
-        println!("after first insert");
         tree.fold_insert(&[1, 1], &[3, 3], 2, false, |a, b| a + b);
-        println!("after first fold_insert");
         for entry in tree.iter() {
             println!("{:?}", entry);
         }
         tree.fold_insert(&[2, 2], &[4, 4], 3, false, |a, b| a + b);
-        println!("after second fold_insert");
         assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
         assert_eq!(tree.locate_at_point(&[1, 1]), Some(&3));
         assert_eq!(tree.locate_at_point(&[2, 2]), Some(&6));
