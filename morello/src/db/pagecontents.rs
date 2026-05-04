@@ -33,7 +33,7 @@ impl PageContents {
     pub fn get_with_preference<Tgt>(
         &self,
         query: &Spec<Tgt>,
-        inner_pt: &[u8],
+        inner_pt: &[BimapInt],
     ) -> GetPreference<ActionCostVec, Vec<ActionNum>>
     where
         Tgt: Target,
@@ -75,7 +75,7 @@ impl RTreePageContents {
         self.0.size()
     }
 
-    pub fn get(&self, inner_pt: &[u8], spec_volume: NonZeroU64) -> Option<ActionCostVec> {
+    pub fn get(&self, inner_pt: &[BimapInt], spec_volume: NonZeroU64) -> Option<ActionCostVec> {
         // TODO: Avoid conversion. Instead forward a slice right into locate_at_point.
         let arr = inner_pt.iter().map(|v| (*v).into()).collect::<Vec<_>>();
 

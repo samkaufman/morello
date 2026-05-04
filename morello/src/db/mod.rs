@@ -8,7 +8,6 @@ use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{AsBimap, BiMap, SurMap};
 use crate::grid::linear::{BimapInt, BimapSInt};
 use crate::imp::ImplNode;
-use crate::layout::Layout;
 use crate::memorylimits::{MemVec, MemoryLimits, MemoryLimitsBimap};
 use crate::reconstruct::reconstruct_impls_from_actions;
 use crate::rtree::RTreeDyn;
@@ -39,7 +38,7 @@ use {
 };
 
 type DbKey = (TableKey, Vec<BimapInt>);
-type TableKey = (SpecKey, Vec<(Layout,)>);
+type TableKey = (SpecKey, Vec<()>);
 type PageKey = DbKey;
 type SpatialQueryPageResult = (Vec<BimapSInt>, Vec<BimapSInt>, Option<NormalizedCost>);
 pub type ActionNum = u16;
@@ -299,16 +298,12 @@ impl FilesDatabase {
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = BiMap::apply(&bimap, query);
-        let global_pt_u8 = global_pt
-            .iter()
-            .map(|&x| u8::try_from(x).unwrap())
-            .collect::<Vec<_>>();
 
         let page_pt = blockify_point(&global_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let page: &Page = &self.load_live_page(&page_key);
-        page.contents.get_with_preference(query, &global_pt_u8)
+        page.contents.get_with_preference(query, &global_pt)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -469,7 +464,7 @@ impl FilesDatabase {
                 PrimitiveBasicsBimap {
                     binary_scale_shapes: self.binary_scale_shapes,
                 },
-                |_: &[DimSize], dtype| TensorSpecAuxNonDepBimap::new(dtype),
+                |shape: &[DimSize], dtype| TensorSpecAuxNonDepBimap::new(shape, dtype),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };
@@ -1234,8 +1229,8 @@ fn page_file_path(root: &Path, page_key: &PageKey) -> path::PathBuf {
 }
 
 fn table_dir_path(root: &Path, table_key: &TableKey) -> path::PathBuf {
-    let (spec_key, table_key_rest) = table_key;
-    let mut spec_key_dir_name = match spec_key {
+    let (spec_key, _): &(SpecKey, Vec<()>) = table_key;
+    let spec_key_dir_name = match spec_key {
         SpecKey::OnePrefix { rank, dtypes } => root
             .join(format!("OnePrefix{}", rank))
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
@@ -1351,9 +1346,6 @@ fn table_dir_path(root: &Path, table_key: &TableKey) -> path::PathBuf {
                     .join("_"),
             ),
     };
-    for (l,) in table_key_rest {
-        spec_key_dir_name = spec_key_dir_name.join(l.to_string());
-    }
     spec_key_dir_name
 }
 
@@ -1883,7 +1875,11 @@ mod tests {
             spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2, 1);
-            assert!(db.can_memoize(&spec), "All specs should be memoizable when binary_scale_shapes is false");
+            assert!(
+                db.can_memoize(&spec),
+                "All Specs should be memoizable when binary_scale_shapes = false, \
+                but {spec} was not",
+            );
         }
     }
 }

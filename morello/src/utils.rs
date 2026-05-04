@@ -184,6 +184,108 @@ pub fn iter_powers_of_two_range(
     (start_bits..end_bits + 1).map(|b| if b == 0 { 0 } else { 2u64.pow(b - 1) })
 }
 
+/// Returns how many integers in the interval [`start`, `end`] are not powers
+/// of two. If `start` is greater than `end`, returns 0.
+pub const fn non_pow2_count(start: u32, end: u32) -> u32 {
+    if end < start {
+        0
+    } else {
+        let value_count = end - start + 1;
+        let powers_of_two_through_end = u32::BITS - end.leading_zeros();
+        let powers_of_two_before_start = u32::BITS - start.saturating_sub(1).leading_zeros();
+        let powers_of_two_count = powers_of_two_through_end - powers_of_two_before_start;
+        value_count - powers_of_two_count
+    }
+}
+
+/// Maps two integers to one. The mapping can be reversed by [unpair].
+///
+/// Specifically, this implements the Cantor pairing function.
+///
+/// Panics if the paired value is greater than [u32::MAX].
+pub fn pair(a: u32, b: u32) -> u32 {
+    let sum = u64::from(a) + u64::from(b);
+    let z = sum * (sum + 1) / 2 + u64::from(b);
+    z.try_into().expect("paired value exceeds u32::MAX")
+}
+
+/// Reverses [pair].
+pub fn unpair(z: u32) -> (u32, u32) {
+    let z = u64::from(z);
+    // Largest s such that s * (s + 1) / 2 <= z.
+    let s = ((8 * z + 1).isqrt() - 1) / 2;
+    let b = z - s * (s + 1) / 2;
+    let a = s - b;
+    (a.try_into().unwrap(), b.try_into().unwrap())
+}
+
+/// Maps a base-`radix` digit vector to a length-grouped coordinate.
+///
+/// For `d = [d_0, ..., d_{n-1}]` with `0 <= d_i < radix`, let
+/// `V(d) = sum_{i=0}^{n-1} d_i * radix^{n-1-i}` and
+/// `L(n) = sum_{k=0}^{n-1} radix^k`. This returns `L(n) + V(d)`.
+/// Therefore every length-`n` vector has a greater coordinate than every
+/// shorter vector, and equal-length vectors follow ordinary base-`radix` order.
+///
+/// Requires `radix >= 2`, every digit to be `< radix`, and `L(n) + V(d)` to be
+/// at most [u32::MAX]. Panics if the coordinate is not representable as `u32`.
+pub fn radix_digits_to_length_grouped_coordinate(
+    digits: impl IntoIterator<Item = u32>,
+    radix: u32,
+) -> u32 {
+    assert!(radix >= 2, "radix must be at least 1");
+
+    let mut offset = 0u32;
+    let mut group = 1u32;
+    let mut coordinate = 0u32;
+    let mut digits = digits.into_iter().peekable();
+    while let Some(digit) = digits.next() {
+        assert!(
+            digit < radix,
+            "digit {digit} is not less than radix {radix}"
+        );
+        offset = offset
+            .checked_add(group)
+            .expect("length-grouped coordinate exceeds u32::MAX");
+        coordinate = coordinate
+            .checked_mul(radix)
+            .and_then(|coordinate| coordinate.checked_add(digit))
+            .expect("length-grouped coordinate exceeds u32::MAX");
+        if digits.peek().is_some() {
+            group = group
+                .checked_mul(radix)
+                .expect("length-grouped coordinate exceeds u32::MAX");
+        }
+    }
+    offset
+        .checked_add(coordinate)
+        .expect("length-grouped coordinate exceeds u32::MAX")
+}
+
+/// Inverts [radix_digits_to_length_grouped_coordinate].
+///
+/// `radix` must be 2 or greater.
+pub fn length_grouped_coordinate_to_radix_digits(mut coordinate: u32, radix: u32) -> Vec<u32> {
+    debug_assert!(radix >= 2);
+
+    let mut digits = Vec::new();
+    let mut group = 1;
+    while coordinate >= group {
+        coordinate -= group;
+        digits.push(0);
+        group = match group.checked_mul(radix) {
+            Some(next_group) => next_group,
+            None => break,
+        };
+    }
+    for digit in digits.iter_mut().rev() {
+        *digit = coordinate % radix;
+        coordinate /= radix;
+    }
+    debug_assert_eq!(coordinate, 0);
+    digits
+}
+
 /// Returns the factors of an integer, in ascending order.
 pub fn factors(x: usize) -> Vec<usize> {
     let mut result = Vec::new();
@@ -388,7 +490,47 @@ mod tests {
         assert_eq!(iter_powers_of_two_range(16, 8).collect::<Vec<_>>(), vec![]);
     }
 
+    #[test]
+    fn test_pair_succeeds_just_below_overflow() {
+        pair(92_681, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "paired value exceeds u32::MAX")]
+    fn test_pair_panics_on_overflow_1() {
+        pair(92_682, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "paired value exceeds u32::MAX")]
+    fn test_pair_panics_on_overflow_2() {
+        pair(0, 92_682);
+    }
+
     proptest! {
+        #[test]
+        fn test_non_pow2_count(
+            (start, stop) in any::<u32>().prop_flat_map(|s| (Just(s), s..=u32::MAX))
+        ) {
+            let mut powers_of_two_in_range = 0u32;
+            for i in 0..u32::BITS {
+                let power = 1u32 << i;
+                if start <= power && power <= stop {
+                    powers_of_two_in_range += 1;
+                }
+            }
+            let values_in_range = u64::from(stop) - u64::from(start) + 1;
+            let non_powers_of_two_in_range = values_in_range - u64::from(powers_of_two_in_range);
+            assert_eq!(u64::from(non_pow2_count(start, stop)), non_powers_of_two_in_range);
+        }
+
+        #[test]
+        fn test_pair_unpair_roundtrips(z in any::<u32>()) {
+            // anything we can unpair is a valid pair. (overflow isn't a concern.)
+            let (a, b) = unpair(z);
+            prop_assert_eq!(pair(a, b), z);
+        }
+
         #[test]
         fn test_diagonals_always_returns_positive_points(
             maxes in proptest::collection::vec(0i8..=3, 1..=3)
@@ -399,5 +541,17 @@ mod tests {
                 }
             }
         }
+
+        #[test]
+        fn test_radix_digits_length_grouped_coordinate_roundtrips(
+            radix in 2u32..=1024,
+            coordinate in 0u32..4_000_000,
+        ) {
+            let digits = length_grouped_coordinate_to_radix_digits(coordinate, radix);
+            let back = radix_digits_to_length_grouped_coordinate(digits.clone(), radix);
+            prop_assert_eq!(back, coordinate);
+            prop_assert_eq!(length_grouped_coordinate_to_radix_digits(back, radix), digits);
+        }
+
     }
 }
