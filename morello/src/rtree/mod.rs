@@ -7,7 +7,7 @@ use rstar::Envelope as _;
 use rstar::{Point, PointDistance, RTree, RTreeObject};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem::swap;
@@ -15,6 +15,15 @@ use std::mem::swap;
 mod aabb;
 
 pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
+
+pub enum RegionScanResult {
+    /// The queried region is fully covered by matching rectangles.
+    Covered,
+    /// The region is not fully covered, and every intersecting rectangle matched.
+    AllIntersectionsMatched,
+    /// The region is not fully covered, and at least one intersecting rectangle did not match.
+    SomeIntersectionsUnmatched,
+}
 
 /// A private trait abstracting over differently ranked RTree<RTreeRect<_, T>> variants.
 /// It's used internally to implement RTreeDyn (each variant dispatches).
@@ -28,8 +37,34 @@ trait RTreeGeneric<T> {
 
     fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_>;
 
+    /// Scans rectangles intersecting `low..=high` once, first checking whether `cover_pred`
+    /// rectangles cover the region, then whether all intersections satisfy `intersect_pred` if
+    /// coverage fails.
+    fn covered_or_all_intersections_match<Cover, Intersect>(
+        &self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+        cover_pred: Cover,
+        intersect_pred: Intersect,
+    ) -> RegionScanResult
+    where
+        Cover: FnMut(&T) -> bool,
+        Intersect: FnMut(&T) -> bool;
+
     // TODO: It would be nice to take low and high by value to avoid a clone.
     fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T);
+
+    /// Overwrites the inclusive rectangle `low..=high` with `value`.
+    ///
+    /// The replacement rectangle is subtracted from any intersecting rectangles, and the
+    /// non-intersecting pieces of those rectangles are preserved.  When `merge` is true, the
+    /// replacement and preserved pieces are reinserted with rectangular merge/coalescing enabled.
+    ///
+    /// Unlike [Self::fold_insert], this does not combine `value` with old values in overlapping
+    /// regions; the replacement value wins everywhere inside `low..=high`.
+    fn replace(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool)
+    where
+        T: Clone + Eq + Hash;
 
     fn merge_insert(
         &mut self,
@@ -123,11 +158,40 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
+            pub fn covered_or_all_intersections_match<Cover, Intersect>(
+                &self,
+                low: &[BimapSInt],
+                high: &[BimapSInt],
+                cover_pred: Cover,
+                intersect_pred: Intersect,
+            ) -> RegionScanResult
+            where
+                Cover: FnMut(&T) -> bool,
+                Intersect: FnMut(&T) -> bool,
+            {
+                debug_assert_eq!(low.len(), self.dim_count());
+                debug_assert_eq!(high.len(), self.dim_count());
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::covered_or_all_intersections_match(t, low, high, cover_pred, intersect_pred), )*
+                }
+            }
+
             pub fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
                 debug_assert_eq!(low.len(), self.dim_count());
                 debug_assert_eq!(high.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::insert(t, low, high, value), )*
+                }
+            }
+
+            pub fn replace(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool)
+            where
+                T: Clone + Eq + Hash,
+            {
+                debug_assert_eq!(low.len(), self.dim_count());
+                debug_assert_eq!(high.len(), self.dim_count());
+                match self {
+                    $( RTreeDyn::$name(t) => RTreeGeneric::replace(t, low, high, value, merge), )*
                 }
             }
 
@@ -323,6 +387,7 @@ pub struct RTreePt<const D: usize> {
 
 struct RectPartitionIntersection {
     lhs_subrectangles: Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
+    #[cfg_attr(not(test), allow(dead_code))]
     rhs_subrectangles: Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
     intersection: (Vec<BimapSInt>, Vec<BimapSInt>),
 }
@@ -338,6 +403,12 @@ struct BatchRemoveSelFn<O: rstar::RTreeObject> {
 struct SameValueIntersectionSelFn<'a, const D: usize, T> {
     envelope: <RTreeRect<D, T> as RTreeObject>::Envelope,
     value: &'a T,
+}
+
+/// Selects existing same-valued rectangles that can be absorbed by a merge batch.
+struct MergeCandidateSelFn<'a, const D: usize, T> {
+    rects: &'a [RTreeRect<D, T>],
+    candidate_envelopes: &'a [AABB<D>],
 }
 
 impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
@@ -380,11 +451,93 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         )
     }
 
+    fn covered_or_all_intersections_match<Cover, Intersect>(
+        &self,
+        low: &[BimapSInt],
+        high: &[BimapSInt],
+        mut cover_pred: Cover,
+        intersect_pred: Intersect,
+    ) -> RegionScanResult
+    where
+        Cover: FnMut(&T) -> bool,
+        Intersect: FnMut(&T) -> bool,
+    {
+        debug_assert_eq!(low.len(), high.len());
+        let insert_low = padded_pt::<D>(low);
+        let insert_high = padded_pt::<D>(high);
+        let insert_envelope = AABB::from_corners(insert_low.clone(), insert_high.clone());
+        let mut uncovered = vec![(insert_low.arr.to_vec(), insert_high.arr.to_vec())];
+        let mut intersecting_values = Vec::new();
+
+        for candidate in self.locate_in_envelope_intersecting(&insert_envelope) {
+            if cover_pred(&candidate.value) {
+                subtract_from_all(&mut uncovered, &candidate.bottom.arr, &candidate.top.arr);
+                if uncovered.is_empty() {
+                    return RegionScanResult::Covered;
+                }
+            }
+            intersecting_values.push(&candidate.value);
+        }
+
+        if intersecting_values.into_iter().all(intersect_pred) {
+            RegionScanResult::AllIntersectionsMatched
+        } else {
+            RegionScanResult::SomeIntersectionsUnmatched
+        }
+    }
+
     fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
         debug_assert_eq!(low.len(), high.len());
         let bottom = padded_pt::<D>(low);
         let top = padded_pt::<D>(high);
         self.insert(RTreeRect { top, bottom, value });
+    }
+
+    fn replace(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool)
+    where
+        T: Clone + Eq + Hash,
+    {
+        debug_assert_eq!(low.len(), high.len());
+        let insert_bottom = padded_pt::<D>(low);
+        let insert_top = padded_pt::<D>(high);
+        let insert_envelope = AABB::from_corners(insert_bottom.clone(), insert_top.clone());
+        let mut preserved = Vec::new();
+
+        self.drain_in_envelope_intersecting(insert_envelope)
+            .for_each(|intersectee| {
+                preserved.extend(
+                    rect_subtract(
+                        &intersectee.bottom.arr,
+                        &intersectee.top.arr,
+                        &insert_bottom.arr,
+                        &insert_top.arr,
+                    )
+                    .into_iter()
+                    .map(|(bottom, top)| RTreeRect {
+                        bottom: bottom.try_into().unwrap(),
+                        top: top.try_into().unwrap(),
+                        value: intersectee.value.clone(),
+                    }),
+                );
+            });
+
+        if merge {
+            preserved.push(RTreeRect {
+                bottom: insert_bottom,
+                top: insert_top,
+                value,
+            });
+            merge_insert_disjoint_rects(self, preserved);
+        } else {
+            for rect in preserved {
+                self.insert(rect);
+            }
+            self.insert(RTreeRect {
+                bottom: insert_bottom,
+                top: insert_top,
+                value,
+            });
+        }
     }
 
     fn merge_insert(
@@ -514,6 +667,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         T: Clone + Eq + Hash,
         F: FnMut(T, T) -> T,
     {
+        debug_assert_eq!(low.len(), high.len());
         let insert_low = padded_pt::<D>(low).arr.to_vec();
         let insert_high = padded_pt::<D>(high).arr.to_vec();
 
@@ -528,10 +682,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             insert_high.clone().try_into().unwrap(),
         );
 
-        // Only rectangles which overlap (excluding touching edges/corners!) are relevant, so we
-        // don't use `drain_in_envelope_intersecting`. Remember that any later calls to
-        // merge_insert will still merge with those adjacent rectangles.
-        self.drain_with_selection_function(SelectInExclusiveEnvelopeFunction::new(insert_envelope))
+        self.drain_in_envelope_intersecting(insert_envelope)
             .for_each(|intersectee| {
                 let RTreeRect {
                     bottom,
@@ -834,6 +985,23 @@ where
     }
 }
 
+impl<const D: usize, T> rstar::SelectionFunction<RTreeRect<D, T>> for MergeCandidateSelFn<'_, D, T>
+where
+    T: Eq,
+{
+    fn should_unpack_parent(&self, envelope: &<RTreeRect<D, T> as RTreeObject>::Envelope) -> bool {
+        self.candidate_envelopes
+            .iter()
+            .any(|candidate_envelope| candidate_envelope.intersects(envelope))
+    }
+
+    fn should_unpack_leaf(&self, leaf: &RTreeRect<D, T>) -> bool {
+        self.rects
+            .iter()
+            .any(|rect| rect.value == leaf.value && rects_absorbable_by_merge(rect, leaf))
+    }
+}
+
 /// Insert a new rectangle, partitioning any intersecting rectangles with the same value and
 /// removing the overlapping parts.
 fn insert_and_subtract_overlap<const D: usize, T>(
@@ -867,6 +1035,156 @@ fn insert_and_subtract_overlap<const D: usize, T>(
         tree.insert(part);
     }
     tree.insert(to_insert);
+}
+
+fn merge_insert_disjoint_rects<const D: usize, T>(
+    tree: &mut RTree<RTreeRect<D, T>>,
+    mut rects: Vec<RTreeRect<D, T>>,
+) where
+    T: Clone + Eq + Hash,
+{
+    coalesce_mergeable_rects(&mut rects);
+
+    while !rects.is_empty() {
+        let candidate_envelopes = rects
+            .iter()
+            .map(expanded_merge_candidate_envelope)
+            .collect::<Vec<_>>();
+        let selection_fn = MergeCandidateSelFn {
+            rects: &rects,
+            candidate_envelopes: &candidate_envelopes,
+        };
+        let mut merge_candidates = tree
+            .drain_with_selection_function(selection_fn)
+            .collect::<Vec<_>>();
+
+        if merge_candidates.is_empty() {
+            break;
+        }
+
+        rects.append(&mut merge_candidates);
+        coalesce_mergeable_rects(&mut rects);
+    }
+
+    for rect in rects {
+        tree.insert(rect);
+    }
+}
+
+fn coalesce_mergeable_rects<const D: usize, T>(rects: &mut Vec<RTreeRect<D, T>>)
+where
+    T: Eq + Hash,
+{
+    while let Some((i, j, merge_kind)) = find_mergeable_rect_pair(rects) {
+        match merge_kind {
+            RectMergeKind::DropJ => {
+                rects.swap_remove(j);
+            }
+            RectMergeKind::DropI => {
+                rects.swap_remove(i);
+            }
+            RectMergeKind::UnionIntoI => {
+                for dim in 0..D {
+                    rects[i].bottom.arr[dim] =
+                        rects[i].bottom.arr[dim].min(rects[j].bottom.arr[dim]);
+                    rects[i].top.arr[dim] = rects[i].top.arr[dim].max(rects[j].top.arr[dim]);
+                }
+                rects.swap_remove(j);
+            }
+        }
+    }
+}
+
+enum RectMergeKind {
+    DropJ,
+    DropI,
+    UnionIntoI,
+}
+
+fn find_mergeable_rect_pair<const D: usize, T>(
+    rects: &[RTreeRect<D, T>],
+) -> Option<(usize, usize, RectMergeKind)>
+where
+    T: Eq + Hash,
+{
+    let mut same_value_rects: HashMap<&T, Vec<usize>> = HashMap::new();
+    for (idx, rect) in rects.iter().enumerate() {
+        same_value_rects.entry(&rect.value).or_default().push(idx);
+    }
+
+    for indices in same_value_rects.values() {
+        for (offset, &i) in indices.iter().enumerate() {
+            for &j in &indices[offset + 1..] {
+                if rect_contains(&rects[i], &rects[j]) {
+                    return Some((i, j, RectMergeKind::DropJ));
+                }
+                if rect_contains(&rects[j], &rects[i]) {
+                    return Some((i, j, RectMergeKind::DropI));
+                }
+                if rectangular_merge_possible(&rects[i], &rects[j]) {
+                    return Some((i, j, RectMergeKind::UnionIntoI));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn expanded_merge_candidate_envelope<const D: usize, T>(rect: &RTreeRect<D, T>) -> AABB<D> {
+    AABB::from_corners(
+        RTreePt {
+            arr: rect.bottom.arr.map(|b| b.saturating_sub(1)),
+        },
+        RTreePt {
+            arr: rect.top.arr.map(|t| t.saturating_add(1)),
+        },
+    )
+}
+
+fn rects_absorbable_by_merge<const D: usize, T>(
+    rect: &RTreeRect<D, T>,
+    candidate: &RTreeRect<D, T>,
+) -> bool {
+    rect_contains(rect, candidate)
+        || rect_contains(candidate, rect)
+        || rectangular_merge_possible(rect, candidate)
+}
+
+fn rect_contains<const D: usize, T>(outer: &RTreeRect<D, T>, inner: &RTreeRect<D, T>) -> bool {
+    // TODO: Consider vectorizing.
+    for dim in 0..D {
+        if outer.bottom.arr[dim] > inner.bottom.arr[dim] || outer.top.arr[dim] < inner.top.arr[dim]
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn rectangular_merge_possible<const D: usize, T>(
+    lhs: &RTreeRect<D, T>,
+    rhs: &RTreeRect<D, T>,
+) -> bool {
+    all_dimensions_adjacent_or_overlap(&lhs.bottom.arr, &lhs.top.arr, &rhs.bottom.arr, &rhs.top.arr)
+        && count_matching_dimensions(&lhs.bottom.arr, &lhs.top.arr, &rhs.bottom.arr, &rhs.top.arr)
+            == D - 1
+}
+
+fn subtract_from_all(
+    rects: &mut Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
+    subtrahend_bottom: &[BimapSInt],
+    subtrahend_top: &[BimapSInt],
+) {
+    let old_rects = std::mem::take(rects);
+    rects.reserve(old_rects.len());
+    for (bottom, top) in old_rects {
+        rects.extend(rect_subtract(
+            &bottom,
+            &top,
+            subtrahend_bottom,
+            subtrahend_top,
+        ));
+    }
 }
 
 /// Subtract the subtrahend rectangle from the minuend rectangle (both defined by inclusive points),

@@ -3,7 +3,7 @@ use crate::{
     cost::{Cost, CostIntensity},
     grid::{canon::CanonicalBimap, general::BiMap, linear::BimapInt},
     memorylimits::MemVec,
-    rtree::RTreeDyn,
+    rtree::{RTreeDyn, RegionScanResult},
     spec::Spec,
     target::Target,
 };
@@ -118,35 +118,49 @@ impl RTreePageContents {
                     *action_num,
                 )
             });
-        self.0
-            .fold_insert(&bottom, &top, value, true, min_overlapping_action);
+
+        match self.0.covered_or_all_intersections_match(
+            &bottom,
+            &top,
+            |existing| action_dominates(existing, &value),
+            |existing| action_dominates(&value, existing),
+        ) {
+            RegionScanResult::Covered => {}
+            RegionScanResult::AllIntersectionsMatched => {
+                self.0.replace(&bottom, &top, value, true);
+            }
+            RegionScanResult::SomeIntersectionsUnmatched => {
+                self.0
+                    .fold_insert(&bottom, &top, value, true, |inserted, existing| {
+                        if action_dominates(&inserted, &existing) {
+                            inserted
+                        } else {
+                            existing
+                        }
+                    });
+            }
+        }
     }
 }
 
-fn min_overlapping_action(
-    inserted: Option<(CostIntensity, MemVec, u8, ActionNum)>,
-    existing: Option<(CostIntensity, MemVec, u8, ActionNum)>,
-) -> Option<(CostIntensity, MemVec, u8, ActionNum)> {
-    match (inserted, existing) {
-        (Some(inserted), Some(existing)) => {
+fn action_dominates(
+    lhs: &Option<(CostIntensity, MemVec, u8, ActionNum)>,
+    rhs: &Option<(CostIntensity, MemVec, u8, ActionNum)>,
+) -> bool {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => {
             assert_eq!(
-                    inserted.0, existing.0,
-                    "Overlapping rectangles must have matching cost intensities: inserted={:?}, existing={:?}",
-                    inserted.0, existing.0
-                );
-            Some(cmp::min_by(
-                inserted,
-                existing,
-                |(_, peaks_i, depth_i, action_num_i),
-                 (_, peaks_e, depth_e, action_num_e)| {
-                    peaks_i
-                        .lex_cmp(peaks_e)
-                        .then(depth_i.cmp(depth_e))
-                        .then(action_num_i.cmp(action_num_e))
-                },
-            ))
+                lhs.0, rhs.0,
+                "Overlapping rectangles must have matching cost intensities: lhs={:?}, rhs={:?}",
+                lhs.0, rhs.0
+            );
+            lhs.1
+                .lex_cmp(&rhs.1)
+                .then(lhs.2.cmp(&rhs.2))
+                .then(lhs.3.cmp(&rhs.3))
+                != cmp::Ordering::Greater
         }
-        (None, None) => None,
+        (None, None) => true,
         (Some(_), None) | (None, Some(_)) => {
             panic!("Overlapping rectangles must both have values or both be empty")
         }
