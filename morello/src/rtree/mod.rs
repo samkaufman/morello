@@ -20,7 +20,7 @@ pub enum RegionScanResult {
     /// The queried region is fully covered by matching rectangles.
     Covered,
     /// The region is not fully covered, and every intersecting rectangle matched.
-    AllIntersectionsMatched,
+    AllIntersectionsMatched { all_intersections_equal: bool },
     /// The region is not fully covered, and at least one intersecting rectangle did not match.
     SomeIntersectionsUnmatched,
 }
@@ -40,16 +40,18 @@ trait RTreeGeneric<T> {
     /// Scans rectangles intersecting `low..=high` once, first checking whether `cover_pred`
     /// rectangles cover the region, then whether all intersections satisfy `intersect_pred` if
     /// coverage fails.
-    fn covered_or_all_intersections_match<Cover, Intersect>(
+    fn covered_or_all_intersections_match<Cover, Intersect, Equal>(
         &self,
         low: &[BimapSInt],
         high: &[BimapSInt],
         cover_pred: Cover,
         intersect_pred: Intersect,
+        equal_pred: Equal,
     ) -> RegionScanResult
     where
         Cover: FnMut(&T) -> bool,
-        Intersect: FnMut(&T) -> bool;
+        Intersect: FnMut(&T) -> bool,
+        Equal: FnMut(&T) -> bool;
 
     // TODO: It would be nice to take low and high by value to avoid a clone.
     fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T);
@@ -158,21 +160,23 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn covered_or_all_intersections_match<Cover, Intersect>(
+            pub fn covered_or_all_intersections_match<Cover, Intersect, Equal>(
                 &self,
                 low: &[BimapSInt],
                 high: &[BimapSInt],
                 cover_pred: Cover,
                 intersect_pred: Intersect,
+                equal_pred: Equal,
             ) -> RegionScanResult
             where
                 Cover: FnMut(&T) -> bool,
                 Intersect: FnMut(&T) -> bool,
+                Equal: FnMut(&T) -> bool,
             {
                 debug_assert_eq!(low.len(), self.dim_count());
                 debug_assert_eq!(high.len(), self.dim_count());
                 match self {
-                    $( RTreeDyn::$name(t) => RTreeGeneric::covered_or_all_intersections_match(t, low, high, cover_pred, intersect_pred), )*
+                    $( RTreeDyn::$name(t) => RTreeGeneric::covered_or_all_intersections_match(t, low, high, cover_pred, intersect_pred, equal_pred), )*
                 }
             }
 
@@ -451,16 +455,18 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         )
     }
 
-    fn covered_or_all_intersections_match<Cover, Intersect>(
+    fn covered_or_all_intersections_match<Cover, Intersect, Equal>(
         &self,
         low: &[BimapSInt],
         high: &[BimapSInt],
         mut cover_pred: Cover,
-        intersect_pred: Intersect,
+        mut intersect_pred: Intersect,
+        mut equal_pred: Equal,
     ) -> RegionScanResult
     where
         Cover: FnMut(&T) -> bool,
         Intersect: FnMut(&T) -> bool,
+        Equal: FnMut(&T) -> bool,
     {
         debug_assert_eq!(low.len(), high.len());
         let insert_low = padded_pt::<D>(low);
@@ -479,8 +485,14 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             intersecting_values.push(&candidate.value);
         }
 
-        if intersecting_values.into_iter().all(intersect_pred) {
-            RegionScanResult::AllIntersectionsMatched
+        if intersecting_values
+            .iter()
+            .all(|value| intersect_pred(value))
+        {
+            let all_intersections_equal = intersecting_values.iter().all(|value| equal_pred(value));
+            RegionScanResult::AllIntersectionsMatched {
+                all_intersections_equal,
+            }
         } else {
             RegionScanResult::SomeIntersectionsUnmatched
         }

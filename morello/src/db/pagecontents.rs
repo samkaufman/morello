@@ -124,9 +124,17 @@ impl RTreePageContents {
             &top,
             |existing| action_dominates(existing, &value),
             |existing| action_dominates(&value, existing),
+            |existing| existing == &value,
         ) {
             RegionScanResult::Covered => {}
-            RegionScanResult::AllIntersectionsMatched => {
+            RegionScanResult::AllIntersectionsMatched {
+                all_intersections_equal: true,
+            } => {
+                self.0.merge_insert(&bottom, &top, value, true);
+            }
+            RegionScanResult::AllIntersectionsMatched {
+                all_intersections_equal: false,
+            } => {
                 self.0.replace(&bottom, &top, value, true);
             }
             RegionScanResult::SomeIntersectionsUnmatched => {
