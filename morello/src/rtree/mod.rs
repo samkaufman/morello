@@ -472,12 +472,12 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         let insert_low = padded_pt::<D>(low);
         let insert_high = padded_pt::<D>(high);
         let insert_envelope = AABB::from_corners(insert_low.clone(), insert_high.clone());
-        let mut uncovered = vec![(insert_low.arr.to_vec(), insert_high.arr.to_vec())];
+        let mut uncovered = vec![(insert_low.clone(), insert_high.clone())];
         let mut intersecting_values = Vec::new();
 
         for candidate in self.locate_in_envelope_intersecting(&insert_envelope) {
             if cover_pred(&candidate.value) {
-                subtract_from_all(&mut uncovered, &candidate.bottom.arr, &candidate.top.arr);
+                subtract_from_all_fixed(&mut uncovered, &candidate.bottom, &candidate.top);
                 if uncovered.is_empty() {
                     return RegionScanResult::Covered;
                 }
@@ -517,19 +517,18 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
         self.drain_in_envelope_intersecting(insert_envelope)
             .for_each(|intersectee| {
-                preserved.extend(
-                    rect_subtract(
-                        &intersectee.bottom.arr,
-                        &intersectee.top.arr,
-                        &insert_bottom.arr,
-                        &insert_top.arr,
-                    )
-                    .into_iter()
-                    .map(|(bottom, top)| RTreeRect {
-                        bottom: bottom.try_into().unwrap(),
-                        top: top.try_into().unwrap(),
-                        value: intersectee.value.clone(),
-                    }),
+                rect_subtract_fixed_for_each(
+                    &intersectee.bottom,
+                    &intersectee.top,
+                    &insert_bottom,
+                    &insert_top,
+                    |bottom, top| {
+                        preserved.push(RTreeRect {
+                            bottom,
+                            top,
+                            value: intersectee.value.clone(),
+                        });
+                    },
                 );
             });
 
@@ -1182,20 +1181,62 @@ fn rectangular_merge_possible<const D: usize, T>(
             == D - 1
 }
 
-fn subtract_from_all(
-    rects: &mut Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
-    subtrahend_bottom: &[BimapSInt],
-    subtrahend_top: &[BimapSInt],
+fn subtract_from_all_fixed<const D: usize>(
+    rects: &mut Vec<(RTreePt<D>, RTreePt<D>)>,
+    subtrahend_bottom: &RTreePt<D>,
+    subtrahend_top: &RTreePt<D>,
 ) {
     let old_rects = std::mem::take(rects);
     rects.reserve(old_rects.len());
     for (bottom, top) in old_rects {
-        rects.extend(rect_subtract(
+        rect_subtract_fixed_for_each(
             &bottom,
             &top,
             subtrahend_bottom,
             subtrahend_top,
-        ));
+            |bottom, top| {
+                rects.push((bottom, top));
+            },
+        );
+    }
+}
+
+// TODO: Merge with rect_subtract
+fn rect_subtract_fixed_for_each<const D: usize, F>(
+    rect_bottom: &RTreePt<D>,
+    rect_top: &RTreePt<D>,
+    subtrahend_bottom: &RTreePt<D>,
+    subtrahend_top: &RTreePt<D>,
+    mut emit: F,
+) where
+    F: FnMut(RTreePt<D>, RTreePt<D>),
+{
+    let mut working_bottom = rect_bottom.clone();
+    let mut working_top = rect_top.clone();
+    for dim in 0..D {
+        if working_bottom.arr[dim] > subtrahend_top.arr[dim]
+            || working_top.arr[dim] < subtrahend_bottom.arr[dim]
+        {
+            emit(working_bottom, working_top);
+            return;
+        }
+    }
+
+    for dim in 0..D {
+        if working_bottom.arr[dim] < subtrahend_bottom.arr[dim] {
+            let orig = working_top.arr[dim];
+            working_top.arr[dim] = subtrahend_bottom.arr[dim] - 1;
+            emit(working_bottom.clone(), working_top.clone());
+            working_top.arr[dim] = orig;
+        }
+        if working_top.arr[dim] > subtrahend_top.arr[dim] {
+            let orig = working_bottom.arr[dim];
+            working_bottom.arr[dim] = subtrahend_top.arr[dim] + 1;
+            emit(working_bottom.clone(), working_top.clone());
+            working_bottom.arr[dim] = orig;
+        }
+        working_bottom.arr[dim] = working_bottom.arr[dim].max(subtrahend_bottom.arr[dim]);
+        working_top.arr[dim] = working_top.arr[dim].min(subtrahend_top.arr[dim]);
     }
 }
 
