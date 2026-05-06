@@ -1,5 +1,6 @@
 use super::{general::SurMap, linear::BimapInt};
 use crate::utils::diagonals;
+use std::borrow::Cow;
 
 /// A [SurMap] to and from tilings.
 ///
@@ -7,13 +8,23 @@ use crate::utils::diagonals;
 /// ```
 /// # use morello::grid::downscale::DownscaleSurMap;
 /// # use crate::morello::grid::general::SurMap;
-/// let s = DownscaleSurMap(&[2, 2]);
+/// let s = DownscaleSurMap::borrowed(&[2, 2]);
 /// assert_eq!(s.apply(&vec![2, 0]), [1, 0]);
 /// assert_eq!(
 ///   s.apply_inverse(&vec![1, 0]).collect::<Vec<_>>(),
 ///   vec![vec![2, 0], vec![2, 1], vec![3, 0], vec![3, 1]]);
 /// ```
-pub struct DownscaleSurMap<'a>(pub &'a [BimapInt]);
+pub struct DownscaleSurMap<'a>(pub Cow<'a, [BimapInt]>);
+
+impl<'a> DownscaleSurMap<'a> {
+    pub fn borrowed(scales: &'a [BimapInt]) -> Self {
+        Self(Cow::Borrowed(scales))
+    }
+
+    pub fn owned(scales: Vec<BimapInt>) -> Self {
+        Self(Cow::Owned(scales))
+    }
+}
 
 impl<'a> SurMap for DownscaleSurMap<'a> {
     // TODO: Be generic over integer type
@@ -23,14 +34,18 @@ impl<'a> SurMap for DownscaleSurMap<'a> {
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
         assert_eq!(t.len(), self.0.len());
-        t.iter().zip(self.0).map(|(t, s)| t / s).collect()
+        t.iter().zip(self.0.iter()).map(|(t, s)| t / s).collect()
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
         assert_eq!(i.len(), self.0.len());
 
         let tile_shape_inclusive = self.0.iter().map(|s| *s - 1).collect::<Vec<_>>();
-        let tile_offset = i.iter().zip(self.0).map(|(i, s)| i * s).collect::<Vec<_>>();
+        let tile_offset = i
+            .iter()
+            .zip(self.0.iter())
+            .map(|(i, s)| i * s)
+            .collect::<Vec<_>>();
 
         Box::new(
             diagonals(&tile_shape_inclusive)
@@ -52,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_downscalesurmap_forward() {
-        let surmap = DownscaleSurMap(&[2, 2]);
+        let surmap = DownscaleSurMap::borrowed(&[2, 2]);
         assert_eq!(surmap.apply(&vec![0, 0]), [0, 0]);
         assert_eq!(surmap.apply(&vec![1, 1]), [0, 0]);
         assert_eq!(surmap.apply(&vec![1, 2]), [0, 1]);
@@ -60,7 +75,7 @@ mod tests {
 
     #[test]
     fn test_downscalesurmap_reverse() {
-        let surmap = DownscaleSurMap(&[2, 2]);
+        let surmap = DownscaleSurMap::borrowed(&[2, 2]);
         assert_eq!(
             surmap.apply_inverse(&vec![0, 0]).collect::<Vec<_>>(),
             vec![vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1]]

@@ -50,7 +50,6 @@ const META_FILENAME: &str = "PRECOMPUTE";
 const DB_PROGRESS_VERSION: usize = 2;
 const K: u8 = 1;
 const SUBWORKLIST_MAX_SIZE: usize = 5000;
-const TWOS: [u32; 32] = [2; 32];
 const DTYPES: [Dtype; 2] = [Dtype::Uint32, Dtype::Float32];
 
 #[derive(clap::Parser)]
@@ -739,10 +738,17 @@ fn write_stages_completed<Tgt: Target>(
 }
 
 fn downscaler<'a>(unscaled_bound: Vec<BimapInt>) -> MaxVec<'a, DownscaleSurMap<'static>> {
-    let rank = unscaled_bound.len();
-    debug_assert!(rank <= TWOS.len());
+    let scales = unscaled_bound
+        .iter()
+        .map(|b| {
+            // Approximate f(b + 1) = (b + 1) / log2(b + 1), then snap to a power-of-two bucket size.
+            let levels = u32::max(1, bit_length((*b + 1).next_power_of_two() as u64) - 1);
+            let approx = u32::max(2, (*b + 1) / levels);
+            u32::max(1, approx.next_power_of_two() / 2)
+        })
+        .collect::<Vec<_>>();
     MaxVec(
-        DownscaleSurMap(&TWOS[..rank]),
+        DownscaleSurMap::owned(scales),
         Arc::new(unscaled_bound),
         PhantomData,
     )
