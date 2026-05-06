@@ -73,9 +73,12 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Install llvm & libomp
         run: |
+          set -euo pipefail
+          brew unlink llvm@15 || true
           brew install llvm@17 libomp
-          echo "CLANG=/opt/homebrew/opt/llvm@17/bin/clang" >> "$GITHUB_ENV"
-          echo "LIBRARY_PATH=/opt/homebrew/opt/libomp/lib" >> "$GITHUB_ENV"
+          brew link llvm@17
+          echo "CLANG=$(brew --prefix llvm@17)/bin/clang" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix libomp)/lib" >> "$GITHUB_ENV"
         if: runner.os == 'macOS'
       - name: Install libomp
         run: |
