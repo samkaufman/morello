@@ -26,6 +26,7 @@ use wtinylfu::WTinyLfuCache;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
@@ -690,34 +691,33 @@ impl FilesDatabase {
     {
         for (query_table_key, query_tree) in query.tables() {
             let rank = query_tree.dim_count();
-            let Some((query_bottom, query_top)) = query_tree.envelope() else {
-                continue;
-            };
-
-            // This overapproximates the query by visiting pages in the union envelope.
-            // It could prune pages that fall entirely inside holes in the query,
-            // avoiding some calls to for_each_spatial_query_page_result.
-            query_bottom
-                .iter()
-                .zip(&query_top)
-                .enumerate()
-                .map(|(dim, (&bottom, &top))| {
-                    let bottom = BimapInt::try_from(bottom).unwrap();
-                    let top = BimapInt::try_from(top).unwrap();
-                    iter_blocks_in_single_dim_range(bottom, top, block_size_dim(dim, rank))
-                        .map(|(page_pt, _range)| page_pt)
-                })
-                .multi_cartesian_product() // TODO: Use a faster helper here
-                .for_each(|page_point| {
-                    self.for_each_spatial_query_page_result(
-                        query_table_key,
-                        query_tree,
-                        page_point,
-                        |(bottom, top, memoized_cost)| {
-                            visit(query_table_key, &bottom, &top, memoized_cost);
-                        },
-                    );
-                });
+            let mut visited_pages = HashSet::new();
+            for (query_bottom, query_top, ()) in query_tree.iter() {
+                query_bottom
+                    .iter()
+                    .zip(query_top)
+                    .enumerate()
+                    .map(|(dim, (&bottom, &top))| {
+                        let bottom = BimapInt::try_from(bottom).unwrap();
+                        let top = BimapInt::try_from(top).unwrap();
+                        iter_blocks_in_single_dim_range(bottom, top, block_size_dim(dim, rank))
+                            .map(|(page_pt, _range)| page_pt)
+                    })
+                    .multi_cartesian_product() // TODO: Use a faster helper here
+                    .for_each(|page_point| {
+                        if !visited_pages.insert(page_point.clone()) {
+                            return;
+                        }
+                        self.for_each_spatial_query_page_result(
+                            query_table_key,
+                            query_tree,
+                            page_point,
+                            |(bottom, top, memoized_cost)| {
+                                visit(query_table_key, &bottom, &top, memoized_cost);
+                            },
+                        );
+                    });
+            }
         }
     }
 
