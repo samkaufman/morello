@@ -31,16 +31,6 @@ where
         self.tables.iter()
     }
 
-    pub(crate) fn unmemoizable_specs(&self) -> &[Spec<Tgt>] {
-        &self.unmemoizable_specs
-    }
-
-    pub(crate) fn subtract_rect(&mut self, table_key: &K, bottom: &[BimapSInt], top: &[BimapSInt]) {
-        if let Some(table) = self.tables.get_mut(table_key) {
-            table.subtract(bottom, top);
-        }
-    }
-
     pub(crate) fn insert_point(&mut self, table_key: K, rank: usize, point: &[BimapInt]) {
         let point = point
             .iter()

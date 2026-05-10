@@ -388,6 +388,66 @@ impl FilesDatabase {
         page.contents.get_with_preference(query, &global_pt)
     }
 
+    /// Looks up optima for canonical [Spec]s that all belong to the same database page.
+    ///
+    /// Results will be returned in the same order as `queries`, and passing non-canoncial [Spec]s
+    /// in `queries` is a logic error.
+    ///
+    /// This builds one query tree for the requested points and intersects it with the page's
+    /// memoized result tree, avoiding one point lookup per query [Spec].
+    pub(crate) fn get_same_page_many_canon<Tgt>(
+        &self,
+        queries: &[&Spec<Tgt>],
+    ) -> Vec<GetPreference<ActionCostVec, Vec<ActionNum>>>
+    where
+        Tgt: Target,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let Some(first_query) = queries.first() else {
+            return Vec::new();
+        };
+
+        let bimap = self.spec_bimap();
+        debug_assert!(first_query.is_canonical());
+        let (table_key, first_global_pt) = BiMap::apply(&bimap, first_query);
+        let page_key = self
+            .prehasher
+            .prehash((table_key, blockify_point(&first_global_pt)));
+
+        let mut query_points = Vec::with_capacity(queries.len());
+        let first_query_pt = first_global_pt
+            .into_iter()
+            .map(BimapSInt::from)
+            .collect::<Vec<_>>();
+        query_points.push(first_query_pt);
+
+        #[cfg(debug_assertions)]
+        let (first_table_key, first_page_pt) = Prehashed::as_inner(&page_key);
+
+        for query in queries[1..].iter() {
+            debug_assert!(query.is_canonical());
+            let (_query_table_key, global_pt) = BiMap::apply(&bimap, *query);
+            #[cfg(debug_assertions)]
+            {
+                debug_assert_eq!(
+                    _query_table_key, *first_table_key,
+                    "all queries must have the same table key"
+                );
+                debug_assert_eq!(blockify_point(&global_pt), *first_page_pt);
+            }
+            let query_pt = global_pt
+                .into_iter()
+                .map(BimapSInt::from)
+                .collect::<Vec<_>>();
+            query_points.push(query_pt);
+        }
+        let page: &Page = &self.load_live_page(&page_key);
+        let PageContents::RTree(page_tree) = &page.contents;
+
+        get_same_page_many_canon_spatial(queries, &query_points, page_tree.tree())
+    }
+
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
     where
         Tgt: Target,
@@ -707,6 +767,30 @@ impl FilesDatabase {
             let rank = query_tree.dim_count();
             let mut visited_pages = HashSet::new();
             for (query_bottom, query_top, ()) in query_tree.iter() {
+                let mut page_bottom = Vec::new();
+                let mut page_top = Vec::new();
+                page_bottom.reserve_exact(rank);
+                page_top.reserve_exact(rank);
+                for (dim, (&bottom, &top)) in query_bottom.iter().zip(query_top).enumerate() {
+                    let bottom = BimapInt::try_from(bottom).unwrap();
+                    let top = BimapInt::try_from(top).unwrap();
+                    let block_dim_size = block_size_dim(dim, rank);
+                    page_bottom.push(bottom / block_dim_size);
+                    page_top.push(top / block_dim_size);
+                }
+                multi_range_product(&page_bottom, &page_top, |page_point: &[BimapInt]| {
+                    if !visited_pages.insert(page_point.to_vec()) {
+                        return;
+                    }
+                    self.for_each_spatial_query_page_result(
+                        query_table_key,
+                        query_tree,
+                        page_point.to_vec(),
+                        |(bottom, top, memoized_cost)| {
+                            visit(query_table_key, &bottom, &top, memoized_cost);
+                        },
+                    );
+                });
                 let mut page_bottom = Vec::new();
                 let mut page_top = Vec::new();
                 page_bottom.reserve_exact(rank);
@@ -1527,6 +1611,106 @@ where
         .enumerate()
         .map(|(i, &d)| d.try_into().unwrap() / block_size_dim(i, rank))
         .collect()
+}
+
+fn get_same_page_many_canon_spatial<Tgt>(
+    queries: &[&Spec<Tgt>],
+    query_points: &[Vec<BimapSInt>],
+    page_tree: &RTreeDyn<DbValue>,
+) -> Vec<GetPreference<ActionCostVec, Vec<ActionNum>>>
+where
+    Tgt: Target,
+{
+    let rank = page_tree.dim_count();
+    debug_assert!(
+        query_points.iter().all(|p| p.len() == rank),
+        "query points must have same rank as page tree"
+    );
+
+    // Build the R*-Tree of dependencies from the given set of query points.
+    let mut query_tree = RTreeDyn::empty(rank);
+    query_tree.bulk_merge_insert(
+        query_points
+            .iter()
+            .map(|p| (p.clone(), p.clone(), ()))
+            .collect(),
+    );
+
+    // Build a side table to map intersecting points back to queries.
+    // TODO: Building this is probably way too expensive.
+    let mut query_indices_by_point = HashMap::<_, Vec<usize>>::with_capacity(query_points.len());
+    for (query_idx, point) in query_points.iter().enumerate() {
+        query_indices_by_point
+            .entry(point.as_slice())
+            .or_default()
+            .push(query_idx);
+    }
+
+    let mut results = vec![GetPreference::Miss(None); queries.len()];
+    let mut overlap_bottom_pt = Vec::new();
+    let mut overlap_top_pt = Vec::new();
+    overlap_bottom_pt.reserve_exact(rank);
+    overlap_top_pt.reserve_exact(rank);
+    query_tree
+        .intersection_candidates_with_other_tree(page_tree)
+        .for_each(
+            |((query_bottom, query_top, ()), (memo_bottom, memo_top, memo_value))| {
+                // Fill overlap_bottom and overlap_top with the bottom and top coordinates of the
+                // intersection of the query rectangle and the memoized rectangle.
+                overlap_bottom_pt.clear();
+                overlap_top_pt.clear();
+                for (((&lhs_bottom, &lhs_top), &rhs_bottom), &rhs_top) in query_bottom
+                    .iter()
+                    .zip(query_top)
+                    .zip(memo_bottom)
+                    .zip(memo_top)
+                {
+                    let dim_bottom = lhs_bottom.max(rhs_bottom);
+                    let dim_top = lhs_top.min(rhs_top);
+                    if dim_bottom > dim_top {
+                        return;
+                    }
+                    overlap_bottom_pt.push(dim_bottom);
+                    overlap_top_pt.push(dim_top);
+                }
+
+                multi_range_product(&overlap_bottom_pt, &overlap_top_pt, |point| {
+                    let query_indices = query_indices_by_point
+                        .get(point)
+                        .expect("query geometry produced an unknown point");
+                    for &query_idx in query_indices {
+                        results[query_idx] = GetPreference::Hit(memo_value_to_action_cost_vec(
+                            queries[query_idx],
+                            memo_value,
+                        ));
+                    }
+                });
+            },
+        );
+
+    results
+}
+
+// TODO: This helper shouldn't really be needed. Ideally, instead, we could store ActionCostVecs (or
+//       at least NormalizedCost values) directly in the R*-Tree.
+fn memo_value_to_action_cost_vec<Tgt>(query: &Spec<Tgt>, memo_value: &DbValue) -> ActionCostVec
+where
+    Tgt: Target,
+{
+    ActionCostVec(
+        memo_value
+            .as_ref()
+            .map(|(intensity, peaks, depth, action_num)| {
+                let cost = NormalizedCost {
+                    intensity: *intensity,
+                    peaks: peaks.clone(),
+                    depth: *depth,
+                }
+                .into_cost(query.0.volume());
+                vec![(*action_num, cost)]
+            })
+            .unwrap_or_default(),
+    )
 }
 
 /// Compute the bottom and top points (inclusive) to fill in a database table.
