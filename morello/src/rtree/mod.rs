@@ -7,6 +7,7 @@ use rstar::Envelope as _;
 use rstar::{Point, PointDistance, RTree, RTreeObject};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -76,6 +77,13 @@ trait RTreeGeneric<T> {
         high: &[BimapSInt],
         value: T,
         disallow_overlap: bool,
+    ) where
+        T: PartialEq + Eq + Hash + Clone;
+
+    fn bulk_merge_insert(
+        &mut self,
+        rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>,
+        logical_rank: usize,
     ) where
         T: PartialEq + Eq + Hash + Clone;
 
@@ -225,6 +233,20 @@ macro_rules! rtreedyn_cases {
                 debug_assert_eq!(high.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::merge_insert(t, low, high, value, disallow_overlap), )*
+                }
+            }
+
+            pub fn bulk_merge_insert(&mut self, rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>)
+            where
+                T: PartialEq + Eq + Hash + Clone,
+            {
+                match self {
+                    $( RTreeDyn::$name(t) => {
+                        debug_assert!(rects.iter().all(|(low, high, _)| {
+                            low.len() == $n && high.len() == $n
+                        }));
+                        RTreeGeneric::bulk_merge_insert(t, rects, $n)
+                    } ),*
                 }
             }
 
@@ -712,6 +734,35 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
     }
 
+    fn bulk_merge_insert(
+        &mut self,
+        rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>,
+        logical_rank: usize,
+    ) where
+        T: PartialEq + Eq + Hash + Clone,
+    {
+        debug_assert!(logical_rank <= D);
+        let rects = rects
+            .into_iter()
+            .map(|(bottom, top, value)| RTreeRect {
+                bottom: padded_pt::<D>(&bottom),
+                top: padded_pt::<D>(&top),
+                value,
+            })
+            .collect::<Vec<_>>();
+        let rects = coalesced_rects(rects, logical_rank);
+
+        if self.size() == 0 {
+            for rect in rects {
+                self.insert(rect);
+            }
+        } else {
+            for rect in rects {
+                self.merge_insert(&rect.bottom.arr, &rect.top.arr, rect.value, false);
+            }
+        }
+    }
+
     fn fold_insert<F>(
         &mut self,
         low: &[BimapSInt],
@@ -921,6 +972,92 @@ impl<const D: usize, T> PointDistance for RTreeRect<D, T> {
             None
         }
     }
+}
+
+fn coalesced_rects<const D: usize, T>(
+    mut rects: Vec<RTreeRect<D, T>>,
+    logical_rank: usize,
+) -> Vec<RTreeRect<D, T>>
+where
+    T: PartialEq,
+{
+    if rects.len() < 2 {
+        return rects;
+    }
+
+    // For deduplication, we only need identical rectangles to be adjacent, so the
+    // `dim` given to compare_rects_for_dim doesn't matter.
+    rects.sort_unstable_by(|lhs, rhs| compare_rects_for_dim(lhs, rhs, logical_rank, 0));
+    rects.dedup_by(|lhs, rhs| {
+        // Manual equality check which ignores dimensions above logical_rank
+        lhs.bottom.arr[..logical_rank] == rhs.bottom.arr[..logical_rank]
+            && lhs.top.arr[..logical_rank] == rhs.top.arr[..logical_rank]
+            && lhs.value == rhs.value
+    });
+
+    loop {
+        let starting_len = rects.len();
+        for dim in 0..logical_rank {
+            rects = coalesce_rects_along_dim(rects, logical_rank, dim);
+        }
+        if rects.len() == starting_len {
+            return rects;
+        }
+    }
+}
+
+/// Merges same-valued rectangles that differ only in `dim` and whose intervals in that dimension
+/// touch or overlap. The input must be sorted so each mergeable run is contiguous.
+fn coalesce_rects_along_dim<const D: usize, T>(
+    mut rects: Vec<RTreeRect<D, T>>,
+    logical_dims: usize,
+    dim: usize,
+) -> Vec<RTreeRect<D, T>>
+where
+    T: PartialEq,
+{
+    rects.sort_unstable_by(|lhs, rhs| compare_rects_for_dim(lhs, rhs, logical_dims, dim));
+
+    let mut merged = Vec::<RTreeRect<D, T>>::with_capacity(rects.len());
+    for rect in rects {
+        if let Some(last) = merged.last_mut() {
+            if last.value == rect.value
+                && rects_match_except_dim(last, &rect, logical_dims, dim)
+                && rect.bottom.arr[dim] <= last.top.arr[dim] + 1
+            {
+                last.top.arr[dim] = last.top.arr[dim].max(rect.top.arr[dim]);
+                continue;
+            }
+        }
+        merged.push(rect);
+    }
+    merged
+}
+
+/// Orders rectangles so rectangles with the same bounds in every dimension
+/// except `dim` are grouped together, then ordered by their interval in `dim`.
+///
+/// [coalesce_rects_along_dim] relies on this grouping to find rectangles that
+/// can be merged into a larger rectangle along that dimension.
+fn compare_rects_for_dim<const D: usize, T>(
+    lhs: &RTreeRect<D, T>,
+    rhs: &RTreeRect<D, T>,
+    logical_rank: usize,
+    dim: usize,
+) -> Ordering {
+    (0..logical_rank)
+        .filter(|&i| i != dim)
+        .map(|i| {
+            lhs.bottom.arr[i]
+                .cmp(&rhs.bottom.arr[i])
+                .then_with(|| lhs.top.arr[i].cmp(&rhs.top.arr[i]))
+        })
+        .find(|ordering| !ordering.is_eq())
+        .unwrap_or_else(|| {
+            lhs.bottom.arr[dim]
+                .cmp(&rhs.bottom.arr[dim])
+                .then_with(|| lhs.top.arr[dim].cmp(&rhs.top.arr[dim]))
+        })
 }
 
 impl<const D: usize> From<[BimapSInt; D]> for RTreePt<D> {
@@ -1394,10 +1531,22 @@ fn all_dimensions_adjacent_or_overlap(
     true
 }
 
+fn rects_match_except_dim<const D: usize, T>(
+    lhs: &RTreeRect<D, T>,
+    rhs: &RTreeRect<D, T>,
+    logical_dims: usize,
+    dim: usize,
+) -> bool {
+    lhs.bottom.arr[..dim] == rhs.bottom.arr[..dim]
+        && lhs.top.arr[..dim] == rhs.top.arr[..dim]
+        && lhs.bottom.arr[dim + 1..logical_dims] == rhs.bottom.arr[dim + 1..logical_dims]
+        && lhs.top.arr[dim + 1..logical_dims] == rhs.top.arr[dim + 1..logical_dims]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::diagonals;
+    use crate::utils::{diagonals, multi_range_product};
     use itertools::Itertools;
     use proptest::prelude::*;
     use proptest::strategy::{Just, Strategy};
@@ -1422,6 +1571,22 @@ mod tests {
         assert_eq!(entries[0].1, &[3, 4]);
         assert_eq!(entries[0].2, &7);
         assert_eq!(tree.locate_at_point(&[2, 3]), Some(&7));
+    }
+
+    #[test]
+    fn test_rtreedyn_bulk_merge_insert_coalesces_point_grid() {
+        let mut tree = RTreeDyn::empty(2);
+        tree.bulk_merge_insert(vec![
+            (vec![0, 0], vec![0, 0], ()),
+            (vec![0, 1], vec![0, 1], ()),
+            (vec![1, 0], vec![1, 0], ()),
+            (vec![1, 1], vec![1, 1], ()),
+        ]);
+
+        let entries = tree.iter().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, &[0, 0]);
+        assert_eq!(entries[0].1, &[1, 1]);
     }
 
     #[test]
@@ -1578,6 +1743,33 @@ mod tests {
         let mut tree = RTree::<RTreeRect<2, _>>::new();
         tree.merge_insert(&[0, 0], &[1, 1], "a", false);
         tree.merge_insert(&[2, 0], &[3, 1], "b", true); // no overlap
+    }
+
+    #[test]
+    fn test_fold_insert_drains_inclusive_overlap() {
+        let mut tree = RTree::<RTreeRect<3, u8>>::new();
+        tree.fold_insert(&[0, 1, 3], &[3, 2, 3], 1, true, |a, _| a);
+        tree.fold_insert(&[3, 2, 3], &[4, 3, 4], 0, true, |a, _| a);
+
+        let tree_rects = tree.iter().collect::<Vec<_>>();
+        for (i, r) in tree_rects.iter().enumerate() {
+            for r2 in &tree_rects[..i] {
+                assert!(
+                    !r.envelope().intersects(&r2.envelope()),
+                    "Found intersection in R*-Tree: [{}]",
+                    tree_rects
+                        .iter()
+                        .map(|r| format!("({:?}, {:?}, {:?})", r.bottom.arr, r.top.arr, r.value))
+                        .join(", ")
+                );
+            }
+        }
+
+        let overlap_point = RTreePt::<3> { arr: [3, 2, 3] };
+        assert_eq!(
+            tree.locate_at_point(&overlap_point).map(|r| r.value),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1978,7 +2170,7 @@ mod tests {
         (0..BimapSInt::from(4)).prop_flat_map(|b| (Just(b), (b..((b + 4).min(6)))))
     }
 
-    // fn arb_rect_value() -> impl Strategy<Value = Option<(CostIntensity, MemVec, u8, ActionNum)>> {
+    // fn arb_rect_value() -> impl Strategy<Value = DbValue> {
     //     (0..4u32, 1..4u32)
     //         .prop_map(|(a, b)| CostIntensity::new(a, DimSize::try_from(b).unwrap()))
     //         .prop_flat_map(|intensity| {
@@ -2103,11 +2295,10 @@ mod tests {
 
     fn covered_points(bottom: &[BimapSInt], top: &[BimapSInt]) -> HashSet<Vec<BimapSInt>> {
         assert_eq!(bottom.len(), top.len());
-        bottom
-            .iter()
-            .zip(top)
-            .map(|(b, t)| *b..=*t)
-            .multi_cartesian_product()
-            .collect()
+        let mut points = HashSet::new();
+        multi_range_product(bottom, top, |point| {
+            points.insert(point.to_vec());
+        });
+        points
     }
 }

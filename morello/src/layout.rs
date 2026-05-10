@@ -1172,6 +1172,7 @@ mod tests {
         opaque_symbol::OpaqueSymbol,
         shape,
         target::Avx2Target,
+        utils::multi_range_product,
     };
     use itertools::Itertools;
     use proptest::{
@@ -1750,12 +1751,12 @@ mod tests {
 
             // Walk the memory locations to check correctness.
             let mut visited = HashSet::new();
-            for pt in tile_offset
+            let tile_top = tile_offset
                 .iter()
                 .zip(&tile_shape)
-                .map(|(&off, &within_pt)| off..off + within_pt.get())
-                .multi_cartesian_product()
-            {
+                .map(|(&off, &within_pt)| off + within_pt.get() - 1)
+                .collect::<Vec<_>>();
+            multi_range_product(&tile_offset, &tile_top, |pt: &[u32]| {
                 let buffer_offset_af: NonAffineExpr<BufferVar> =
                     iexpr.clone().map_vars(&mut |v| match v {
                         BufferVar::TileIdx(_, _) => unimplemented!(),
@@ -1775,7 +1776,7 @@ mod tests {
                     )
                 };
                 visited.insert(v);
-            }
+            });
 
             let is_fully_contig = visited.len()
                 == (1 + visited.iter().copied().max().unwrap() - visited.iter().copied().min().unwrap())
@@ -2114,21 +2115,19 @@ mod tests {
     }
 
     fn eval_all_index_expr_points(expr: &NonAffineExpr<BufferVar>, shape: &[DimSize]) -> Vec<i32> {
-        shape
-            .iter()
-            .map(|&d| 0..d.get())
-            .multi_cartesian_product()
-            .map(|pt| {
-                let evaluated: NonAffineExpr<BufferVar> =
-                    expr.clone().map_vars(&mut |var| match var {
-                        BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
-                        BufferVar::Pt(dim, _) => {
-                            AffineForm::constant(pt[usize::from(dim)].try_into().unwrap())
-                        }
-                    });
-                evaluated.as_constant().unwrap()
-            })
-            .collect()
+        let bottom = vec![0; shape.len()];
+        let top = shape.iter().map(|&d| d.get() - 1).collect::<Vec<_>>();
+        let mut results = Vec::new();
+        multi_range_product(&bottom, &top, |pt: &[u32]| {
+            let evaluated: NonAffineExpr<BufferVar> = expr.clone().map_vars(&mut |var| match var {
+                BufferVar::TileIdx(_, _) => panic!("TileIdx in index expression"),
+                BufferVar::Pt(dim, _) => {
+                    AffineForm::constant(pt[usize::from(dim)].try_into().unwrap())
+                }
+            });
+            results.push(evaluated.as_constant().unwrap());
+        });
+        results
     }
 
     #[test]

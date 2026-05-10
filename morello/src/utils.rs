@@ -364,6 +364,37 @@ pub fn rect_contains_inclusive<T: PrimInt>(top: &[T], bottom: &[T], point: &[T])
         .all(|(&p, (&t, &b))| b <= p && p <= t)
 }
 
+/// Calls `visit` for every point in the Cartesian product of inclusive ranges.
+///
+/// The ranges are `bottom[0]..=top[0]`, ..., `bottom[n-1]..=top[n-1]`.
+pub fn multi_range_product<T>(bottom: &[T], top: &[T], mut visit: impl FnMut(&[T]))
+where
+    T: PrimInt,
+{
+    assert_eq!(bottom.len(), top.len());
+    if bottom.iter().zip(top).any(|(bottom, top)| bottom > top) {
+        return;
+    }
+
+    let mut point = bottom.to_vec();
+    loop {
+        visit(&point);
+
+        let mut dim = point.len();
+        loop {
+            if dim == 0 {
+                return;
+            }
+            dim -= 1;
+            if point[dim] < top[dim] {
+                point[dim] = point[dim] + T::one();
+                point[dim + 1..].copy_from_slice(&bottom[dim + 1..]);
+                break;
+            }
+        }
+    }
+}
+
 pub fn join_into_string(c: impl IntoIterator<Item = impl ToString>, separator: &str) -> String {
     c.into_iter()
         .map(|d| d.to_string())
@@ -424,6 +455,41 @@ mod tests {
         let mut write = LinePrefixWrite::new(String::new(), "--");
         writeln!(write).unwrap();
         assert_eq!(write.0, "--\n");
+    }
+
+    #[test]
+    fn test_multi_range_product() {
+        let mut points = Vec::new();
+        multi_range_product(&[1u32, 3], &[2, 5], |point: &[u32]| {
+            points.push(point.to_vec())
+        });
+        assert_eq!(
+            points,
+            vec![
+                vec![1, 3],
+                vec![1, 4],
+                vec![1, 5],
+                vec![2, 3],
+                vec![2, 4],
+                vec![2, 5],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_multi_range_product_empty_rank() {
+        let mut points = Vec::<Vec<u32>>::new();
+        multi_range_product(&[] as &[u32], &[] as &[u32], |point: &[u32]| {
+            points.push(point.to_vec())
+        });
+        assert_eq!(points, vec![vec![]]);
+    }
+
+    #[test]
+    fn test_multi_range_product_empty_range() {
+        let mut points = Vec::new();
+        multi_range_product(&[2u32], &[1], |point: &[u32]| points.push(point.to_vec()));
+        assert!(points.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 mod pagecontents;
 
 use crate::common::DimSize;
-use crate::cost::{Cost, NormalizedCost};
+use crate::cost::{Cost, CostIntensity, NormalizedCost};
 use crate::datadeps::SpecKey;
 use crate::db::pagecontents::PageContents;
 use crate::grid::canon::CanonicalBimap;
@@ -15,6 +15,7 @@ use crate::spatial_query::SpatialQuery;
 use crate::spec::{FillValue, LogicalSpecSurMap, PrimitiveBasicsBimap, Spec, SpecSurMap};
 use crate::target::{Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::TensorSpecAuxNonDepBimap;
+use crate::utils::multi_range_product;
 use pagecontents::RTreePageContents;
 
 use atomic_write_file::AtomicWriteFile;
@@ -22,11 +23,8 @@ use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
 use serde::{Deserialize, Serialize};
-use wtinylfu::WTinyLfuCache;
-
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::collections::HashSet;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
@@ -37,6 +35,7 @@ use std::sync::{
     mpsc, Arc,
 };
 use std::time::{Duration, Instant};
+use wtinylfu::WTinyLfuCache;
 
 #[cfg(feature = "db-stats")]
 use std::sync::atomic::{self, AtomicU64};
@@ -45,6 +44,7 @@ type DbKey = (TableKey, Vec<BimapInt>);
 type TableKey = (SpecKey, Vec<()>);
 type PageKey = DbKey;
 type SpatialQueryPageResult = (Vec<BimapSInt>, Vec<BimapSInt>, Option<NormalizedCost>);
+type DbValue = Option<(CostIntensity, MemVec, u8, ActionNum)>;
 pub type ActionNum = u16;
 
 #[cfg(test)]
@@ -171,6 +171,7 @@ pub enum TileScale {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ActionNormalizedCostVec(pub Vec<(ActionNum, NormalizedCost)>);
 
+#[derive(Debug, Clone)]
 pub enum GetPreference<T, V> {
     Hit(T),
     Miss(Option<V>),
@@ -386,6 +387,66 @@ impl FilesDatabase {
         page.contents.get_with_preference(query, &global_pt)
     }
 
+    /// Looks up optima for canonical [Spec]s that all belong to the same database page.
+    ///
+    /// Results will be returned in the same order as `queries`, and passing non-canoncial [Spec]s
+    /// in `queries` is a logic error.
+    ///
+    /// This builds one query tree for the requested points and intersects it with the page's
+    /// memoized result tree, avoiding one point lookup per query [Spec].
+    pub(crate) fn get_same_page_many_canon<Tgt>(
+        &self,
+        queries: &[&Spec<Tgt>],
+    ) -> Vec<GetPreference<ActionCostVec, Vec<ActionNum>>>
+    where
+        Tgt: Target,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        let Some(first_query) = queries.first() else {
+            return Vec::new();
+        };
+
+        let bimap = self.spec_bimap();
+        debug_assert!(first_query.is_canonical());
+        let (table_key, first_global_pt) = BiMap::apply(&bimap, first_query);
+        let page_key = self
+            .prehasher
+            .prehash((table_key, blockify_point(&first_global_pt)));
+
+        let mut query_points = Vec::with_capacity(queries.len());
+        let first_query_pt = first_global_pt
+            .into_iter()
+            .map(BimapSInt::from)
+            .collect::<Vec<_>>();
+        query_points.push(first_query_pt);
+
+        #[cfg(debug_assertions)]
+        let (first_table_key, first_page_pt) = Prehashed::as_inner(&page_key);
+
+        for query in queries[1..].iter() {
+            debug_assert!(query.is_canonical());
+            let (_query_table_key, global_pt) = BiMap::apply(&bimap, *query);
+            #[cfg(debug_assertions)]
+            {
+                debug_assert_eq!(
+                    _query_table_key, *first_table_key,
+                    "all queries must have the same table key"
+                );
+                debug_assert_eq!(blockify_point(&global_pt), *first_page_pt);
+            }
+            let query_pt = global_pt
+                .into_iter()
+                .map(BimapSInt::from)
+                .collect::<Vec<_>>();
+            query_points.push(query_pt);
+        }
+        let page: &Page = &self.load_live_page(&page_key);
+        let PageContents::RTree(page_tree) = &page.contents;
+
+        get_same_page_many_canon_spatial(queries, &query_points, page_tree.tree())
+    }
+
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
     where
         Tgt: Target,
@@ -500,35 +561,47 @@ impl FilesDatabase {
         let bimap = self.spec_bimap();
         let (table_key, (bottom, top)) = put_range_to_fill(&bimap, spec, &decisions);
 
-        // Construct an iterator over all pages (tiles) to fill.
+        // Construct the page-coordinate bounds for all pages (tiles) to fill.
         let rank = bottom.len();
-        let pages_iter = bottom
-            .into_iter()
-            .zip(&top)
+        let page_bottom = bottom
+            .iter()
             .enumerate()
-            .map(|(dim, (b, t))| iter_blocks_in_single_dim_range(b, *t, block_size_dim(dim, rank)))
-            .multi_cartesian_product();
+            .map(|(dim, &bottom)| bottom / block_size_dim(dim, rank))
+            .collect::<Vec<_>>();
+        let page_top = top
+            .iter()
+            .enumerate()
+            .map(|(dim, &top)| top / block_size_dim(dim, rank))
+            .collect::<Vec<_>>();
 
         // Since this put is for a single Spec, we can normalize the cost with that Spec's volume.
         let normalized_decisions =
             ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
 
         // Reuse the following two values to avoid some allocations.
-        let mut key_tuple = (table_key, vec![]);
-        let mut dim_ranges = vec![];
-        for joined_row in pages_iter {
-            key_tuple.1.clear();
-            key_tuple.1.reserve_exact(joined_row.len());
+        let mut key_tuple = Some((table_key, Vec::with_capacity(rank)));
+        let mut dim_ranges = Vec::with_capacity(rank);
+        multi_range_product(&page_bottom, &page_top, |page_point: &[BimapInt]| {
+            {
+                let key_tuple = key_tuple.as_mut().unwrap();
+                key_tuple.1.clear();
+                key_tuple.1.extend_from_slice(page_point);
+            }
+
             dim_ranges.clear();
-            dim_ranges.reserve_exact(joined_row.len());
-            for (b, t) in joined_row {
-                key_tuple.1.push(b);
-                dim_ranges.push(t);
+            for (dim, &page_idx) in page_point.iter().enumerate() {
+                let block_dim_size = block_size_dim(dim, rank);
+                let Some(global_top_noninc) = top[dim].checked_add(1) else {
+                    todo!("support global_top equal to MAX");
+                };
+                let start = (page_idx * block_dim_size).max(bottom[dim]);
+                let end = ((page_idx + 1) * block_dim_size).min(global_top_noninc);
+                dim_ranges.push(start..end);
             }
 
             // Do some awkward mutation of `key_tuple.1` to avoid cloning `table_key`/ `key_tuple.0`
             // on each iteration.
-            let key = self.prehasher.prehash(key_tuple);
+            let key = self.prehasher.prehash(key_tuple.take().unwrap());
             // Load or wait for the page while holding its shard lock, then update both the page and
             // the shard's dirty-page bookkeeping together.
             {
@@ -549,8 +622,8 @@ impl FilesDatabase {
                         .push_back(prehashed_clone(&key));
                 }
             }
-            key_tuple = Prehashed::into_inner(key);
-        }
+            key_tuple = Some(Prehashed::into_inner(key));
+        });
 
         if self.proactive_saves_enabled {
             self.try_save_pages_in_background();
@@ -693,30 +766,30 @@ impl FilesDatabase {
             let rank = query_tree.dim_count();
             let mut visited_pages = HashSet::new();
             for (query_bottom, query_top, ()) in query_tree.iter() {
-                query_bottom
-                    .iter()
-                    .zip(query_top)
-                    .enumerate()
-                    .map(|(dim, (&bottom, &top))| {
-                        let bottom = BimapInt::try_from(bottom).unwrap();
-                        let top = BimapInt::try_from(top).unwrap();
-                        iter_blocks_in_single_dim_range(bottom, top, block_size_dim(dim, rank))
-                            .map(|(page_pt, _range)| page_pt)
-                    })
-                    .multi_cartesian_product() // TODO: Use a faster helper here
-                    .for_each(|page_point| {
-                        if !visited_pages.insert(page_point.clone()) {
-                            return;
-                        }
-                        self.for_each_spatial_query_page_result(
-                            query_table_key,
-                            query_tree,
-                            page_point,
-                            |(bottom, top, memoized_cost)| {
-                                visit(query_table_key, &bottom, &top, memoized_cost);
-                            },
-                        );
-                    });
+                let mut page_bottom = Vec::new();
+                let mut page_top = Vec::new();
+                page_bottom.reserve_exact(rank);
+                page_top.reserve_exact(rank);
+                for (dim, (&bottom, &top)) in query_bottom.iter().zip(query_top).enumerate() {
+                    let bottom = BimapInt::try_from(bottom).unwrap();
+                    let top = BimapInt::try_from(top).unwrap();
+                    let block_dim_size = block_size_dim(dim, rank);
+                    page_bottom.push(bottom / block_dim_size);
+                    page_top.push(top / block_dim_size);
+                }
+                multi_range_product(&page_bottom, &page_top, |page_point: &[BimapInt]| {
+                    if !visited_pages.insert(page_point.to_vec()) {
+                        return;
+                    }
+                    self.for_each_spatial_query_page_result(
+                        query_table_key,
+                        query_tree,
+                        page_point.to_vec(),
+                        |(bottom, top, memoized_cost)| {
+                            visit(query_table_key, &bottom, &top, memoized_cost);
+                        },
+                    );
+                });
             }
         }
     }
@@ -794,14 +867,17 @@ impl FilesDatabase {
                     let throughput = memoized_cost
                         .as_ref()
                         .map(|(intensity, _peaks, _depth, _action)| *intensity);
-                    // TODO: Replace points_in_rect_int with a shared helper
-                    for point in points_in_rect_int(bottom, top) {
+                    multi_range_product(bottom, top, |point| {
+                        let point = point
+                            .iter()
+                            .map(|&coord| BimapInt::try_from(coord).unwrap())
+                            .collect();
                         let previous = table.insert(point, throughput);
                         assert!(
                             previous.is_none_or(|previous| previous == throughput),
                             "overlapping memoized rectangles disagree on throughput"
                         );
-                    }
+                    });
                 }
             }
         }
@@ -858,15 +934,7 @@ impl FilesDatabase {
             return None;
         }
 
-        Some(MutexGuard::map(shard_guard, |s| {
-            s.async_get(key);
-            s.process_bg_thread_msgs_until(|resp| match resp {
-                ShardThreadResponse::Loaded(k, _) => k != key,
-            });
-            s.cache
-                .get_mut(key)
-                .unwrap_or_else(|| panic!("just-requested key in cache: {key:?}"))
-        }))
+        Some(MutexGuard::map(shard_guard, |s| s.load_live_page_mut(key)))
     }
 
     fn shard_index(&self, key: &Prehashed<PageKey>) -> usize {
@@ -1506,6 +1574,106 @@ fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
         .collect()
 }
 
+fn get_same_page_many_canon_spatial<Tgt>(
+    queries: &[&Spec<Tgt>],
+    query_points: &[Vec<BimapSInt>],
+    page_tree: &RTreeDyn<DbValue>,
+) -> Vec<GetPreference<ActionCostVec, Vec<ActionNum>>>
+where
+    Tgt: Target,
+{
+    let rank = page_tree.dim_count();
+    debug_assert!(
+        query_points.iter().all(|p| p.len() == rank),
+        "query points must have same rank as page tree"
+    );
+
+    // Build the R*-Tree of dependencies from the given set of query points.
+    let mut query_tree = RTreeDyn::empty(rank);
+    query_tree.bulk_merge_insert(
+        query_points
+            .iter()
+            .map(|p| (p.clone(), p.clone(), ()))
+            .collect(),
+    );
+
+    // Build a side table to map intersecting points back to queries.
+    // TODO: Building this is probably way too expensive.
+    let mut query_indices_by_point = HashMap::<_, Vec<usize>>::with_capacity(query_points.len());
+    for (query_idx, point) in query_points.iter().enumerate() {
+        query_indices_by_point
+            .entry(point.as_slice())
+            .or_default()
+            .push(query_idx);
+    }
+
+    let mut results = vec![GetPreference::Miss(None); queries.len()];
+    let mut overlap_bottom_pt = Vec::new();
+    let mut overlap_top_pt = Vec::new();
+    overlap_bottom_pt.reserve_exact(rank);
+    overlap_top_pt.reserve_exact(rank);
+    query_tree
+        .intersection_candidates_with_other_tree(page_tree)
+        .for_each(
+            |((query_bottom, query_top, ()), (memo_bottom, memo_top, memo_value))| {
+                // Fill overlap_bottom and overlap_top with the bottom and top coordinates of the
+                // intersection of the query rectangle and the memoized rectangle.
+                overlap_bottom_pt.clear();
+                overlap_top_pt.clear();
+                for (((&lhs_bottom, &lhs_top), &rhs_bottom), &rhs_top) in query_bottom
+                    .iter()
+                    .zip(query_top)
+                    .zip(memo_bottom)
+                    .zip(memo_top)
+                {
+                    let dim_bottom = lhs_bottom.max(rhs_bottom);
+                    let dim_top = lhs_top.min(rhs_top);
+                    if dim_bottom > dim_top {
+                        return;
+                    }
+                    overlap_bottom_pt.push(dim_bottom);
+                    overlap_top_pt.push(dim_top);
+                }
+
+                multi_range_product(&overlap_bottom_pt, &overlap_top_pt, |point| {
+                    let query_indices = query_indices_by_point
+                        .get(point)
+                        .expect("query geometry produced an unknown point");
+                    for &query_idx in query_indices {
+                        results[query_idx] = GetPreference::Hit(memo_value_to_action_cost_vec(
+                            queries[query_idx],
+                            memo_value,
+                        ));
+                    }
+                });
+            },
+        );
+
+    results
+}
+
+// TODO: This helper shouldn't really be needed. Ideally, instead, we could store ActionCostVecs (or
+//       at least NormalizedCost values) directly in the R*-Tree.
+fn memo_value_to_action_cost_vec<Tgt>(query: &Spec<Tgt>, memo_value: &DbValue) -> ActionCostVec
+where
+    Tgt: Target,
+{
+    ActionCostVec(
+        memo_value
+            .as_ref()
+            .map(|(intensity, peaks, depth, action_num)| {
+                let cost = NormalizedCost {
+                    intensity: *intensity,
+                    peaks: peaks.clone(),
+                    depth: *depth,
+                }
+                .into_cost(query.0.volume());
+                vec![(*action_num, cost)]
+            })
+            .unwrap_or_default(),
+    )
+}
+
 /// Compute the bottom and top points (inclusive) to fill in a database table.
 ///
 /// Returned points are in global coordinates, not within-block coordinates.
@@ -1826,20 +1994,6 @@ fn validate_tilescale_file(db_path: &Path, tile_scale: TileScale) -> Result<(), 
 fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
     let (inner, h) = Prehashed::as_parts(value);
     Prehashed::new(inner.clone(), *h)
-}
-
-#[cfg(test)]
-fn points_in_rect_int<'a>(
-    bottom: &'a [BimapSInt],
-    top: &'a [BimapSInt],
-) -> impl Iterator<Item = Vec<BimapInt>> + 'a {
-    bottom
-        .iter()
-        .zip(top)
-        .map(|(&bottom, &top)| {
-            BimapInt::try_from(bottom).unwrap()..=BimapInt::try_from(top).unwrap()
-        })
-        .multi_cartesian_product()
 }
 
 #[cfg(test)]

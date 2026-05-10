@@ -297,7 +297,7 @@ where
     let start_time = std::time::Instant::now();
 
     if args.spatial {
-        morello::spatial_search::top_down_many(&db, std::slice::from_ref(&spec), K.into());
+        morello::search::top_down_many_spatial(&db, std::slice::from_ref(&spec), K.into());
     } else {
         morello::search::top_down(&db, &spec, K.into());
     }

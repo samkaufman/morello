@@ -8,7 +8,7 @@ use crate::spatial_action_solver::SpatialSolver;
 use crate::spatial_query::SpatialQuery;
 use crate::spec::Spec;
 use crate::target::Target;
-use itertools::Itertools;
+use crate::utils::multi_range_product;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -82,27 +82,25 @@ impl<Tgt: Target> SpatialSolver<Tgt> for FallbackSpatialActionSolver<Tgt> {
         B: BiMap<Domain = Spec<Tgt>, Codomain = (K, Vec<BimapInt>)>,
         K: Clone + Eq + Hash,
     {
-        bottom
-            .iter()
-            .zip(top)
-            .map(|(&bottom, &top)| {
-                let bottom = BimapInt::try_from(bottom).unwrap();
-                let top = BimapInt::try_from(top).unwrap();
-                bottom..=top
-            })
-            .multi_cartesian_product()
-            .for_each(|global_pt| {
-                let spec = BiMap::apply_inverse(bimap, &(table_key.clone(), global_pt));
-                // TODO: Do we need to run `contains_key`? resolve_spec is already going to access
-                //       dependency_index.
-                if self.dependency_index.contains_key(&spec) {
-                    self.resolve_spec(
-                        reducer,
-                        &spec,
-                        normalized_cost.map(|cost| cost.clone().into_cost(spec.0.volume())),
-                    );
-                }
-            });
+        let mut query_key = (table_key.clone(), Vec::with_capacity(bottom.len()));
+        multi_range_product(bottom, top, |global_pt| {
+            query_key.1.clear();
+            query_key.1.extend(
+                global_pt
+                    .iter()
+                    .map(|&coord| BimapInt::try_from(coord).unwrap()),
+            );
+            let spec = BiMap::apply_inverse(bimap, &query_key);
+            // TODO: Do we need to run `contains_key`? resolve_spec is already going to access
+            //       dependency_index.
+            if self.dependency_index.contains_key(&spec) {
+                self.resolve_spec(
+                    reducer,
+                    &spec,
+                    normalized_cost.map(|cost| cost.clone().into_cost(spec.0.volume())),
+                );
+            }
+        });
     }
 
     fn resolve_unmemoizable_dependency(

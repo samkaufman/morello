@@ -29,9 +29,8 @@ use morello::grid::general::SurMap;
 use morello::grid::linear::BimapInt;
 use morello::layout::row_major;
 use morello::memorylimits::{MemVec, MemoryLimits};
-use morello::search::top_down_many;
+use morello::search::{top_down_many, top_down_many_spatial};
 use morello::smallvec::smallvec;
-use morello::spatial_search;
 use morello::spec::{
     FillValue, LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap,
     PrimitiveSpecType, Spec,
@@ -427,7 +426,7 @@ where
                 .len()
                 .min(subworklist_offset + SUBWORKLIST_MAX_SIZE)];
         if spatial {
-            stage_results.extend(spatial_search::top_down_many(db, subworklist, 1));
+            stage_results.extend(top_down_many_spatial(db, subworklist, 1));
         } else {
             stage_results.extend(top_down_many(db, subworklist, 1));
         }

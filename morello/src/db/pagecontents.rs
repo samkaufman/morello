@@ -1,8 +1,7 @@
-use super::{ActionCostVec, ActionNormalizedCostVec, ActionNum, GetPreference};
+use super::{ActionCostVec, ActionNormalizedCostVec, ActionNum, DbValue, GetPreference};
 use crate::{
-    cost::{CostIntensity, NormalizedCost},
+    cost::NormalizedCost,
     grid::{canon::CanonicalBimap, general::BiMap, linear::BimapInt},
-    memorylimits::MemVec,
     rtree::{RTreeDyn, RegionScanResult},
     spec::Spec,
     target::Target,
@@ -27,7 +26,7 @@ pub enum PageContents {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RTreePageContents(RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>>);
+pub struct RTreePageContents(RTreeDyn<DbValue>);
 
 impl PageContents {
     pub fn get_with_preference<Tgt>(
@@ -66,7 +65,7 @@ impl RTreePageContents {
         RTreePageContents(RTreeDyn::empty(rank))
     }
 
-    pub fn tree(&self) -> &RTreeDyn<Option<(CostIntensity, MemVec, u8, ActionNum)>> {
+    pub fn tree(&self) -> &RTreeDyn<DbValue> {
         &self.0
     }
 
@@ -171,10 +170,7 @@ impl RTreePageContents {
     }
 }
 
-fn action_dominates(
-    lhs: &Option<(CostIntensity, MemVec, u8, ActionNum)>,
-    rhs: &Option<(CostIntensity, MemVec, u8, ActionNum)>,
-) -> bool {
+fn action_dominates(lhs: &DbValue, rhs: &DbValue) -> bool {
     match (lhs, rhs) {
         (Some(lhs), Some(rhs)) => {
             assert_eq!(
