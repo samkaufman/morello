@@ -11,6 +11,7 @@ pub struct AABB<const D: usize> {
 }
 
 impl<const D: usize> AABB<D> {
+    #[allow(dead_code)]
     pub fn from_corners(p1: RTreePt<D>, p2: RTreePt<D>) -> Self {
         let mut low = p1.arr;
         let mut up = p2.arr;
@@ -23,6 +24,72 @@ impl<const D: usize> AABB<D> {
             lower: RTreePt { arr: low },
             upper: RTreePt { arr: up },
         }
+    }
+
+    pub(crate) fn from_ordered_corners(lower: RTreePt<D>, upper: RTreePt<D>) -> Self {
+        debug_assert!(lower.arr.iter().zip(&upper.arr).all(|(l, u)| l <= u));
+        AABB { lower, upper }
+    }
+
+    pub(crate) fn ordered_corners_contain_point(
+        lower: &[i64; D],
+        upper: &[i64; D],
+        point: &[i64; D],
+    ) -> bool {
+        let mut i = 0usize;
+        while i + 4 <= D {
+            let pv = i64x4::from(&point[i..i + 4]);
+            let l = i64x4::from(&lower[i..i + 4]);
+            let u = i64x4::from(&upper[i..i + 4]);
+            if (l.cmp_gt(pv) | pv.cmp_gt(u)).any() {
+                return false;
+            }
+            i += 4;
+        }
+        while i < D {
+            let p = point[i];
+            if p < lower[i] || p > upper[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    pub(crate) fn ordered_corners_distance_2(
+        lower: &[i64; D],
+        upper: &[i64; D],
+        point: &[i64; D],
+    ) -> i64 {
+        let mut vacc = i64x4::ZERO;
+        let mut i = 0usize;
+        while i + 4 <= D {
+            let p = i64x4::from(&point[i..i + 4]);
+            let l = i64x4::from(&lower[i..i + 4]);
+            let u = i64x4::from(&upper[i..i + 4]);
+            let dl_raw = l - p;
+            let du_raw = p - u;
+            let dl_nonneg = dl_raw & !(dl_raw >> 63i64);
+            let du_nonneg = du_raw & !(du_raw >> 63i64);
+            let d = dl_nonneg + du_nonneg;
+            vacc = vacc + (d * d);
+            i += 4;
+        }
+
+        let lanes = vacc.as_array_ref();
+        let mut acc: i64 = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+
+        while i < D {
+            let p = point[i];
+            let l = lower[i];
+            let u = upper[i];
+            let below = (l - p).max(0);
+            let above = (p - u).max(0);
+            let d = below + above;
+            acc += d * d;
+            i += 1;
+        }
+        acc
     }
 
     #[allow(dead_code)]
@@ -49,24 +116,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn contains_point(&self, point: &Self::Point) -> bool {
-        let mut i = 0usize;
-        while i + 4 <= D {
-            let pv = i64x4::from(&point.arr[i..i + 4]);
-            let l = i64x4::from(&self.lower.arr[i..i + 4]);
-            let u = i64x4::from(&self.upper.arr[i..i + 4]);
-            if (l.cmp_gt(pv) | pv.cmp_gt(u)).any() {
-                return false;
-            }
-            i += 4;
-        }
-        while i < D {
-            let p = point.arr[i];
-            if p < self.lower.arr[i] || p > self.upper.arr[i] {
-                return false;
-            }
-            i += 1;
-        }
-        true
+        Self::ordered_corners_contain_point(&self.lower.arr, &self.upper.arr, &point.arr)
     }
 
     fn contains_envelope(&self, other: &Self) -> bool {
@@ -172,36 +222,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn distance_2(&self, point: &Self::Point) -> <Self::Point as Point>::Scalar {
-        // Vectorized sum of squared distances to the box on each axis.
-        let mut vacc = i64x4::ZERO;
-        let mut i = 0usize;
-        while i + 4 <= D {
-            let p = i64x4::from(&point.arr[i..i + 4]);
-            let l = i64x4::from(&self.lower.arr[i..i + 4]);
-            let u = i64x4::from(&self.upper.arr[i..i + 4]);
-            let dl_raw = l - p;
-            let du_raw = p - u;
-            let dl_nonneg = dl_raw & !(dl_raw >> 63i64);
-            let du_nonneg = du_raw & !(du_raw >> 63i64);
-            let d = dl_nonneg + du_nonneg;
-            vacc = vacc + (d * d);
-            i += 4;
-        }
-
-        let lanes = vacc.as_array_ref();
-        let mut acc: i64 = lanes[0] + lanes[1] + lanes[2] + lanes[3];
-
-        while i < D {
-            let p = point.arr[i];
-            let l = self.lower.arr[i];
-            let u = self.upper.arr[i];
-            let below = (l - p).max(0);
-            let above = (p - u).max(0);
-            let d = below + above;
-            acc += d * d;
-            i += 1;
-        }
-        acc
+        Self::ordered_corners_distance_2(&self.lower.arr, &self.upper.arr, &point.arr)
     }
 
     fn min_max_dist_2(&self, point: &Self::Point) -> <Self::Point as Point>::Scalar {
