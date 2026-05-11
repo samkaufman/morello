@@ -74,9 +74,13 @@ jobs:
       - name: Install llvm & libomp
         run: |
           set -euo pipefail
-          brew unlink llvm@15 || true
+          for llvm_formula in "$(brew --prefix)"/opt/llvm@*; do
+            if [ -e "$llvm_formula" ] && [ "$(basename "$llvm_formula")" != "llvm@17" ]; then
+              brew unlink "$(basename "$llvm_formula")" || true
+            fi
+          done
           brew install llvm@17 libomp
-          brew link llvm@17
+          brew link --overwrite llvm@17
           echo "CLANG=$(brew --prefix llvm@17)/bin/clang" >> "$GITHUB_ENV"
           echo "LIBRARY_PATH=$(brew --prefix libomp)/lib" >> "$GITHUB_ENV"
         if: runner.os == 'macOS'
