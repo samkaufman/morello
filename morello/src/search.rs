@@ -20,14 +20,13 @@ use crate::target::Target;
 
 type RequestId = (usize, usize);
 type WorkingPartialImplHandle = (usize, RequestId);
-type NonMemoCache<Tgt> = Rc<RefCell<HashMap<Spec<Tgt>, ActionCostVec>>>;
 
 struct TopDownSearch<'d, Tgt: Target> {
     db: &'d FilesDatabase,
     top_k: usize,
     thread_idx: usize,
     thread_count: usize,
-    nonmemo_cache: NonMemoCache<Tgt>,
+    phantom: std::marker::PhantomData<Tgt>,
 }
 
 struct BlockSearch<'a, 'd, Tgt: Target> {
@@ -109,7 +108,7 @@ where
     Tgt::Memory: CanonicalBimap,
     <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    top_down_many_internal(db, goals, top_k).0
+    top_down_many_internal(db, goals, top_k)
 }
 
 /// Returns optimal implementations of each goal [Spec].
@@ -126,8 +125,8 @@ where
     Tgt::Memory: CanonicalBimap,
     <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    let (action_costs, cache) = top_down_many_internal(db, goals, top_k);
-    let lookup = move |spec: &Spec<Tgt>| get_action_cost(db, &cache, spec);
+    let action_costs = top_down_many_internal(db, goals, top_k);
+    let lookup = move |spec: &Spec<Tgt>| db.get(spec);
     action_costs
         .into_iter()
         .zip(goals.iter())
@@ -149,7 +148,7 @@ fn top_down_many_internal<Tgt>(
     db: &FilesDatabase,
     goals: &[Spec<Tgt>],
     top_k: usize,
-) -> (Vec<ActionCostVec>, NonMemoCache<Tgt>)
+) -> Vec<ActionCostVec>
 where
     Tgt: Target,
     Tgt::Memory: CanonicalBimap,
@@ -160,7 +159,7 @@ where
         unimplemented!("Search for top_k > 1 not yet implemented.");
     }
 
-    // Group goals by database page (or `None` if not memoizable).
+    // Group goals by database page (or `None` if they use the non-spatial cache).
     let mut grouped_canonical_goals = HashMap::<_, (Vec<_>, Vec<usize>)>::new();
     for (idx, goal) in goals.iter().enumerate() {
         let mut canonical_goal = goal.clone();
@@ -168,7 +167,7 @@ where
             .canonicalize()
             .expect("should be possible to canonicalize goal Spec");
 
-        let key = db.can_memoize(&canonical_goal).then(|| {
+        let key = db.can_memoize_efficiently(&canonical_goal).then(|| {
             let page = db.page_id(&canonical_goal);
             (page.table_key, page.page_id)
         });
@@ -176,8 +175,6 @@ where
         group_tuple.0.push(canonical_goal);
         group_tuple.1.push(idx);
     }
-
-    let nonmemo_cache = Rc::new(RefCell::new(HashMap::new()));
 
     // Synthesize each group with BlockSearch. Scatter results into combined_results.
     let mut combined_results = vec![Default::default(); goals.len()];
@@ -187,7 +184,7 @@ where
             top_k,
             thread_idx: 0,
             thread_count: 1,
-            nonmemo_cache: Rc::clone(&nonmemo_cache),
+            phantom: std::marker::PhantomData,
         };
         let result = BlockSearch::synthesize(page_group, &search, None);
 
@@ -196,7 +193,7 @@ where
         }
     }
 
-    (combined_results, nonmemo_cache)
+    combined_results
 }
 
 impl<'a, 'd, Tgt> BlockSearch<'a, 'd, Tgt>
@@ -249,7 +246,7 @@ where
                     Some(next_subblock) => prefetch_to_push_down = next_subblock.keys().next(),
                     None => {
                         if let Some(prefetch_after) = prefetch_after.as_ref() {
-                            if search.db.can_memoize(prefetch_after) {
+                            if search.db.can_memoize_efficiently(prefetch_after) {
                                 search.db.prefetch_canon(prefetch_after);
                             }
                         }
@@ -336,33 +333,20 @@ where
     }
 
     /// Return a working set task and its index. If none exists for the [Spec], start one.
-    ///
-    /// Memoizable specs use the on-disk database while others fall back to the side cache.
     fn get_task_internal(&mut self, spec: &Spec<Tgt>) -> (usize, Rc<RefCell<SpecTask<Tgt>>>) {
-        let can_memoize = self.search.db.can_memoize(spec);
         match self.working_set.entry(spec.clone()) {
             indexmap::map::Entry::Occupied(e) => (e.index(), Rc::clone(e.get())),
             indexmap::map::Entry::Vacant(e) => {
-                let preferences = if can_memoize {
-                    match self.search.db.get_with_preference_canon(spec) {
-                        GetPreference::Hit(v) => {
-                            // TODO: Re-enable search hits and misses tracking
-                            // search.hits += 1;
-                            let entry_index = e.index();
-                            let task_rc = Rc::new(RefCell::new(SpecTask::Complete(v, true)));
-                            e.insert(Rc::clone(&task_rc));
-                            return (entry_index, task_rc);
-                        }
-                        GetPreference::Miss(preferences) => preferences,
-                    }
-                } else {
-                    if let Some(hit) = self.search.nonmemo_cache.borrow().get(spec).cloned() {
+                let preferences = match self.search.db.get_with_preference_canon(spec) {
+                    GetPreference::Hit(v) => {
+                        // TODO: Re-enable search hits and misses tracking
+                        // search.hits += 1;
                         let entry_index = e.index();
-                        let task_rc = Rc::new(RefCell::new(SpecTask::Complete(hit, true)));
+                        let task_rc = Rc::new(RefCell::new(SpecTask::Complete(v, true)));
                         e.insert(Rc::clone(&task_rc));
                         return (entry_index, task_rc);
                     }
-                    None
+                    GetPreference::Miss(preferences) => preferences,
                 };
 
                 let task = SpecTask::start(spec.clone(), preferences, self.search);
@@ -392,15 +376,15 @@ where
         if !matches!(&*task, SpecTask::Running { .. }) {
             return;
         }
-        let page_id_opt = db.can_memoize(spec).then(|| db.page_id(spec));
+        let page_id_opt = db.can_memoize_efficiently(spec).then(|| db.page_id(spec));
 
         // collect to avoid keeping the borrow
         if let Some(next_batch) = task.next_request_batch().map(|v| v.collect::<Vec<_>>()) {
             for (subspec, request_id) in next_batch {
-                let can_memoize = db.can_memoize(&subspec);
-                let in_same_page = match (page_id_opt.as_ref(), can_memoize) {
+                let can_memoize_efficiently = db.can_memoize_efficiently(&subspec);
+                let in_same_page = match (page_id_opt.as_ref(), can_memoize_efficiently) {
                     (Some(pid), true) => pid.contains(&subspec),
-                    (None, false) => true, // Both non-memoizable
+                    (None, false) => true, // Both non-spatial-memoizable
                     _ => false,
                 };
                 if in_same_page {
@@ -538,11 +522,12 @@ where
         subspec: &Spec<Tgt>,
         request_id: RequestId,
     ) {
-        let request_set = if self.search.db.can_memoize(subspec) {
+        let request_set = if self.search.db.can_memoize_efficiently(subspec) {
             let subspec_page = self.search.db.page_id(subspec);
             let matching_idx = self.subblock_requests.iter().position(|subblock| {
                 let existing_spec = subblock.keys().next().unwrap();
-                self.search.db.can_memoize(existing_spec) && subspec_page.contains(existing_spec)
+                self.search.db.can_memoize_efficiently(existing_spec)
+                    && subspec_page.contains(existing_spec)
             });
             if let Some(idx) = matching_idx {
                 self.subblock_requests.get_mut(idx).unwrap()
@@ -550,14 +535,14 @@ where
                 if self.subblock_requests.is_empty() {
                     let requesting_spec =
                         self.working_set.get_index(working_set_spec_idx).unwrap().0;
-                    if self.search.db.can_memoize(requesting_spec) {
+                    if self.search.db.can_memoize_efficiently(requesting_spec) {
                         self.search.db.prefetch_canon(requesting_spec);
                     }
                 }
                 self.new_subblock_request_set()
             }
         } else {
-            // Always create a fresh subblock for unmemoizable specs to avoid page computations.
+            // Always create a fresh subblock for "non-spatial" specs to avoid page computations.
             self.new_subblock_request_set()
         };
         request_set
@@ -859,35 +844,9 @@ where
     };
     let action_costs = take(task_result);
     if !*from_db {
-        if search.db.can_memoize(spec) {
-            search.db.put_canon(spec, action_costs.0.clone());
-        } else {
-            search
-                .nonmemo_cache
-                .borrow_mut()
-                .insert(spec.clone(), action_costs.clone());
-        }
+        search.db.put_canon(spec, action_costs.0.clone());
     }
     action_costs
-}
-
-/// Checks `db` or `cache` for a memoized optima for `spec`, as appropriate.
-fn get_action_cost<Tgt>(
-    db: &FilesDatabase,
-    cache: &NonMemoCache<Tgt>,
-    spec: &Spec<Tgt>,
-) -> Option<ActionCostVec>
-where
-    Tgt: Target,
-    Tgt::Memory: CanonicalBimap,
-    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
-    debug_assert!(spec.is_canonical(), "Spec must be canonical: {}", spec);
-    if db.can_memoize(spec) {
-        db.get(spec)
-    } else {
-        cache.borrow().get(spec).cloned()
-    }
 }
 
 #[cfg(test)]
@@ -1262,13 +1221,17 @@ mod tests {
     fn test_binary_scale_db_memoizes_power_of_two_subspecs_not_original() {
         let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 128, 1);
 
-        // Non-power-of-two spec (should not be memoized)
+        // Non-power-of-two spec (should be stored in FilesDatabase's non-spatial cache)
         let spec_3 = Spec::<Avx2Target>(
             lspec!(Move([3], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
         let result = top_down(&db, &spec_3, 1);
         assert!(!result.is_empty(), "Should be able to synthesize Move([3])");
+        assert!(
+            db.get(&spec_3).is_some(),
+            "Database should contain Move([3]) despite not being a power-of-two size"
+        );
 
         // Power-of-two subspecs should be memoized
         let spec_2 = Spec::<Avx2Target>(

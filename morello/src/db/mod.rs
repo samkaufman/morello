@@ -23,6 +23,7 @@ use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Preh
 use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
@@ -40,12 +41,14 @@ type DbKey = (TableKey, Vec<BimapInt>);
 type TableKey = (SpecKey, Vec<(Layout,)>);
 type PageKey = DbKey;
 pub type ActionNum = u16;
+type NonSpatialCache = Mutex<HashMap<NonSpatialKey, ActionCostVec>>;
 
 /// The number of shards/locks per thread.
 const THREAD_SHARDS: usize = 2;
 const CHANNEL_SIZE: usize = 2;
 /// Compress pages when writing to disk.
 const COMPRESS_PAGES: bool = true;
+const NONSPATIAL_CACHE_FILE: &str = "NONSPATIAL_CACHE";
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
@@ -53,6 +56,7 @@ pub struct FilesDatabase {
     binary_scale_shapes: bool,
     k: u8,
     shards: ShardVec,
+    nonspatial_cache: NonSpatialCache,
     prehasher: DefaultPrehasher,
     #[cfg(feature = "db-stats")]
     stats: Arc<FilesDatabaseStats>,
@@ -81,6 +85,11 @@ pub struct PageId<'a> {
 struct Page {
     contents: PageContents,
     modified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct NonSpatialKey {
+    spec: Vec<u8>,
 }
 
 struct Shard {
@@ -221,11 +230,13 @@ impl FilesDatabase {
                 })
                 .collect(),
         );
+        let nonspatial_cache = Mutex::new(read_nonspatial_cache(dir_handle.path()));
         Self {
             dir_handle,
             binary_scale_shapes,
             k,
             shards,
+            nonspatial_cache,
             prehasher: DefaultPrehasher::default(),
             #[cfg(feature = "db-stats")]
             stats,
@@ -288,6 +299,14 @@ impl FilesDatabase {
     {
         debug_assert!(query.is_canonical());
 
+        if !self.can_memoize_efficiently(query) {
+            let key = self.nonspatial_key(query);
+            return match self.nonspatial_cache.lock().get(&key).cloned() {
+                Some(v) => GetPreference::Hit(v),
+                None => GetPreference::Miss(None),
+            };
+        }
+
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = BiMap::apply(&bimap, query);
         let global_pt_u8 = global_pt
@@ -324,6 +343,10 @@ impl FilesDatabase {
     {
         debug_assert!(query.is_canonical());
 
+        if !self.can_memoize_efficiently(query) {
+            return;
+        }
+
         let bimap = self.spec_bimap();
         let (table_key, global_pt) = BiMap::apply(&bimap, query);
         let page_pt = blockify_point(&global_pt);
@@ -339,7 +362,8 @@ impl FilesDatabase {
 
     /// Return the [PageId] to which the given canonical [Spec] belongs.
     ///
-    /// Passing a non-canonical [Spec] is a logic error.
+    /// Passing a non-canonical [Spec] or a [Spec] for which
+    /// [FilesDatabase::can_memoize_efficiently] is `false` is a logic error.
     pub fn page_id<Tgt>(&self, spec: &Spec<Tgt>) -> PageId<'_>
     where
         Tgt: Target,
@@ -347,6 +371,7 @@ impl FilesDatabase {
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
         debug_assert!(spec.is_canonical());
+        debug_assert!(self.can_memoize_efficiently(spec));
 
         let bimap = self.spec_bimap();
         let (table_key, global_pt_lhs) = BiMap::apply(&bimap, spec);
@@ -391,6 +416,14 @@ impl FilesDatabase {
 
         #[cfg(feature = "db-stats")]
         self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
+
+        if !self.can_memoize_efficiently(spec) {
+            let key = self.nonspatial_key(spec);
+            self.nonspatial_cache
+                .lock()
+                .insert(key, ActionCostVec(decisions));
+            return;
+        }
 
         let bimap = self.spec_bimap();
         let (table_key, (bottom, top)) = put_range_to_fill(&bimap, spec, &decisions);
@@ -440,6 +473,7 @@ impl FilesDatabase {
             let mut shard_guard = shard.lock();
             shard_guard.save();
         }
+        self.save_nonspatial_cache();
     }
 
     #[inline]
@@ -466,17 +500,35 @@ impl FilesDatabase {
         surmap.into_bimap()
     }
 
-    /// Returns whether the database can memoize the given Spec.
+    /// Returns whether the database can memoize the given Spec in a spatial (compressed) table.
     ///
-    /// A Spec can be memoized if the database's BiMap is defined for it. For example, if the
-    /// database uses binary-scale shapes, only Specs with power-of-two dimensions can be memoized.
-    pub fn can_memoize<Tgt>(&self, spec: &Spec<Tgt>) -> bool
+    /// A Spec can be memoized efficiently if the database's BiMap is defined for it. For example,
+    /// if the database uses binary-scale shapes, only Specs with power-of-two dimensions can be
+    /// memoized efficiently. Other Specs can still be stored in the non-spatial cache, but this is
+    /// typically much less efficient.
+    pub fn can_memoize_efficiently<Tgt>(&self, spec: &Spec<Tgt>) -> bool
     where
         Tgt: Target,
         Tgt::Memory: CanonicalBimap,
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
     {
         SurMap::defined_for(&self.spec_bimap(), spec)
+    }
+
+    fn nonspatial_key<Tgt>(&self, spec: &Spec<Tgt>) -> NonSpatialKey
+    where
+        Tgt: Target,
+    {
+        NonSpatialKey {
+            // Serialize the key to erase the Tgt type parameter
+            spec: bincode::serialize(spec)
+                .expect("Spec should serialize for non-spatial cache key"),
+        }
+    }
+
+    fn save_nonspatial_cache(&self) {
+        let path = nonspatial_cache_file_path(self.dir_handle.path());
+        write_nonspatial_cache_atomic(&path, &self.nonspatial_cache.lock());
     }
 
     fn load_live_page<'a>(&'a self, key: &Prehashed<PageKey>) -> impl Deref<Target = Page> + 'a {
@@ -603,6 +655,7 @@ impl Drop for FilesDatabase {
                 }
             }
         }
+        self.save_nonspatial_cache();
     }
 }
 
@@ -1201,6 +1254,36 @@ fn write_page_atomic(path: &Path, contents: &PageContents) {
     file.commit().unwrap();
 }
 
+fn nonspatial_cache_file_path(root: &Path) -> path::PathBuf {
+    root.join(NONSPATIAL_CACHE_FILE)
+}
+
+fn read_nonspatial_cache(root: &Path) -> HashMap<NonSpatialKey, ActionCostVec> {
+    let path = nonspatial_cache_file_path(root);
+    let Ok(file) = fs::File::open(&path) else {
+        return HashMap::new();
+    };
+    bincode::deserialize_from(BufReader::new(file)).unwrap_or_else(|e| {
+        panic!(
+            "Failed to read non-spatial cache at {}: {e}",
+            path.display()
+        )
+    })
+}
+
+fn write_nonspatial_cache_atomic(path: &Path, cache: &HashMap<NonSpatialKey, ActionCostVec>) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+
+    let mut file = AtomicWriteFile::options().open(path).unwrap();
+    let mut buf_writer = BufWriter::new(&mut file);
+    bincode::serialize_into(&mut buf_writer, cache).unwrap();
+    buf_writer.flush().unwrap();
+    drop(buf_writer);
+    file.commit().unwrap();
+}
+
 /// Check TARGET file in `db_path` is consistent with `Tgt`. Create if none exists.
 fn validate_target_file<Tgt: Target>(db_path: &Path) -> Result<(), String> {
     let target_file_path = db_path.join("TARGET");
@@ -1326,6 +1409,50 @@ mod tests {
 
         // Read as an AVX-512 database
         let _db = FilesDatabase::new::<Avx512Target>(Some(db_path.path()), true, 1, 2, 1);
+    }
+
+    #[test]
+    fn test_nonspatial_put_then_get_works_for_non_power_of_two_specs() {
+        let mut spec: Spec<Avx2Target> = spec!(Move([3], (u8, L1, row_major), (u8, L1, row_major)));
+        spec.canonicalize().unwrap();
+        let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 2, 1);
+        assert!(!db.can_memoize_efficiently(&spec));
+
+        let decisions = vec![(
+            0,
+            Cost {
+                main: 7,
+                peaks: MemVec::zero::<Avx2Target>(),
+                depth: 0,
+            },
+        )];
+        db.put(spec.clone(), decisions.clone());
+
+        assert_eq!(db.get(&spec), Some(ActionCostVec(decisions)));
+    }
+
+    #[test]
+    fn test_nonspatial_put_then_get_works_after_reopen() {
+        let db_path = tempfile::tempdir().unwrap();
+        let mut spec: Spec<Avx2Target> = spec!(Move([3], (u8, L1, row_major), (u8, L1, row_major)));
+        spec.canonicalize().unwrap();
+        let decisions = vec![(
+            0,
+            Cost {
+                main: 7,
+                peaks: MemVec::zero::<Avx2Target>(),
+                depth: 0,
+            },
+        )];
+
+        {
+            let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+            assert!(!db.can_memoize_efficiently(&spec));
+            db.put(spec.clone(), decisions.clone());
+        }
+
+        let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+        assert_eq!(db.get(&spec), Some(ActionCostVec(decisions)));
     }
 
     proptest! {
@@ -1676,11 +1803,11 @@ mod tests {
             let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 2, 1);
             let bimap = db.spec_bimap::<Avx2Target>();
 
-            if db.can_memoize(&spec) {
-                // If can_memoize returns true, apply should not panic
+            if db.can_memoize_efficiently(&spec) {
+                // If can_memoize_efficiently returns true, apply should not panic
                 let _ = BiMap::apply(&bimap, &spec);
             } else {
-                // If can_memoize returns false, apply should panic
+                // If can_memoize_efficiently returns false, apply should panic
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     BiMap::apply(&bimap, &spec)
                 }));
@@ -1689,11 +1816,11 @@ mod tests {
         }
 
         #[test]
-        fn test_can_memoize_returns_true_for_non_binary_scale(
+        fn test_can_memoize_efficiently_returns_true_for_non_binary_scale(
             spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2, 1);
-            assert!(db.can_memoize(&spec), "All specs should be memoizable when binary_scale_shapes is false");
+            assert!(db.can_memoize_efficiently(&spec), "All specs should be efficiently memoizable when binary_scale_shapes is false");
         }
     }
 }
