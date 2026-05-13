@@ -7,7 +7,7 @@ mod x86;
 
 pub use arm::ArmTarget;
 pub use avx2::Avx2Target;
-pub use avx512::Avx512Target;
+pub use avx512::{Avx512Kernel, Avx512Target};
 pub use cpu::{CpuKernel, CpuMemory, CpuTarget};
 
 use crate::common::DimSize;
@@ -95,6 +95,11 @@ pub trait Kernel: PartialEq + Eq + Copy + Clone + Hash + Debug {
 
     // TODO: Remove after composing kernel code generators.
     fn into_cpu_kernel(self) -> Option<CpuKernel> {
+        None
+    }
+
+    // TODO: Remove after composing kernel code generators.
+    fn into_avx512_kernel(self) -> Option<Avx512Kernel> {
         None
     }
 }

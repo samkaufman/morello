@@ -25,10 +25,10 @@ use crate::shape;
 use crate::target::{
     cpu::{
         broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, softmax_vector_size,
-        vector_max_loop_properties, x86_f32_horizontal_max_helper, DOT_PRODUCT_BF16_STRIP_SIZE,
-        DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
+        vector_accum_count, vector_max_loop_properties, x86_f32_horizontal_max_helper,
+        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
-    CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
+    Avx512Kernel, CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
 };
 use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
@@ -599,6 +599,77 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         Ok(())
     }
 
+    fn emit_avx512_kernel<W: Write>(
+        &mut self,
+        w: &mut W,
+        kernel: Avx512Kernel,
+        arguments: &[ViewE<Tgt>],
+        depth: usize,
+    ) -> fmt::Result {
+        match kernel {
+            Avx512Kernel::Cpu(_) => unreachable!("CPU kernels should use the generic emitter"),
+            Avx512Kernel::DotProductLoopVdpbf16ps => {
+                let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                    0 | 1 => self.c_index_ptr(a, b, None),
+                    2 => self.c_index(a, b, None),
+                    _ => unreachable!(),
+                });
+
+                let lhs_spec = arguments[0].spec();
+                let k = lhs_spec.shape()[2].get();
+                let strip = 32;
+                let accum_count = vector_accum_count(k, strip)
+                    .expect("AVX512 VDPBF16PS applies should have ensured accum_count");
+                let step_size = accum_count * strip;
+                let step_idx_name = self.namer.fresh_name();
+                let vector_accum_names = (0..usize::try_from(accum_count).unwrap())
+                    .map(|_| self.namer.fresh_name())
+                    .collect::<Vec<_>>();
+
+                writeln!(w, "{}// DotProductLoopVdpbf16ps", indent(depth))?;
+                for accum_name in &vector_accum_names {
+                    writeln!(
+                        w,
+                        "{}__m512 {accum_name} = _mm512_setzero_ps();",
+                        indent(depth),
+                    )?;
+                }
+                writeln!(
+                    w,
+                    "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
+                    indent(depth),
+                    step_idx_name,
+                    k,
+                    step_size,
+                )?;
+                for (i, accum_name) in vector_accum_names.iter().enumerate() {
+                    let offset = u32::try_from(i).expect("accum index should fit u32") * strip;
+                    writeln!(
+                        w,
+                        "{0}{1} = _mm512_dpbf16_ps({1}, (__m512bh)_mm512_loadu_si512((const void *)({2} + {3} + {4})), (__m512bh)_mm512_loadu_si512((const void *)({5} + {3} + {4})));",
+                        indent(depth + 1),
+                        accum_name,
+                        exprs[0],
+                        step_idx_name,
+                        offset,
+                        exprs[1],
+                    )?;
+                }
+                writeln!(w, "{}}}", indent(depth))?;
+                for accum_name in &vector_accum_names {
+                    writeln!(
+                        w,
+                        "{}{} += _mm512_reduce_add_ps({});",
+                        indent(depth),
+                        exprs[2],
+                        accum_name,
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn make_buffer(
         &mut self,
         tensor_identifier: Option<OpaqueSymbol>,
@@ -867,15 +938,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 arguments,
                 spec: _,
             }) => {
-                let cpu_kernel = kernel_type.into_cpu_kernel().unwrap();
-                match cpu_kernel {
-                    CpuKernel::OnePrefixNoOp => {
+                match kernel_type.into_cpu_kernel() {
+                    Some(CpuKernel::OnePrefixNoOp) => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
                         writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
                     }
-                    CpuKernel::ValueSoftmaxComplete => {
+                    Some(CpuKernel::ValueSoftmaxComplete) => {
                         self.headers.emit_math_include = true;
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
@@ -890,7 +960,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             exprs[2],
                         )
                     }
-                    CpuKernel::ValueSoftmaxDenominator => {
+                    Some(CpuKernel::ValueSoftmaxDenominator) => {
                         self.headers.emit_math_include = true;
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
@@ -904,7 +974,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             exprs[1],
                         )
                     }
-                    CpuKernel::VectorSoftmaxDenominator => {
+                    Some(CpuKernel::VectorSoftmaxDenominator) => {
                         // TODO: Test that we don't mutate the input.
 
                         writeln!(w, "{}/* VectorSoftmaxDenominator */", indent(depth))?;
@@ -969,7 +1039,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             reduced_accum_names[0],
                         )
                     }
-                    CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
+                    Some(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32) => {
                         writeln!(
                             w,
                             "{}/* VectorSoftmaxDenominatorAndUnscaledF32 */",
@@ -1116,7 +1186,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         Ok(())
                     }
-                    CpuKernel::VectorSoftmaxComplete => {
+                    Some(CpuKernel::VectorSoftmaxComplete) => {
                         let vector_size =
                             softmax_vector_size::<Tgt>(arguments[0].spec(), arguments[3].spec())
                                 .unwrap();
@@ -1205,7 +1275,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         writeln!(w, "{}}}", indent(depth),)
                     }
-                    CpuKernel::ValueMax => {
+                    Some(CpuKernel::ValueMax) => {
                         self.headers.emit_math_include = true;
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
@@ -1219,7 +1289,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             exprs[0],
                         )
                     }
-                    CpuKernel::VectorMax => {
+                    Some(CpuKernel::VectorMax) => {
                         let vector_volume = arguments[0].spec().volume().get();
                         let vector_size = arguments[0].spec().vector_size().unwrap();
                         let vector_count = vector_volume / vector_size.get();
@@ -1260,7 +1330,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         Ok(())
                     }
-                    CpuKernel::VectorMaxLoop => {
+                    Some(CpuKernel::VectorMaxLoop) => {
                         let value_cnt = arguments[0].spec().volume().get();
                         let (vector_size, accum_count) =
                             vector_max_loop_properties::<Tgt>(value_cnt).unwrap();
@@ -1357,7 +1427,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         Ok(())
                     }
-                    CpuKernel::MultAdd => {
+                    Some(CpuKernel::MultAdd) => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
@@ -1370,7 +1440,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             exprs[1]
                         )
                     }
-                    CpuKernel::Assign => {
+                    Some(CpuKernel::Assign) => {
                         let is_scalar = arguments
                             .iter()
                             .flat_map(|arg| arg.spec().shape())
@@ -1424,13 +1494,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::CastBf16F32 => {
+                    Some(CpuKernel::CastBf16F32) => {
                         let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
                             self.c_index(a, b, None)
                         });
                         writeln!(w, "{}{} = (float){};", indent(depth), exprs[1], exprs[0])
                     }
-                    CpuKernel::VectorCastBf16F32 => {
+                    Some(CpuKernel::VectorCastBf16F32) => {
                         let vector_size =
                             i32::try_from(arguments[1].spec().vector_size().unwrap().get())
                                 .unwrap();
@@ -1455,7 +1525,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             self.c_index_vec(rhs_buffer, &rhs1_iexpr, None)
                         )
                     }
-                    CpuKernel::MemsetZero => {
+                    Some(CpuKernel::MemsetZero) => {
                         debug_assert_eq!(arguments.len(), 1);
                         let arg_tensor = arguments[0].backing_tensor().unwrap();
                         let arg_buffer = self.name_env.get(&arg_tensor.identifier()).unwrap();
@@ -1468,7 +1538,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             arguments[0].spec().bytes_used()
                         )
                     }
-                    CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
+                    Some(
+                        cpu_kernel @ (CpuKernel::VectorZero
+                        | CpuKernel::VectorNegInf
+                        | CpuKernel::VectorMin),
+                    ) => {
                         let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
                             self.c_index_vec(a, b, None)
                         });
@@ -1494,7 +1568,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             vtype.name
                         )
                     }
-                    CpuKernel::ValueZero | CpuKernel::ValueNegInf | CpuKernel::ValueMin => {
+                    Some(
+                        cpu_kernel @ (CpuKernel::ValueZero
+                        | CpuKernel::ValueNegInf
+                        | CpuKernel::ValueMin),
+                    ) => {
                         let exprs = self
                             .param_args_to_c_indices(arguments, |_, a, b| self.c_index(a, b, None));
                         match cpu_kernel {
@@ -1518,7 +1596,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             _ => unreachable!(),
                         }
                     }
-                    CpuKernel::BroadcastVecMultAdd => {
+                    Some(CpuKernel::BroadcastVecMultAdd) => {
                         let (scalar_idx, broadcast_idx) = broadcastvecmult_side(
                             &arguments
                                 .iter()
@@ -1564,7 +1642,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::BroadcastVecMultAddBf16F32 => {
+                    Some(CpuKernel::BroadcastVecMultAddBf16F32) => {
                         let vector_size_bf16 = arguments[1].spec().vector_size().unwrap().get();
                         let volume = arguments[1].spec().volume().get();
                         debug_assert_eq!(volume % vector_size_bf16, 0);
@@ -1670,7 +1748,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
+                    Some(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) => {
                         let vector_size = arguments[2].spec().vector_size().unwrap().get();
                         let volume = arguments[2].spec().volume().get();
                         debug_assert_eq!(volume % vector_size, 0);
@@ -1722,7 +1800,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::DotProductLoop => {
+                    Some(CpuKernel::DotProductLoop) => {
                         self.headers.emit_sum8 = true;
 
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
@@ -1811,7 +1889,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::DotProductLoopBf16Bf16F32 => {
+                    Some(CpuKernel::DotProductLoopBf16Bf16F32) => {
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 | 1 => self.c_index_ptr(a, b, None),
                             2 => self.c_index(a, b, None),
@@ -1931,7 +2009,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         self.headers.emit_sum8 = true;
                         Ok(())
                     }
-                    CpuKernel::DotProductLoopF32Bf16F32 => {
+                    Some(CpuKernel::DotProductLoopF32Bf16F32) => {
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 | 1 => self.c_index_ptr(a, b, None),
                             2 => self.c_index(a, b, None),
@@ -2050,7 +2128,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         self.headers.emit_cvtbf16_fp32 = true;
                         Ok(())
                     }
-                    CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
+                    Some(CpuKernel::DotProductLoopF32InterleavedBf16F32) => {
                         let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
                             0 | 1 => self.c_index_ptr(a, b, None),
                             2 => self.c_index(a, b, None),
@@ -2185,7 +2263,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         self.headers.emit_sum8 = true;
                         Ok(())
                     }
-                    CpuKernel::PhysicalTransposeByte128 => {
+                    Some(CpuKernel::PhysicalTransposeByte128) => {
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),
                             (&arguments[0], 16),
@@ -2223,7 +2301,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             in_higher,
                         )
                     }
-                    CpuKernel::PhysicalTransposeByte256 => {
+                    Some(CpuKernel::PhysicalTransposeByte256) => {
                         use CpuMemory::VRF;
 
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
@@ -2297,7 +2375,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             intermediate_higher.name().unwrap(),
                         )
                     }
-                    CpuKernel::VectorInterleaveBf16F32 => {
+                    Some(CpuKernel::VectorInterleaveBf16F32) => {
                         let lhs_tensor = arguments[0].backing_tensor().unwrap();
                         let lhs_buffer = self.name_env.get(&lhs_tensor.identifier()).unwrap();
                         let rhs_tensor = arguments[1].backing_tensor().unwrap();
@@ -2332,8 +2410,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         Ok(())
                     }
-                    CpuKernel::VectorDeinterleaveF32Bf16 => todo!(),
-                    CpuKernel::VecScalarAssign => {
+                    Some(CpuKernel::VectorDeinterleaveF32Bf16) => todo!(),
+                    Some(CpuKernel::VecScalarAssign) => {
                         let vector_size = arguments[1].spec().vector_size().unwrap();
                         let out_vector_type =
                             get_vector(Tgt::vec_types(), arguments[1].spec().dtype(), vector_size);
@@ -2365,7 +2443,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::DivideVec => {
+                    Some(CpuKernel::DivideVec) => {
                         let vector_size = arguments[0].spec().vector_size().unwrap();
                         debug_assert_eq!(arguments[1].spec().vector_size(), Some(vector_size));
                         debug_assert_eq!(arguments[2].spec().vector_size(), Some(vector_size));
@@ -2395,7 +2473,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    CpuKernel::DivideVecScalarReciprocal => {
+                    Some(CpuKernel::DivideVecScalarReciprocal) => {
                         // scan_dim is the only non-matching dimension size
                         let scan_dim = {
                             let input_shape = arguments[0].spec().shape();
@@ -2497,6 +2575,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
+                    None => match kernel_type.into_avx512_kernel() {
+                        Some(avx512_kernel) => {
+                            self.emit_avx512_kernel(w, avx512_kernel, arguments, depth)
+                        }
+                        None => unimplemented!(),
+                    },
                 }
             }
             ImplNode::FunctionApp(_) => {

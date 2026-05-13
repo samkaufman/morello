@@ -47,6 +47,9 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
     fn max_mem() -> MemoryLimits;
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType];
+    fn target_specific_kernels(_spec: &LogicalSpec<Self>) -> Vec<Self::Kernel> {
+        Vec::new()
+    }
 }
 
 #[derive(
@@ -452,6 +455,15 @@ impl<T: CpuTarget> Target for T {
                 None
             }
         }));
+        let iter = iter.chain(Self::target_specific_kernels(spec).into_iter().filter_map(
+            move |kernel| {
+                if kernel.applies_to_logical_spec(spec) {
+                    Some(Action::Select(Select(kernel, false)))
+                } else {
+                    None
+                }
+            },
+        ));
 
         match spec {
             LogicalSpec::Primitive(
@@ -1800,7 +1812,7 @@ pub(crate) fn x86_f32_horizontal_max_helper(vector_size: DimSize) -> &'static st
 /// [`VECTOR_ACCUM_COUNT`] independent accumulators, choosing the largest count that evenly
 /// partitions `k` so codegen can use a fixed-width unrolled loop without a cleanup path.
 /// Returns `None` when `k` is not a whole number of strips.
-fn vector_accum_count(k: u32, strip: u32) -> Option<u32> {
+pub(crate) fn vector_accum_count(k: u32, strip: u32) -> Option<u32> {
     if !k.is_multiple_of(strip) {
         return None;
     }
