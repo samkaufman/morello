@@ -853,7 +853,7 @@ where
 mod tests {
     use super::*;
     use crate::common::DimSize;
-    use crate::db::FilesDatabase;
+    use crate::db::{FilesDatabase, TileScale};
     use crate::layout::row_major;
     use crate::lspec;
     use crate::memorylimits::{MemVec, MemoryLimits};
@@ -884,7 +884,7 @@ mod tests {
         fn test_can_synthesize_any_canonical_primitive_spec(
             spec in arb_canonical_primitive_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2048, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 2048, 1);
             top_down(&db, &spec, 1);
         }
 
@@ -896,7 +896,7 @@ mod tests {
         // fn test_can_synthesize_any_canonical_compose_spec(
         //     spec in arb_canonical_compose_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         // ) {
-        //     let db = FilesDatabase::new(None, false, 1, 2048, 1);
+        //     let db = FilesDatabase::new(None, TileScale::Linear, 1, 2048, 1);
         //     top_down(&db, &spec, 1);
         // }
 
@@ -908,7 +908,7 @@ mod tests {
         // fn test_can_synthesize_any_canonical_compose_spec(
         //     spec in arb_canonical_compose_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         // ) {
-        //     let db = FilesDatabase::new(None, false, 1, 2048, 1);
+        //     let db = FilesDatabase::new(None, TileScale::Linear, 1, 2048, 1);
         //     top_down(&db, &spec, 1);
         // }
 
@@ -918,7 +918,7 @@ mod tests {
             spec_pair in lower_and_higher_canonical_specs::<Avx2Target>()
         ) {
             let (spec, raised_spec) = spec_pair;
-            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
 
             // Solve the first, lower Spec.
             let lower_result_vec = top_down(&db, &spec, 1);
@@ -941,7 +941,7 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
             let first_solutions = top_down(&db, &spec, 1);
             let first_peak = if let Some(first_sol) = first_solutions.first() {
                 first_sol.1.peaks.clone()
@@ -1189,7 +1189,7 @@ mod tests {
             logical_spec,
             MemoryLimits::Standard(MemVec::new([1, 1, 1, 0])),
         );
-        let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
 
         let action_costs = top_down(&db, &spec, 1);
 
@@ -1208,7 +1208,7 @@ mod tests {
             MemoryLimits::Standard(MemVec::new([0, 16, 64, 32])),
         );
 
-        let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
         let first_solutions = top_down(&db, &spec, 1);
         let first_peak = if let Some(first_sol) = first_solutions.first() {
             first_sol.1.peaks.clone()
@@ -1221,29 +1221,37 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_scale_db_memoizes_power_of_two_subspecs_not_original() {
-        let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 128, 1);
+    fn test_factorized_shape_db_memoizes_representable_subspecs_not_original() {
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOfTwo, 1, 128, 1);
 
-        // Non-power-of-two spec (should be stored in FilesDatabase's non-spatial cache)
+        // Non-factorizable spec (should be stored in FilesDatabase's non-spatial cache)
+        let spec_5 = Spec::<Avx2Target>(
+            lspec!(Move([5], (u8, GL, row_major), (u8, RF, row_major))),
+            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
+        );
+        let result = top_down(&db, &spec_5, 1);
+        assert!(!result.is_empty(), "Should be able to synthesize Move([5])");
+        assert!(
+            db.get(&spec_5).is_some(),
+            "Database should contain Move([5]) despite not being a factorized size"
+        );
+
+        // Factorizable subspecs should be memoized spatially.
         let spec_3 = Spec::<Avx2Target>(
             lspec!(Move([3], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
-        let result = top_down(&db, &spec_3, 1);
-        assert!(!result.is_empty(), "Should be able to synthesize Move([3])");
         assert!(
             db.get(&spec_3).is_some(),
-            "Database should contain Move([3]) despite not being a power-of-two size"
+            "Database should contain Move([3]) after synthesizing Move([5])"
         );
-
-        // Power-of-two subspecs should be memoized
         let spec_2 = Spec::<Avx2Target>(
             lspec!(Move([2], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
         assert!(
             db.get(&spec_2).is_some(),
-            "Database should contain Move([2]) after synthesizing Move([3])"
+            "Database should contain Move([2]) after synthesizing Move([5])"
         );
         let spec_1 = Spec::<Avx2Target>(
             lspec!(Move([1], (u8, GL, row_major), (u8, RF, row_major))),
@@ -1251,7 +1259,7 @@ mod tests {
         );
         assert!(
             db.get(&spec_1).is_some(),
-            "Database should contain Move([1]) after synthesizing Move([3])"
+            "Database should contain Move([1]) after synthesizing Move([5])"
         );
     }
 

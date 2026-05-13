@@ -1,7 +1,7 @@
 use iai_callgrind::{library_benchmark, library_benchmark_group, main, LibraryBenchmarkConfig};
 use std::hint::black_box;
 
-use morello::db::FilesDatabase;
+use morello::db::{FilesDatabase, TileScale};
 use morello::layout::row_major;
 use morello::spec;
 use morello::spec::Spec;
@@ -19,7 +19,7 @@ fn matmul_spec(size: u32) -> Spec<Avx2Target> {
 }
 
 fn synth(goal: &Spec<Avx2Target>) {
-    let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 128, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOrThreePower, 1, 128, 1);
     morello::search::top_down(&db, black_box(goal), 1);
 }
 

@@ -1,5 +1,6 @@
 use crate::common::{DimSize, Dtype, Shape};
 use crate::datadeps::SpecKey;
+use crate::db::TileScale;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::{BiMap, SurMap};
 use crate::grid::linear::BimapInt;
@@ -8,7 +9,7 @@ use crate::memorylimits::{MemoryLimits, MemoryLimitsBimap};
 use crate::target::{Memory, Target};
 use crate::tensorspec::{self, check_tensor_vector_size, TensorSpec, TensorSpecAux};
 use crate::tiling::Tiling;
-use crate::utils::{bit_length_inverse, bit_length_u32, join_into_string, prev_power_of_two_u32};
+use crate::utils::join_into_string;
 
 use itertools::{izip, Itertools};
 use nonzero::nonzero as nz;
@@ -182,10 +183,17 @@ pub struct LogicalSpecSurMap<Tgt, F, A, Aa> {
 
 #[derive(Clone)]
 pub struct PrimitiveBasicsBimap {
-    pub binary_scale_shapes: bool,
+    pub tile_scale: TileScale,
 }
 
-pub struct ShapeBimap(pub bool);
+/// Maps tensor shapes according to a [TileScale].
+pub struct ShapeBimap(pub TileScale);
+
+impl ShapeBimap {
+    fn codomain_len(&self, rank: u8) -> usize {
+        self.0.codomain_len(rank)
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum CanonicalizeError {
@@ -2192,7 +2200,7 @@ where
                 operand_auxes,
                 serial_only,
             } => {
-                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.tile_scale);
 
                 let key = SpecKey::Compose {
                     components: components
@@ -2210,8 +2218,10 @@ where
                     .iter()
                     .flat_map(|c| {
                         let mapped_shape = BiMap::apply(&shape_bimap, &c.spec_shape);
-                        // lengths must match for apply_inverse correctness
-                        debug_assert_eq!(c.spec_shape.len(), mapped_shape.len());
+                        debug_assert_eq!(
+                            shape_bimap.codomain_len(c.spec_shape.len().try_into().unwrap()),
+                            mapped_shape.len()
+                        );
                         mapped_shape
                     })
                     .collect::<Vec<_>>();
@@ -2241,7 +2251,7 @@ where
             SpecKey::Compose {
                 components: components_proj,
             } => {
-                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.tile_scale);
 
                 let mut remaining_pt = &pt[..pt.len() - 1];
                 let serial_only = pt[pt.len() - 1] == 0;
@@ -2250,8 +2260,10 @@ where
                 components.reserve_exact(components_proj.len());
                 for (typ, dtypes, rank) in components_proj {
                     debug_assert_eq!(dtypes.len(), typ.operand_count());
-                    let spec_shape =
-                        BiMap::apply_inverse(&shape_bimap, &eat(&mut remaining_pt, *rank).to_vec());
+                    let spec_shape = BiMap::apply_inverse(
+                        &shape_bimap,
+                        &eat(&mut remaining_pt, shape_bimap.codomain_len(*rank)).to_vec(),
+                    );
                     components.push(PrimitiveBasics {
                         typ: *typ,
                         spec_shape,
@@ -2347,7 +2359,7 @@ where
                 operand_auxes,
                 ..
             } => {
-                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.binary_scale_shapes);
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.tile_scale);
                 if !components
                     .iter()
                     .all(|c| BiMap::defined_for(&shape_bimap, &c.spec_shape))
@@ -2381,16 +2393,7 @@ impl BiMap for PrimitiveBasicsBimap {
             spec_shape,
             dtypes,
         } = basics;
-        let shifted_shape = spec_shape.iter().map(|d| d.get()).map(|d| {
-            if self.binary_scale_shapes {
-                if !d.is_power_of_two() {
-                    panic!("Given non-power-of-two shape {d}");
-                }
-                bit_length_u32(prev_power_of_two_u32(d - 1))
-            } else {
-                d - 1
-            }
-        });
+        let shifted_shape = BiMap::apply(&ShapeBimap(self.tile_scale), spec_shape);
         match *typ {
             PrimitiveSpecType::Matmul { accum } => {
                 let v = once(!accum as _).chain(shifted_shape).collect();
@@ -2416,7 +2419,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
             PrimitiveSpecType::Softmax { scan_dim } => {
                 assert_eq!(dtypes.len(), 2);
@@ -2426,7 +2429,7 @@ impl BiMap for PrimitiveBasicsBimap {
                         scan_dim,
                         dtypes: dtypes.as_slice().try_into().unwrap(),
                     },
-                    shifted_shape.collect(),
+                    shifted_shape,
                 )
             }
             PrimitiveSpecType::SoftmaxComplete { scan_dim } => (
@@ -2435,7 +2438,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
             PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim } => (
                 SpecKey::SoftmaxDenominatorAndMax {
@@ -2443,7 +2446,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim, accum } => (
                 SpecKey::SoftmaxDenominatorAndUnscaled {
@@ -2482,14 +2485,14 @@ impl BiMap for PrimitiveBasicsBimap {
                     rank: spec_shape.len().try_into().unwrap(),
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
             PrimitiveSpecType::Move => (
                 SpecKey::Move {
                     rank: spec_shape.len().try_into().unwrap(),
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
             PrimitiveSpecType::Fill { value } => (
                 SpecKey::Fill {
@@ -2497,14 +2500,14 @@ impl BiMap for PrimitiveBasicsBimap {
                     value,
                     dtype: dtypes[0],
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
             PrimitiveSpecType::DivideVec => (
                 SpecKey::DivideVec {
                     rank: spec_shape.len().try_into().unwrap(),
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
             PrimitiveSpecType::DivideVecScalar { scan_dim } => (
                 SpecKey::DivideVecScalar {
@@ -2512,7 +2515,7 @@ impl BiMap for PrimitiveBasicsBimap {
                     scan_dim,
                     dtypes: dtypes.as_slice().try_into().unwrap(),
                 },
-                shifted_shape.collect(),
+                shifted_shape,
             ),
         }
     }
@@ -2591,22 +2594,12 @@ impl BiMap for PrimitiveBasicsBimap {
                     _ => unreachable!(),
                 };
 
-                let mut spec_shape: Vec<BimapInt> = v.iter().skip(1).copied().collect();
-                for d in &mut spec_shape[..] {
-                    if self.binary_scale_shapes {
-                        *d = u32::try_from((bit_length_inverse(*d) + 1).next_power_of_two())
-                            .unwrap();
-                    } else {
-                        *d += 1;
-                    }
-                }
+                let spec_shape =
+                    BiMap::apply_inverse(&ShapeBimap(self.tile_scale), &v[1..].to_vec());
 
                 PrimitiveBasics {
                     typ,
-                    spec_shape: spec_shape
-                        .iter()
-                        .map(|&d| DimSize::new(d).unwrap())
-                        .collect(),
+                    spec_shape,
                     dtypes,
                 }
             }
@@ -2659,33 +2652,22 @@ impl BiMap for PrimitiveBasicsBimap {
                     _ => unreachable!(),
                 };
 
-                let mut spec_shape: Vec<BimapInt> = v.clone();
-                for d in &mut spec_shape[..] {
-                    if self.binary_scale_shapes {
-                        *d = u32::try_from((bit_length_inverse(*d) + 1).next_power_of_two())
-                            .unwrap();
-                    } else {
-                        *d += 1;
-                    }
-                }
+                let spec_shape = BiMap::apply_inverse(&ShapeBimap(self.tile_scale), v);
 
                 PrimitiveBasics {
                     typ,
-                    spec_shape: spec_shape
-                        .iter()
-                        .map(|&d| DimSize::new(d).unwrap())
-                        .collect(),
+                    spec_shape,
                     dtypes,
                 }
             }
             SpecKey::OnePrefix { rank: _, dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::OnePrefix,
-                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.tile_scale), v),
                 dtypes: dtypes.into(),
             },
             SpecKey::Move { rank: _, dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::Move,
-                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.tile_scale), v),
                 dtypes: dtypes.into(),
             },
             SpecKey::Fill {
@@ -2694,12 +2676,12 @@ impl BiMap for PrimitiveBasicsBimap {
                 dtype,
             } => PrimitiveBasics {
                 typ: PrimitiveSpecType::Fill { value: *value },
-                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.tile_scale), v),
                 dtypes: vec![*dtype],
             },
             SpecKey::DivideVec { rank: _, dtypes } => PrimitiveBasics {
                 typ: PrimitiveSpecType::DivideVec,
-                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.tile_scale), v),
                 dtypes: dtypes.into(),
             },
             SpecKey::DivideVecScalar {
@@ -2710,7 +2692,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 typ: PrimitiveSpecType::DivideVecScalar {
                     scan_dim: *scan_dim,
                 },
-                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.tile_scale), v),
                 dtypes: dtypes.into(),
             },
             SpecKey::Broadcast {
@@ -2719,7 +2701,7 @@ impl BiMap for PrimitiveBasicsBimap {
                 dtypes,
             } => PrimitiveBasics {
                 typ: PrimitiveSpecType::Broadcast { dim: *dim },
-                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.binary_scale_shapes), v),
+                spec_shape: BiMap::apply_inverse(&ShapeBimap(self.tile_scale), v),
                 dtypes: dtypes.to_vec(),
             },
             SpecKey::Compose { .. } => {
@@ -2730,7 +2712,7 @@ impl BiMap for PrimitiveBasicsBimap {
     }
 
     fn defined_for(&self, basics: &Self::Domain) -> bool {
-        BiMap::defined_for(&ShapeBimap(self.binary_scale_shapes), &basics.spec_shape)
+        BiMap::defined_for(&ShapeBimap(self.tile_scale), &basics.spec_shape)
     }
 }
 
@@ -2739,37 +2721,90 @@ impl BiMap for ShapeBimap {
     type Codomain = Vec<BimapInt>;
 
     fn apply(&self, shape: &Self::Domain) -> Self::Codomain {
-        shape
-            .iter()
-            .map(|d| d.get())
-            .map(|d| {
-                if self.0 {
+        match self.0 {
+            TileScale::Linear => shape.iter().map(|d| d.get() - 1).collect(),
+            TileScale::PowerOfTwo => shape
+                .iter()
+                .map(|d| {
+                    let d = d.get();
                     if !d.is_power_of_two() {
-                        panic!("Given non-zero/power-of-two shape {d}");
+                        panic!("Given shape {d}, which is not a power of two");
                     }
-                    bit_length_u32(prev_power_of_two_u32(d - 1))
-                } else {
-                    d - 1
-                }
-            })
-            .collect()
+                    d.ilog2()
+                })
+                .collect(),
+            TileScale::PowerOrThreePower => shape
+                .iter()
+                .flat_map(|d| {
+                    let d = d.get();
+                    let Some((power, scale)) = encode_power_or_three_power(d) else {
+                        panic!("Given shape {d}, which is not 2^x or 3*2^x");
+                    };
+                    [power, scale]
+                })
+                .collect(),
+        }
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
-        i.iter()
-            .map(|&d| {
-                DimSize::new(if self.0 {
-                    u32::try_from((bit_length_inverse(d) + 1).next_power_of_two()).unwrap()
-                } else {
-                    d + 1
+        match self.0 {
+            TileScale::Linear => i.iter().map(|&d| DimSize::new(d + 1).unwrap()).collect(),
+            TileScale::PowerOfTwo => i
+                .iter()
+                .map(|&power| {
+                    DimSize::new(
+                        1u32.checked_shl(power)
+                            .unwrap_or_else(|| panic!("shape power {power} does not fit in u32")),
+                    )
+                    .unwrap()
                 })
-                .unwrap()
-            })
-            .collect()
+                .collect(),
+            TileScale::PowerOrThreePower => {
+                assert_eq!(
+                    i.len() % 2,
+                    0,
+                    "power-or-three-power shape codomain length must be even"
+                );
+                i.chunks_exact(2)
+                    .map(|chunk| {
+                        DimSize::new(decode_power_or_three_power(chunk[0], chunk[1])).unwrap()
+                    })
+                    .collect()
+            }
+        }
     }
 
     fn defined_for(&self, shape: &Self::Domain) -> bool {
-        !self.0 || shape.iter().all(|d| d.get().is_power_of_two())
+        match self.0 {
+            TileScale::Linear => true,
+            TileScale::PowerOfTwo => shape.iter().all(|d| d.get().is_power_of_two()),
+            TileScale::PowerOrThreePower => shape
+                .iter()
+                .all(|d| encode_power_or_three_power(d.get()).is_some()),
+        }
+    }
+}
+
+fn encode_power_or_three_power(d: u32) -> Option<(BimapInt, BimapInt)> {
+    if d.is_power_of_two() {
+        Some((d.ilog2(), 0))
+    } else if d.is_multiple_of(3) && (d / 3).is_power_of_two() {
+        Some(((d / 3).ilog2(), 1))
+    } else {
+        None
+    }
+}
+
+fn decode_power_or_three_power(power: BimapInt, scale: BimapInt) -> u32 {
+    let base = 1u32
+        .checked_shl(power)
+        .unwrap_or_else(|| panic!("shape power {power} does not fit in u32"));
+    match scale {
+        0 => base,
+        1 => base
+            .checked_mul(3)
+            .unwrap_or_else(|| panic!("3*2^{power} does not fit in u32")),
+        _ => panic!("unexpected shape scale code {scale}; expected 0 or 1"),
     }
 }
 
@@ -3007,10 +3042,25 @@ pub fn arb_canonical_compose_logical_spec<Tgt: Target>(
 
 pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
     (0..)
-        .map(|power| 2u32.pow(power))
+        .map(ordered_power_or_three_power)
         .take_while(move |x| *x < dim_size.get())
         .map(|x| DimSize::new(x).unwrap())
         .chain(once(if include_end { Some(dim_size) } else { None }).flatten())
+}
+
+fn ordered_power_or_three_power(index: u32) -> u32 {
+    match index {
+        0 => 1,
+        i if i % 2 == 1 => 1u32
+            .checked_shl(i.div_ceil(2))
+            .unwrap_or_else(|| panic!("dimension range index {index} does not fit in u32")),
+        i => 3u32
+            .checked_mul(
+                1u32.checked_shl((i - 2) / 2)
+                    .unwrap_or_else(|| panic!("dimension range index {index} does not fit in u32")),
+            )
+            .unwrap_or_else(|| panic!("dimension range index {index} does not fit in u32")),
+    }
 }
 
 fn compose_parameter_shapes(components: &[PrimitiveBasics]) -> Vec<Shape> {
@@ -3674,11 +3724,34 @@ mod tests {
 
         assert_eq!(
             dim_range(nz!(7u32), false).collect::<Vec<_>>(),
-            vec![nz!(1u32), nz!(2u32), nz!(4u32)]
+            vec![nz!(1u32), nz!(2u32), nz!(3u32), nz!(4u32), nz!(6u32)]
         );
         assert_eq!(
             dim_range(nz!(7u32), true).collect::<Vec<_>>(),
-            vec![nz!(1u32), nz!(2u32), nz!(4u32), nz!(7u32)]
+            vec![
+                nz!(1u32),
+                nz!(2u32),
+                nz!(3u32),
+                nz!(4u32),
+                nz!(6u32),
+                nz!(7u32)
+            ]
+        );
+        assert_eq!(
+            dim_range(nz!(64u32), false).collect::<Vec<_>>(),
+            vec![
+                nz!(1u32),
+                nz!(2u32),
+                nz!(3u32),
+                nz!(4u32),
+                nz!(6u32),
+                nz!(8u32),
+                nz!(12u32),
+                nz!(16u32),
+                nz!(24u32),
+                nz!(32u32),
+                nz!(48u32),
+            ]
         );
     }
 
@@ -3943,9 +4016,8 @@ mod tests {
 
         #[test]
         fn test_primitivebasicsbimap_is_invertible(basics in any::<PrimitiveBasics>()) {
-            // TODO: Also test binary_scale_shapes = true
             let bimap = PrimitiveBasicsBimap {
-                binary_scale_shapes: false,
+                tile_scale: TileScale::Linear,
             };
             let projection = BiMap::apply(&bimap, &basics);
             let reversed = BiMap::apply_inverse(&bimap, &projection);
@@ -3953,16 +4025,43 @@ mod tests {
         }
 
         #[test]
+        fn test_primitivebasicsbimap_factorized_shapes_is_invertible(
+            basics in any_with::<PrimitiveBasics>(PrimitiveBasicsArbParams {
+                max_size: Some(nz!(128u32)),
+                ..Default::default()
+            })
+            .prop_map(|mut basics| {
+                const FACTORIZED_DIMS: [u32; 15] =
+                    [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192];
+                basics.spec_shape = basics.spec_shape
+                    .into_iter()
+                    .map(|d| {
+                        let idx = usize::try_from(d.get() - 1).unwrap() % FACTORIZED_DIMS.len();
+                        DimSize::new(FACTORIZED_DIMS[idx]).unwrap()
+                    })
+                    .collect();
+                basics
+            })
+        ) {
+            let bimap = PrimitiveBasicsBimap {
+                tile_scale: TileScale::PowerOrThreePower,
+            };
+            let projection = BiMap::apply(&bimap, &basics);
+            let reversed = BiMap::apply_inverse(&bimap, &projection);
+            prop_assert_eq!(basics, reversed);
+        }
+
+        #[test]
         fn test_specbimap_is_invertible_avx2(spec in any::<Spec<Avx2Target>>()) {
-            // binary-scaled SurMap is not tested
-            shared_test_specbimap_is_invertible(spec, false);
+            // factorized-shape SurMap is not tested
+            shared_test_specbimap_is_invertible(spec, TileScale::Linear);
         }
 
 
         #[test]
         fn test_specbimap_is_invertible_arm(spec in any::<Spec<ArmTarget>>()) {
-            // binary-scaled SurMap is not tested
-            shared_test_specbimap_is_invertible(spec, false);
+            // factorized-shape SurMap is not tested
+            shared_test_specbimap_is_invertible(spec, TileScale::Linear);
         }
 
         #[test]
@@ -4071,7 +4170,7 @@ mod tests {
         }
     }
 
-    fn shared_test_specbimap_is_invertible<Tgt>(spec: Spec<Tgt>, binary_scale_shapes: bool)
+    fn shared_test_specbimap_is_invertible<Tgt>(spec: Spec<Tgt>, tile_scale: TileScale)
     where
         Tgt: Target,
         Tgt::Memory: CanonicalBimap,
@@ -4079,9 +4178,7 @@ mod tests {
     {
         let surmap = SpecSurMap::<Tgt, _, _, _> {
             logical_spec_surmap: LogicalSpecSurMap::new(
-                PrimitiveBasicsBimap {
-                    binary_scale_shapes,
-                },
+                PrimitiveBasicsBimap { tile_scale },
                 |_: &[DimSize], dt| TensorSpecAuxNonDepBimap::new(dt),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),

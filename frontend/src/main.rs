@@ -10,7 +10,7 @@ use std::{io, path};
 use morello::codegen::{BuildError, CodeGen};
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
-use morello::db::FilesDatabase;
+use morello::db::{FilesDatabase, TileScale};
 use morello::grid::canon::CanonicalBimap;
 use morello::grid::general::BiMap;
 use morello::layout::{col_major, row_major};
@@ -31,7 +31,6 @@ use morello::{
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-const BINARY_SCALE_SHAPES: bool = true;
 const K: u8 = 1;
 
 #[derive(Parser)]
@@ -170,7 +169,7 @@ where
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new::<Tgt>(
         args.db.as_deref(),
-        BINARY_SCALE_SHAPES,
+        TileScale::PowerOrThreePower,
         K,
         args.cache_size,
         threads,

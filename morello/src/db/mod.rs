@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
@@ -49,11 +50,13 @@ const CHANNEL_SIZE: usize = 2;
 /// Compress pages when writing to disk.
 const COMPRESS_PAGES: bool = true;
 const NONSPATIAL_CACHE_FILE: &str = "NONSPATIAL_CACHE";
+const TARGET_FILE: &str = "TARGET";
+const TILESCALE_FILE: &str = "TILESCALE";
 
 pub struct FilesDatabase {
     #[allow(dead_code)] // read only when db-stats enabled; otherwise only affects Drop
     dir_handle: Arc<DirPathHandle>,
-    binary_scale_shapes: bool,
+    tile_scale: TileScale,
     k: u8,
     shards: ShardVec,
     nonspatial_cache: NonSpatialCache,
@@ -129,6 +132,16 @@ enum DirPathHandle {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionCostVec(pub Vec<(ActionNum, Cost)>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TileScale {
+    /// Encode each dimension `d` as `d - 1`.
+    Linear,
+    /// Use powers of two only.
+    PowerOfTwo,
+    /// Use sizes representable as `2^x` or `3 * 2^x`.
+    PowerOrThreePower,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ActionNormalizedCostVec(pub Vec<(ActionNum, NormalizedCost)>);
 
@@ -147,7 +160,7 @@ struct ReadAnyFormatError {
 impl FilesDatabase {
     pub fn new<Tgt: Target>(
         file_path: Option<&path::Path>,
-        binary_scale_shapes: bool,
+        tile_scale: TileScale,
         k: u8,
         cache_size: usize,
         thread_count: usize,
@@ -161,9 +174,10 @@ impl FilesDatabase {
         });
         log::info!("Opening database at: {}", dir_handle.path().display());
 
-        validate_target_file::<Tgt>(dir_handle.path()).expect("Target validation failed");
+        ensure_target_file::<Tgt>(dir_handle.path()).expect("Target validation failed");
+        ensure_tilescale_file(dir_handle.path(), tile_scale).expect("TILESCALE validation failed");
 
-        Self::new_with_dir_handle(dir_handle, binary_scale_shapes, k, cache_size, thread_count)
+        Self::new_with_dir_handle(dir_handle, tile_scale, k, cache_size, thread_count)
     }
 
     /// Open an existing database.
@@ -172,7 +186,7 @@ impl FilesDatabase {
     /// will not create the database if it does not already exist.
     pub fn open(
         file_path: Option<&path::Path>,
-        binary_scale_shapes: bool,
+        tile_scale: TileScale,
         k: u8,
         cache_size: usize,
         thread_count: usize,
@@ -184,9 +198,10 @@ impl FilesDatabase {
         }
         let dir_handle = Arc::new(DirPathHandle::Persisted(path.to_owned()));
         log::info!("Opening database at: {}", dir_handle.path().display());
+        validate_tilescale_file(dir_handle.path(), tile_scale)?;
         Ok(Self::new_with_dir_handle(
             dir_handle,
-            binary_scale_shapes,
+            tile_scale,
             k,
             cache_size,
             thread_count,
@@ -196,7 +211,7 @@ impl FilesDatabase {
     /// Common logic for [FilesDatabase::new] and [FilesDatabase::open].
     fn new_with_dir_handle(
         dir_handle: Arc<DirPathHandle>,
-        binary_scale_shapes: bool,
+        tile_scale: TileScale,
         k: u8,
         cache_size: usize,
         thread_count: usize,
@@ -233,7 +248,7 @@ impl FilesDatabase {
         let nonspatial_cache = Mutex::new(read_nonspatial_cache(dir_handle.path()));
         Self {
             dir_handle,
-            binary_scale_shapes,
+            tile_scale,
             k,
             shards,
             nonspatial_cache,
@@ -491,7 +506,7 @@ impl FilesDatabase {
         let surmap = SpecSurMap::<Tgt, _, _, _> {
             logical_spec_surmap: LogicalSpecSurMap::new(
                 PrimitiveBasicsBimap {
-                    binary_scale_shapes: self.binary_scale_shapes,
+                    tile_scale: self.tile_scale,
                 },
                 |_: &[DimSize], dtype| TensorSpecAuxNonDepBimap::new(dtype),
             ),
@@ -503,7 +518,7 @@ impl FilesDatabase {
     /// Returns whether the database can memoize the given Spec in a spatial (compressed) table.
     ///
     /// A Spec can be memoized efficiently if the database's BiMap is defined for it. For example,
-    /// if the database uses binary-scale shapes, only Specs with power-of-two dimensions can be
+    /// when the database factorizes shapes, only dimensions of the form `2^x` or `3 * 2^x` can be
     /// memoized efficiently. Other Specs can still be stored in the non-spatial cache, but this is
     /// typically much less efficient.
     pub fn can_memoize_efficiently<Tgt>(&self, spec: &Spec<Tgt>) -> bool
@@ -919,6 +934,39 @@ impl AsRef<Vec<(ActionNum, Cost)>> for ActionCostVec {
     }
 }
 
+impl TileScale {
+    pub(crate) const fn codomain_len(self, rank: u8) -> usize {
+        match self {
+            TileScale::Linear => rank as usize,
+            TileScale::PowerOfTwo => rank as usize,
+            TileScale::PowerOrThreePower => rank as usize * 2,
+        }
+    }
+}
+
+impl fmt::Display for TileScale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TileScale::Linear => write!(f, "linear"),
+            TileScale::PowerOfTwo => write!(f, "power-of-two"),
+            TileScale::PowerOrThreePower => write!(f, "power-or-three-power"),
+        }
+    }
+}
+
+impl std::str::FromStr for TileScale {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "linear" => Ok(TileScale::Linear),
+            "power-of-two" => Ok(TileScale::PowerOfTwo),
+            "power-or-three-power" => Ok(TileScale::PowerOrThreePower),
+            _ => Err(format!("unknown TILESCALE value: {s}")),
+        }
+    }
+}
+
 impl ActionNormalizedCostVec {
     pub fn normalize(action_costs: ActionCostVec, volume: NonZeroU64) -> Self {
         ActionNormalizedCostVec(
@@ -1288,15 +1336,23 @@ fn write_nonspatial_cache_atomic(path: &Path, cache: &HashMap<NonSpatialKey, Act
     file.commit().unwrap();
 }
 
-/// Check TARGET file in `db_path` is consistent with `Tgt`. Create if none exists.
-fn validate_target_file<Tgt: Target>(db_path: &Path) -> Result<(), String> {
-    let target_file_path = db_path.join("TARGET");
+/// Create TARGET file in `db_path` if it is missing, then validate it is
+/// consistent with `Tgt`.
+fn ensure_target_file<Tgt: Target>(db_path: &Path) -> Result<(), String> {
+    let target_file_path = db_path.join(TARGET_FILE);
 
     if !target_file_path.exists() {
         fs::write(&target_file_path, Tgt::target_id().to_string())
             .map_err(|e| format!("Failed to write TARGET file: {}", e))?;
         return Ok(());
     }
+
+    validate_target_file::<Tgt>(db_path)
+}
+
+/// Check TARGET file in `db_path` is consistent with `Tgt`.
+fn validate_target_file<Tgt: Target>(db_path: &Path) -> Result<(), String> {
+    let target_file_path = db_path.join(TARGET_FILE);
 
     let stored_target_str = fs::read_to_string(&target_file_path)
         .map_err(|e| format!("Failed to read TARGET file: {}", e))?;
@@ -1307,6 +1363,36 @@ fn validate_target_file<Tgt: Target>(db_path: &Path) -> Result<(), String> {
     let expected_target = Tgt::target_id();
     if stored_target != expected_target {
         return Err("Database created for a different target".to_string());
+    }
+    Ok(())
+}
+
+/// Create TILESCALE file in `db_path` if it is missing, then validate it
+/// matches `tile_scale`.
+fn ensure_tilescale_file(db_path: &Path, tile_scale: TileScale) -> Result<(), String> {
+    let tilescale_file_path = db_path.join(TILESCALE_FILE);
+
+    if !tilescale_file_path.exists() {
+        fs::write(&tilescale_file_path, tile_scale.to_string())
+            .map_err(|e| format!("Failed to write TILESCALE file: {}", e))?;
+        return Ok(());
+    }
+
+    validate_tilescale_file(db_path, tile_scale)
+}
+
+/// Check TILESCALE file in `db_path` matches `tile_scale`.
+fn validate_tilescale_file(db_path: &Path, tile_scale: TileScale) -> Result<(), String> {
+    let tilescale_file_path = db_path.join(TILESCALE_FILE);
+
+    let stored_tilescale_str = fs::read_to_string(&tilescale_file_path)
+        .map_err(|e| format!("Failed to read TILESCALE file: {}", e))?;
+    let stored_tilescale = stored_tilescale_str
+        .trim()
+        .parse::<TileScale>()
+        .map_err(|e| format!("Failed to parse TILESCALE file: {}", e))?;
+    if stored_tilescale != tile_scale {
+        return Err("Database created for a different tile scale".to_string());
     }
     Ok(())
 }
@@ -1386,11 +1472,23 @@ mod tests {
         spec.canonicalize().unwrap();
 
         {
-            let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+            let db = FilesDatabase::new::<Avx2Target>(
+                Some(db_path.path()),
+                TileScale::PowerOrThreePower,
+                1,
+                2,
+                1,
+            );
             let _ = spec.synthesize(&db);
         }
 
-        let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+        let db = FilesDatabase::new::<Avx2Target>(
+            Some(db_path.path()),
+            TileScale::PowerOrThreePower,
+            1,
+            2,
+            1,
+        );
         let result = db.get_impl(&spec);
         assert!(
             result.is_some(),
@@ -1408,18 +1506,77 @@ mod tests {
             let mut spec_avx2: Spec<Avx2Target> =
                 spec!(Move([2, 2], (f32, L1, row_major), (f32, L1, row_major)));
             spec_avx2.canonicalize().unwrap();
-            let _db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+            let _db = FilesDatabase::new::<Avx2Target>(
+                Some(db_path.path()),
+                TileScale::PowerOrThreePower,
+                1,
+                2,
+                1,
+            );
         }
 
         // Read as an AVX-512 database
-        let _db = FilesDatabase::new::<Avx512Target>(Some(db_path.path()), true, 1, 2, 1);
+        let _db = FilesDatabase::new::<Avx512Target>(
+            Some(db_path.path()),
+            TileScale::PowerOrThreePower,
+            1,
+            2,
+            1,
+        );
     }
 
     #[test]
-    fn test_nonspatial_put_then_get_works_for_non_power_of_two_specs() {
-        let mut spec: Spec<Avx2Target> = spec!(Move([3], (u8, L1, row_major), (u8, L1, row_major)));
+    fn test_opening_database_writes_tilescale_file() {
+        let db_path = tempfile::tempdir().unwrap();
+        let _db = FilesDatabase::new::<Avx2Target>(
+            Some(db_path.path()),
+            TileScale::PowerOrThreePower,
+            1,
+            2,
+            1,
+        );
+
+        let stored_tilescale =
+            std::fs::read_to_string(db_path.path().join(TILESCALE_FILE)).unwrap();
+        assert_eq!(stored_tilescale, TileScale::PowerOrThreePower.to_string());
+    }
+
+    #[test]
+    fn test_open_does_not_create_missing_tilescale_file() {
+        let db_path = tempfile::tempdir().unwrap();
+
+        let result =
+            FilesDatabase::open(Some(db_path.path()), TileScale::PowerOrThreePower, 1, 2, 1);
+
+        assert!(result.is_err());
+        assert!(!db_path.path().join(TILESCALE_FILE).exists());
+    }
+
+    #[test]
+    #[should_panic(expected = "Database created for a different tile scale")]
+    fn test_opening_database_with_wrong_tilescale_panics() {
+        let db_path = tempfile::tempdir().unwrap();
+        let wrong_tilescale = TileScale::Linear;
+        std::fs::write(
+            db_path.path().join(TILESCALE_FILE),
+            wrong_tilescale.to_string(),
+        )
+        .unwrap();
+
+        let _db = FilesDatabase::new::<Avx2Target>(
+            Some(db_path.path()),
+            TileScale::PowerOrThreePower,
+            1,
+            2,
+            1,
+        );
+    }
+
+    #[test]
+    fn test_nonspatial_put_then_get_works_for_non_factorizable_specs() {
+        let mut spec: Spec<Avx2Target> = spec!(Move([5], (u8, L1, row_major), (u8, L1, row_major)));
         spec.canonicalize().unwrap();
-        let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 2, 1);
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOrThreePower, 1, 2, 1);
         assert!(!db.can_memoize_efficiently(&spec));
 
         let decisions = vec![(
@@ -1436,9 +1593,18 @@ mod tests {
     }
 
     #[test]
+    fn test_can_spatially_memoize_three_vector_avx512_spec() {
+        let mut spec: Spec<Avx512Target> =
+            spec!(Move([48], (u8, L1, row_major), (u8, L1, row_major)));
+        spec.canonicalize().unwrap();
+        let db = FilesDatabase::new::<Avx512Target>(None, TileScale::PowerOrThreePower, 1, 2, 1);
+        assert!(db.can_memoize_efficiently(&spec));
+    }
+
+    #[test]
     fn test_nonspatial_put_then_get_works_after_reopen() {
         let db_path = tempfile::tempdir().unwrap();
-        let mut spec: Spec<Avx2Target> = spec!(Move([3], (u8, L1, row_major), (u8, L1, row_major)));
+        let mut spec: Spec<Avx2Target> = spec!(Move([5], (u8, L1, row_major), (u8, L1, row_major)));
         spec.canonicalize().unwrap();
         let decisions = vec![(
             0,
@@ -1450,12 +1616,24 @@ mod tests {
         )];
 
         {
-            let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+            let db = FilesDatabase::new::<Avx2Target>(
+                Some(db_path.path()),
+                TileScale::PowerOrThreePower,
+                1,
+                2,
+                1,
+            );
             assert!(!db.can_memoize_efficiently(&spec));
             db.put(spec.clone(), decisions.clone());
         }
 
-        let db = FilesDatabase::new::<Avx2Target>(Some(db_path.path()), true, 1, 2, 1);
+        let db = FilesDatabase::new::<Avx2Target>(
+            Some(db_path.path()),
+            TileScale::PowerOrThreePower,
+            1,
+            2,
+            1,
+        );
         assert_eq!(db.get(&spec), Some(ActionCostVec(decisions)));
     }
 
@@ -1495,7 +1673,7 @@ mod tests {
         ) {
             let top_spec = decision.spec.clone();
             let top_actions_costs = decision.actions_costs.clone();
-            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOrThreePower, 1, 2, 1);
             for (spec, actions_costs) in decision.consume_decisions() {
                 db.put(spec, actions_costs);
             }
@@ -1510,7 +1688,7 @@ mod tests {
             decision in arb_spec_and_decision::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let MemoryLimits::Standard(spec_limits) = decision.spec.1.clone();
-            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 128, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
 
             let top_logical_spec = decision.spec.0.clone();
             let top_actions_costs = decision.actions_costs.clone();
@@ -1804,7 +1982,7 @@ mod tests {
             spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             // Binary-scaling database
-            let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 2, 1);
+            let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOrThreePower, 1, 2, 1);
             let bimap = db.spec_bimap::<Avx2Target>();
 
             if BiMap::defined_for(&bimap, &spec) {
@@ -1820,11 +1998,12 @@ mod tests {
         }
 
         #[test]
-        fn test_can_memoize_efficiently_returns_true_for_non_binary_scale(
+        fn test_can_memoize_efficiently_returns_true_for_representable_specs(
             spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
-            let db = FilesDatabase::new::<Avx2Target>(None, false, 1, 2, 1);
-            assert!(db.can_memoize_efficiently(&spec), "All specs should be efficiently memoizable when binary_scale_shapes is false");
+            let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 2, 1);
+            assert!(db.can_memoize_efficiently(&spec));
+            assert!(db.can_memoize_efficiently(&spec), "All specs should be efficiently memoizable with TileScale::Linear");
         }
     }
 }

@@ -22,7 +22,7 @@ use std::{
 };
 
 use morello::common::{DimSize, Dtype, Shape};
-use morello::db::{ActionCostVec, FilesDatabase};
+use morello::db::{ActionCostVec, FilesDatabase, TileScale};
 use morello::grid::compose::Compose;
 use morello::grid::downscale::DownscaleSurMap;
 use morello::grid::general::SurMap;
@@ -156,7 +156,13 @@ where
     info!("DB statistic collection enabled");
 
     let threads = rayon::current_num_threads();
-    let db = FilesDatabase::new::<Tgt>(args.db.as_deref(), true, K, args.cache_size, threads);
+    let db = FilesDatabase::new::<Tgt>(
+        args.db.as_deref(),
+        TileScale::PowerOrThreePower,
+        K,
+        args.cache_size,
+        threads,
+    );
     main_per_db::<Tgt>(args, db, args.db.as_deref())
 }
 
@@ -279,7 +285,7 @@ fn process_spec<Tgt>(
 {
     let unscaled_surmap = LogicalSpecSurMap::new(
         PrimitiveBasicsBimap {
-            binary_scale_shapes: true,
+            tile_scale: TileScale::PowerOrThreePower,
         },
         TensorSpecAuxSurMap::new,
     );

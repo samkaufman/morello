@@ -358,7 +358,19 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_dim_1() {
-        assert_gen_tile_sizes(shape![16], [shape![1], shape![2], shape![4], shape![8]], 1);
+        assert_gen_tile_sizes(
+            shape![16],
+            [
+                shape![1],
+                shape![2],
+                shape![3],
+                shape![4],
+                shape![6],
+                shape![8],
+                shape![12],
+            ],
+            1,
+        );
     }
 
     #[test]
