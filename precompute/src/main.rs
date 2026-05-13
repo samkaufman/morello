@@ -53,6 +53,8 @@ const DB_PROGRESS_VERSION: usize = 4;
 const K: u8 = 1;
 const SUBWORKLIST_MAX_SIZE: usize = 5000;
 const DTYPES: [Dtype; 2] = [Dtype::Uint32, Dtype::Float32];
+/// If `true`, each task grid dimension will be log2-scaled to reduce the number of parallel tasks.
+const DOWNSCALE: bool = false;
 
 #[derive(clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -775,15 +777,19 @@ fn write_stages_completed<Tgt: Target>(
 }
 
 fn downscaler<'a>(unscaled_bound: Vec<BimapInt>) -> MaxVec<'a, DownscaleSurMap<'static>> {
-    let scales = unscaled_bound
-        .iter()
-        .map(|b| {
-            // Approximate f(b + 1) = (b + 1) / log2(b + 1), then snap to a power-of-two bucket size.
-            let levels = u32::max(1, bit_length((*b + 1).next_power_of_two() as u64) - 1);
-            let approx = u32::max(2, (*b + 1) / levels);
-            u32::max(1, approx.next_power_of_two() / 2)
-        })
-        .collect::<Vec<_>>();
+    let scales = if DOWNSCALE {
+        unscaled_bound
+            .iter()
+            .map(|b| {
+                // Approximate f(b + 1) = (b + 1) / log2(b + 1), then snap to a power-of-two bucket size.
+                let levels = u32::max(1, bit_length((*b + 1).next_power_of_two() as u64) - 1);
+                let approx = u32::max(2, (*b + 1) / levels);
+                u32::max(1, approx.next_power_of_two() / 2)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![1; unscaled_bound.len()]
+    };
     MaxVec(
         DownscaleSurMap::owned(scales),
         Arc::new(unscaled_bound),
