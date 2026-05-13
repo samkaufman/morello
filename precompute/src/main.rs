@@ -2,7 +2,7 @@
 use tikv_jemallocator::Jemalloc;
 
 use adler::Adler32;
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use clap::{Parser, ValueEnum};
 use log::info;
 use nonzero::nonzero as nz;
@@ -37,6 +37,7 @@ use morello::spec::{
 };
 use morello::target::{
     ArmTarget, Avx2Target, Avx512Target, CpuMemory, CpuTarget, Memory, Target, TargetId,
+    MEMORY_COUNT,
 };
 use morello::tensorspec::{TensorSpecAux, TensorSpecAuxSurMap};
 use morello::utils::{bit_length, diagonals};
@@ -65,6 +66,9 @@ struct Args {
     target: TargetId,
     #[arg(long, default_value = "matmul")]
     through: ThroughSpec,
+    /// Override memory limits for each memory (comma-separated integers)
+    #[arg(long, value_name = "RF,VRF,...")]
+    memory: Option<String>,
     #[arg(long, short, default_value = "1")]
     batch: DimSize,
     #[arg(long, default_value = "4")]
@@ -153,23 +157,22 @@ where
 
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new::<Tgt>(args.db.as_deref(), true, K, args.cache_size, threads);
-    main_per_db::<Tgt>(args, db, args.db.as_deref());
-
-    Ok(())
+    main_per_db::<Tgt>(args, db, args.db.as_deref())
 }
 
 fn main_per_db<Tgt>(
     args: &Args,
     #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
     db_path: Option<&path::Path>,
-) where
+) -> Result<()>
+where
     Tgt: CpuTarget,
     Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
     <Tgt::Memory as morello::grid::canon::CanonicalBimap>::Bimap:
         morello::grid::general::BiMap<Codomain = u8>,
 {
     let memories = Tgt::memories();
-    let MemoryLimits::Standard(top) = Tgt::max_mem();
+    let MemoryLimits::Standard(top) = memory_limits_for_args::<Tgt>(&args.memory)?;
 
     let phases = goal_phases::<Tgt>(args);
     let bounds: Vec<_> = phases.iter().flatten().cloned().collect();
@@ -231,6 +234,33 @@ fn main_per_db<Tgt>(
 
     drop(meta_update_tx);
     writer_handle.join().unwrap();
+
+    Ok(())
+}
+
+fn memory_limits_for_args<Tgt: Target>(memory: &Option<String>) -> Result<MemoryLimits> {
+    let Some(mem_override) = memory else {
+        return Ok(Tgt::max_mem());
+    };
+    let parsed = mem_override
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry
+                .parse::<u64>()
+                .with_context(|| format!("Failed to parse memory limit value `{entry}`"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        parsed.len() == MEMORY_COUNT,
+        "Expected {MEMORY_COUNT} memories but parsed {} from `{}`",
+        parsed.len(),
+        mem_override
+    );
+    Ok(MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(
+        parsed.try_into().unwrap(),
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
