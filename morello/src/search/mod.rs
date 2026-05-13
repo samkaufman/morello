@@ -252,36 +252,47 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_scale_db_memoizes_power_of_two_subspecs_not_original() {
+    fn test_factorized_shape_db_memoizes_representable_subspecs_not_original() {
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOfTwo, 1, 128, 1);
 
-        // Non-power-of-two spec (should not be memoized)
+        // Non-factorizable spec (should be stored in FilesDatabase's non-spatial cache)
+        let spec_5 = Spec::<Avx2Target>(
+            lspec!(Move([5], (u8, GL, row_major), (u8, RF, row_major))),
+            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
+        );
+        let result = top_down(&db, &spec_5, 1);
+        assert!(!result.is_empty(), "Should be able to synthesize Move([5])");
+        assert!(
+            db.get(&spec_5).is_some(),
+            "Database should contain Move([5]) despite not being a factorized size"
+        );
+
+        // Factorizable subspecs should be memoized spatially.
         let spec_3 = Spec::<Avx2Target>(
             lspec!(Move([3], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
-        let result = top_down_many(&db, std::slice::from_ref(&spec_3));
         assert!(
-            result.first().is_some_and(|r| !r.0.is_empty()),
-            "Should be able to synthesize Move([3])"
+            db.get(&spec_2).is_some(),
+            "Database should contain Move([3]) after synthesizing Move([5])"
         );
 
-        // Power-of-two subspecs should be memoized
         let spec_2 = Spec::<Avx2Target>(
             lspec!(Move([2], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
         assert!(
             db.get(&spec_2).is_some(),
-            "Database should contain Move([2]) after synthesizing Move([3])"
+            "Database should contain Move([2]) after synthesizing Move([5])"
         );
+
         let spec_1 = Spec::<Avx2Target>(
             lspec!(Move([1], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
         assert!(
             db.get(&spec_1).is_some(),
-            "Database should contain Move([1]) after synthesizing Move([3])"
+            "Database should contain Move([1]) after synthesizing Move([5])"
         );
     }
 
