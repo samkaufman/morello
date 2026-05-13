@@ -71,6 +71,20 @@ impl RTreePageContents {
         self.0.size()
     }
 
+    #[cfg(feature = "db-stats")]
+    pub fn spec_count(&self) -> u128 {
+        self.0
+            .iter()
+            .map(|(bottom, top, _)| {
+                bottom
+                    .iter()
+                    .zip(top)
+                    .map(|(bottom, top)| u128::try_from(top - bottom + 1).unwrap())
+                    .product::<u128>()
+            })
+            .sum()
+    }
+
     pub fn get(&self, inner_pt: &[u8], spec_volume: NonZeroU64) -> Option<ActionCostVec> {
         // TODO: Avoid conversion. Instead forward a slice right into locate_at_point.
         let arr = inner_pt.iter().map(|v| (*v).into()).collect::<Vec<_>>();

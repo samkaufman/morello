@@ -623,7 +623,7 @@ impl FilesDatabase {
         writers.page_writer.write_record(["page_path"]).unwrap();
         writers
             .block_writer
-            .write_record(["page_path", "rects"])
+            .write_record(["page_path", "rects", "spec_count"])
             .unwrap();
         writers
             .block_action_writer
@@ -1002,7 +1002,11 @@ fn analyze_visit_dir(
         let PageContents::RTree(r) = &page.contents;
         writers
             .block_writer
-            .write_record([&entry_path_str, &r.rect_count().to_string()])
+            .write_record([
+                &entry_path_str,
+                &r.rect_count().to_string(),
+                &r.spec_count().to_string(),
+            ])
             .unwrap();
 
         writers.page_writer.write_record([entry_path_str]).unwrap();
