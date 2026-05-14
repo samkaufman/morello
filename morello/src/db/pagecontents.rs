@@ -130,7 +130,8 @@ impl RTreePageContents {
             RegionScanResult::AllIntersectionsMatched {
                 all_intersections_equal: true,
             } => {
-                self.0.merge_insert(&bottom, &top, value, true);
+                self.0
+                    .merge_insert(&bottom, &top, value, cfg!(debug_assertions));
             }
             RegionScanResult::AllIntersectionsMatched {
                 all_intersections_equal: false,

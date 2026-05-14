@@ -587,22 +587,23 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         let mut to_insert = new_rect;
         let mut should_repeat = true;
         let mut skip_insert = false;
+        let mut needs_overlap_subtraction = false;
 
         while should_repeat {
             should_repeat = false;
+            needs_overlap_subtraction = false;
             let candidate_area = AABB::from_ordered_corners(
                 to_insert.bottom.arr.map(|b| b.saturating_sub(1)).into(),
                 to_insert.top.arr.map(|t| t.saturating_add(1)).into(),
             );
+            let insert_envelope = to_insert.envelope();
             for candidate in self.locate_in_envelope_intersecting(&candidate_area) {
                 let value_matches = candidate.value == to_insert.value;
 
                 // When the inserted rect has matching value and would be fully contained (or is identical),
                 // there's nothing to merge. The outer rect. would have already triggered applicable merge
                 // rules.
-                // TODO: Avoid constructing envelope if possible.
                 let candidate_envelope = candidate.envelope();
-                let insert_envelope = to_insert.envelope();
                 if candidate_envelope.contains_envelope(&insert_envelope) && value_matches {
                     // Assert the MainCost, but not the later tuple elements, are unchanged.
                     should_repeat = false;
@@ -649,21 +650,32 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     // If we expand insert to merge, we'll need to start over with a new
                     // scan with an updated to_insert.
                     // TODO: Starting over for every adjacent/mergeble rect has bad asymptotics!
+                    to_remove.queue_removal(candidate.clone());
                     break;
+                }
+
+                if value_matches && candidate_envelope.intersects(&insert_envelope) {
+                    needs_overlap_subtraction = true;
                 }
             }
 
-            let mut remove_count = 0usize;
             let expected_removals = to_remove.to_remove.len();
-            for _ in self.drain_with_selection_function(&to_remove) {
-                remove_count += 1;
+            if expected_removals != 0 {
+                let mut remove_count = 0usize;
+                for _ in self.drain_with_selection_function(&to_remove) {
+                    remove_count += 1;
+                }
+                assert_eq!(expected_removals, remove_count);
+                to_remove.clear();
             }
-            assert_eq!(expected_removals, remove_count);
-            to_remove.clear();
         }
 
         if !skip_insert {
-            insert_and_subtract_overlap(self, to_insert);
+            if needs_overlap_subtraction {
+                insert_and_subtract_overlap(self, to_insert);
+            } else {
+                self.insert(to_insert);
+            }
         }
     }
 
