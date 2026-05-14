@@ -114,6 +114,7 @@ struct AnalyzeWriters {
 enum ShardThreadMsg {
     Get(Prehashed<PageKey>),
     Put(PageKey, PageContents),
+    Flush(mpsc::Sender<()>),
     Exit,
 }
 
@@ -477,7 +478,7 @@ impl FilesDatabase {
         }
     }
 
-    /// Saves anything cached in memory to disk.
+    /// Saves anything cached in memory to disk, blocking until writes complete.
     pub fn save(&self) {
         for shard in &self.shards.0 {
             let mut shard_guard = shard.lock();
@@ -769,6 +770,9 @@ impl Shard {
                                 );
                             }
                         }
+                        Ok(ShardThreadMsg::Flush(done_tx)) => {
+                            done_tx.send(()).unwrap();
+                        }
                         Ok(ShardThreadMsg::Exit) => break,
                         Err(_) => unreachable!("expected Exit first"),
                     }
@@ -857,20 +861,17 @@ impl Shard {
         }
         debug_assert!(self.cache.peek(key).is_none(), "cache already had {key:?}");
         self.outstanding_gets.insert(prehashed_clone(key));
-        self.thread_tx
-            .send(ShardThreadMsg::Get(prehashed_clone(key)))
-            .unwrap();
+        self.send_msg(ShardThreadMsg::Get(prehashed_clone(key)));
         true
     }
 
-    fn async_put(&self, key: PageKey, value: PageContents) {
-        self.thread_tx
-            .send(ShardThreadMsg::Put(key, value))
-            .unwrap();
+    fn async_put(&mut self, key: PageKey, value: PageContents) {
+        self.send_msg(ShardThreadMsg::Put(key, value));
     }
 
     fn save(&mut self) {
-        let tx = self.thread_tx.clone();
+        self.finish_outstanding_gets();
+        let mut writes = Vec::new();
         for (k, v) in self.cache.iter_mut() {
             // Clone so that the background thread has an immutable copy of the data to write, even
             // if the calling or another thread would update data in the cache.
@@ -878,11 +879,40 @@ impl Shard {
             //       we have the `&self` reference.
             if v.modified {
                 v.modified = false;
-                tx.send(ShardThreadMsg::Put(
-                    Prehashed::as_inner(k).clone(),
-                    v.contents.clone(),
-                ))
-                .unwrap();
+                writes.push((Prehashed::as_inner(k).clone(), v.contents.clone()));
+            }
+        }
+        for (key, value) in writes {
+            self.async_put(key, value);
+        }
+        let (done_tx, done_rx) = mpsc::channel();
+        self.send_msg(ShardThreadMsg::Flush(done_tx));
+        done_rx
+            .recv()
+            .expect("shard thread exited before flushing database writes");
+    }
+
+    fn finish_outstanding_gets(&mut self) {
+        while !self.outstanding_gets.is_empty() {
+            let msg = self
+                .blocking_recv()
+                .expect("shard thread exited before loading outstanding database pages");
+            self.process_bg_thread_msg_inner(msg);
+        }
+    }
+
+    fn send_msg(&mut self, mut msg: ShardThreadMsg) {
+        loop {
+            match self.thread_tx.try_send(msg) {
+                Ok(()) => return,
+                Err(mpsc::TrySendError::Full(returned_msg)) => {
+                    msg = returned_msg;
+                    self.process_available_bg_thread_msgs();
+                    std::thread::yield_now();
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    panic!("shard thread exited before accepting database command");
+                }
             }
         }
     }
@@ -900,7 +930,7 @@ impl Shard {
 
 impl Drop for Shard {
     fn drop(&mut self) {
-        self.thread_tx.send(ShardThreadMsg::Exit).unwrap();
+        self.send_msg(ShardThreadMsg::Exit);
         self.process_bg_thread_msgs_until_close();
         self.thread.take().unwrap().join().unwrap();
     }

@@ -375,13 +375,13 @@ fn process_spec<Tgt>(
         #[cfg(feature = "db-stats")]
         log_db_stats(db, &total_synthesis_ms);
 
-        if let Err(err) = progress_sender.send((bound_spec.clone(), stage_within_spec)) {
-            log::error!("Failed to enqueue progress update for {bound_spec}: {err:?}");
-        }
-
         let save_start = Instant::now();
         db.save();
         info!("Saving took {:?}", save_start.elapsed());
+
+        if let Err(err) = progress_sender.send((bound_spec.clone(), stage_within_spec)) {
+            log::error!("Failed to enqueue progress update for {bound_spec}: {err:?}");
+        }
     }
 }
 
