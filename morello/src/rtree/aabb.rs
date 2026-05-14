@@ -1,6 +1,8 @@
 use super::RTreePt;
 use rstar::{Point, RTreeObject};
 use serde::{Deserialize, Serialize};
+#[cfg(target_feature = "avx512f")]
+use wide::i64x8;
 use wide::{i64x4, CmpGt};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,11 +39,21 @@ impl<const D: usize> AABB<D> {
         point: &[i64; D],
     ) -> bool {
         let mut i = 0usize;
+        #[cfg(target_feature = "avx512f")]
+        while i + 8 <= D {
+            let pv = i64x8::from(&point[i..i + 8]);
+            let l = i64x8::from(&lower[i..i + 8]);
+            let u = i64x8::from(&upper[i..i + 8]);
+            if (l.simd_gt(pv) | pv.simd_gt(u)).any() {
+                return false;
+            }
+            i += 8;
+        }
         while i + 4 <= D {
             let pv = i64x4::from(&point[i..i + 4]);
             let l = i64x4::from(&lower[i..i + 4]);
             let u = i64x4::from(&upper[i..i + 4]);
-            if (l.cmp_gt(pv) | pv.cmp_gt(u)).any() {
+            if (l.simd_gt(pv) | pv.simd_gt(u)).any() {
                 return false;
             }
             i += 4;
@@ -76,7 +88,7 @@ impl<const D: usize> AABB<D> {
             i += 4;
         }
 
-        let lanes = vacc.as_array_ref();
+        let lanes = vacc.as_array();
         let mut acc: i64 = lanes[0] + lanes[1] + lanes[2] + lanes[3];
 
         while i < D {
@@ -127,7 +139,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             let bl = i64x4::from(&other.lower.arr[i..i + 4]);
             let au = i64x4::from(&self.upper.arr[i..i + 4]);
             let bu = i64x4::from(&other.upper.arr[i..i + 4]);
-            fail = fail | (al.cmp_gt(bl) | bu.cmp_gt(au));
+            fail = fail | (al.simd_gt(bl) | bu.simd_gt(au));
             i += 4;
         }
         if fail.any() {
@@ -149,16 +161,16 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             // lower = min(self.lower, other.lower)
             let al = i64x4::from(&self.lower.arr[i..i + 4]);
             let bl = i64x4::from(&other.lower.arr[i..i + 4]);
-            let m_l = al.cmp_gt(bl);
+            let m_l = al.simd_gt(bl);
             let lmin = (bl & m_l) | (al & !m_l);
-            self.lower.arr[i..i + 4].copy_from_slice(lmin.as_array_ref());
+            self.lower.arr[i..i + 4].copy_from_slice(lmin.as_array());
 
             // upper = max(self.upper, other.upper)
             let au = i64x4::from(&self.upper.arr[i..i + 4]);
             let bu = i64x4::from(&other.upper.arr[i..i + 4]);
-            let m_u = au.cmp_gt(bu);
+            let m_u = au.simd_gt(bu);
             let umax = (au & m_u) | (bu & !m_u);
-            self.upper.arr[i..i + 4].copy_from_slice(umax.as_array_ref());
+            self.upper.arr[i..i + 4].copy_from_slice(umax.as_array());
 
             i += 4;
         }
@@ -187,7 +199,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             let au = i64x4::from(&self.upper.arr[i..i + 4]);
             let bl = i64x4::from(&other.lower.arr[i..i + 4]);
             let bu = i64x4::from(&other.upper.arr[i..i + 4]);
-            if (al.cmp_gt(bu) | bl.cmp_gt(au)).any() {
+            if (al.simd_gt(bu) | bl.simd_gt(au)).any() {
                 return false;
             }
             i += 4;
@@ -212,7 +224,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             vacc = vacc * d;
             i += 4;
         }
-        let lanes = vacc.as_array_ref();
+        let lanes = vacc.as_array();
         let mut prod: i64 = lanes[0] * lanes[1] * lanes[2] * lanes[3];
         while i < D {
             prod *= self.upper.arr[i] - self.lower.arr[i];
@@ -252,9 +264,9 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             i += 4;
         }
 
-        let lanes_sum = sum_max.as_array_ref();
+        let lanes_sum = sum_max.as_array();
         let mut acc_sum: i64 = lanes_sum[0] + lanes_sum[1] + lanes_sum[2] + lanes_sum[3];
-        let lanes_maxd = max_diff.as_array_ref();
+        let lanes_maxd = max_diff.as_array();
         let mut acc_maxdiff: i64 = lanes_maxd[0]
             .max(lanes_maxd[1])
             .max(lanes_maxd[2])
@@ -285,7 +297,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             let u = i64x4::from(&self.upper.arr[i..i + 4]);
             let mid = l + ((u - l) >> 1i64);
             // Store lanes into the output slice without horizontal ops.
-            out[i..i + 4].copy_from_slice(mid.as_array_ref());
+            out[i..i + 4].copy_from_slice(mid.as_array());
             i += 4;
         }
         while i < D {
@@ -321,7 +333,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             vacc = vacc * d;
             i += 4;
         }
-        let lanes = vacc.as_array_ref();
+        let lanes = vacc.as_array();
         let mut prod: i64 = lanes[0] * lanes[1] * lanes[2] * lanes[3];
         while i < D {
             let lmax = self.lower.arr[i].max(other.lower.arr[i]);
@@ -342,7 +354,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             vacc = vacc + (u - l);
             i += 4;
         }
-        let lanes = vacc.as_array_ref();
+        let lanes = vacc.as_array();
         let mut sum: i64 = lanes[0] + lanes[1] + lanes[2] + lanes[3];
         while i < D {
             sum += self.upper.arr[i] - self.lower.arr[i];
