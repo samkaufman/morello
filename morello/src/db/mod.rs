@@ -1803,7 +1803,7 @@ mod tests {
             let db = FilesDatabase::new::<Avx2Target>(None, true, 1, 2, 1);
             let bimap = db.spec_bimap::<Avx2Target>();
 
-            if db.can_memoize_efficiently(&spec) {
+            if BiMap::defined_for(&bimap, &spec) {
                 // If can_memoize_efficiently returns true, apply should not panic
                 let _ = BiMap::apply(&bimap, &spec);
             } else {
