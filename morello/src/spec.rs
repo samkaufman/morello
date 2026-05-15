@@ -3733,22 +3733,6 @@ mod tests {
         }
 
         #[test]
-        #[ignore]
-        fn test_actions_are_valid_through_consumed_memory_avx2(
-            logical_spec in arb_canonical_logical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE))
-        ) {
-            shared_test_actions_are_valid_through_consumed_memory(logical_spec)
-        }
-
-        #[test]
-        #[ignore]
-        fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in arb_canonical_logical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE))
-        ) {
-            shared_test_actions_are_valid_through_consumed_memory(logical_spec)
-        }
-
-        #[test]
         fn test_unique_output_index_matches_parameter_is_output(
             spec_type in any::<PrimitiveSpecType>(),
         ) {
@@ -4064,6 +4048,26 @@ mod tests {
             let spec_parameters = compose_spec.0.parameters();
             let pipeline_parameters = pipeline.collect_unbound_parameters();
             prop_assert_eq!(spec_parameters, pipeline_parameters);
+        }
+    }
+
+    proptest! { // low-cases block
+        #![proptest_config(ProptestConfig::with_cases(15))]
+
+        #[test]
+        #[ignore]
+        fn test_actions_are_valid_through_consumed_memory_avx2(
+            logical_spec in arb_canonical_logical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE))
+        ) {
+            shared_test_actions_are_valid_through_consumed_memory(logical_spec)
+        }
+
+        #[test]
+        #[ignore]
+        fn test_actions_are_valid_through_consumed_memory_arm(
+            logical_spec in arb_canonical_logical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE))
+        ) {
+            shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
     }
 

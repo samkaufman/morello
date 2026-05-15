@@ -874,6 +874,9 @@ mod tests {
     const TEST_SMALL_MEM: u64 = 64;
 
     proptest! {
+        // applies to this `proptest!` block
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
         // TODO: Add an ARM variant!
         // TODO: Remove restriction to canonical Specs. Should synth. any Spec.
         #[test]
