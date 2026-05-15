@@ -3671,20 +3671,20 @@ mod tests {
     /// Verifies compose matmul tiling records every component parameter shape exactly as the tiles
     /// passed between stages.
     fn test_compose_matmul_component_parameter_shapes_match_tiles() {
-    let spec = compose_matmul_spec_for_tiling_test();
-    let inferred_input_tilings = spec
-        .0
-        .input_tilings_for_tile_out(&Tiling::new_simple(shape![1, 4, 16]))
-        .expect("compose should infer tilings");
-    let expected_component_shapes = vec![
-        vec![shape![1, 4, 64], shape![1, 64, 16], shape![1, 4, 16]],
-        vec![shape![1, 4, 32], shape![1, 32, 64], shape![1, 4, 64]],
-    ];
-    assert_eq!(
-        inferred_input_tilings.component_parameter_shapes,
-        expected_component_shapes
-    );
-}
+        let spec = compose_matmul_spec_for_tiling_test();
+        let inferred_input_tilings = spec
+            .0
+            .input_tilings_for_tile_out(&Tiling::new_simple(shape![1, 4, 16]))
+            .expect("compose should infer tilings");
+        let expected_component_shapes = vec![
+            vec![shape![1, 4, 64], shape![1, 64, 16], shape![1, 4, 16]],
+            vec![shape![1, 4, 32], shape![1, 32, 64], shape![1, 4, 64]],
+        ];
+        assert_eq!(
+            inferred_input_tilings.component_parameter_shapes,
+            expected_component_shapes
+        );
+    }
 
     // TODO: Replace this with a proptest (unless one exists).
     #[test]
@@ -3692,24 +3692,24 @@ mod tests {
     /// slices actually consumed by the pipeline (which may be smaller than the static
     /// `input_shapes`).
     fn test_compose_matmul_input_tilings_match_input_shapes() {
-    let spec = compose_matmul_spec_for_tiling_test();
-    let inferred_input_tilings = spec
-        .0
-        .input_tilings_for_tile_out(&Tiling::new_simple(shape![1, 4, 16]))
-        .expect("compose should infer tilings");
-    let inferred_shapes: Vec<Shape> = inferred_input_tilings
-        .input_tilings
-        .0
-        .iter()
-        .map(|(tiling, _)| tiling.shape().clone())
-        .collect();
-    let expected_shapes = vec![
-        shape![1, 64, 16], // operand 0 keeps full rows
-        shape![1, 4, 32],  // operand 1 shrinks to the dependency slice feeding component 0
-        shape![1, 32, 64], // operand 2 keeps full rows
-    ];
-    assert_eq!(inferred_shapes, expected_shapes);
-}
+        let spec = compose_matmul_spec_for_tiling_test();
+        let inferred_input_tilings = spec
+            .0
+            .input_tilings_for_tile_out(&Tiling::new_simple(shape![1, 4, 16]))
+            .expect("compose should infer tilings");
+        let inferred_shapes: Vec<Shape> = inferred_input_tilings
+            .input_tilings
+            .0
+            .iter()
+            .map(|(tiling, _)| tiling.shape().clone())
+            .collect();
+        let expected_shapes = vec![
+            shape![1, 64, 16], // operand 0 keeps full rows
+            shape![1, 4, 32],  // operand 1 shrinks to the dependency slice feeding component 0
+            shape![1, 32, 64], // operand 2 keeps full rows
+        ];
+        assert_eq!(inferred_shapes, expected_shapes);
+    }
 
     #[test]
     fn test_dim_range_with_odd_max() {
@@ -4197,45 +4197,45 @@ mod tests {
     ///     serial), [0, 16, 1024, 524288])
     /// ```
     fn compose_matmul_spec_for_tiling_test() -> Spec<Avx2Target> {
-    const BATCH: u32 = 1;
-    let basics_accum = PrimitiveBasics {
-        typ: PrimitiveSpecType::Matmul { accum: true },
-        spec_shape: shape![BATCH, 8, 64, 16],
-        dtypes: vec![Dtype::Float32; 3],
-    };
-    let basics = PrimitiveBasics {
-        typ: PrimitiveSpecType::Matmul { accum: false },
-        spec_shape: shape![BATCH, 8, 32, 64],
-        dtypes: vec![Dtype::Float32; 3],
-    };
-    let operand_shapes = [
-        shape![BATCH, 64, 16],
-        shape![BATCH, 8, 32],
-        shape![BATCH, 32, 64],
-        shape![BATCH, 8, 16],
-    ];
-    let operand_auxes: Vec<_> = operand_shapes
-        .iter()
-        .map(|shape| TensorSpecAux {
-            memory: GL,
-            layout: row_major(shape),
-            vector_size: None,
-        })
-        .collect();
-    let spec = Spec::<Avx2Target>(
-        LogicalSpec::Compose {
-            components: vec![basics_accum, basics],
-            operand_auxes,
-            serial_only: true,
-        },
-        MemoryLimits::Standard(MemVec::new_for_target::<Avx2Target>([0, 16, 1024, 524288])),
-    );
-    assert!(
-        spec.is_canonical(),
-        "compose spec in regression test must stay canonical"
-    );
-    spec
-}
+        const BATCH: u32 = 1;
+        let basics_accum = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: true },
+            spec_shape: shape![BATCH, 8, 64, 16],
+            dtypes: vec![Dtype::Float32; 3],
+        };
+        let basics = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: shape![BATCH, 8, 32, 64],
+            dtypes: vec![Dtype::Float32; 3],
+        };
+        let operand_shapes = [
+            shape![BATCH, 64, 16],
+            shape![BATCH, 8, 32],
+            shape![BATCH, 32, 64],
+            shape![BATCH, 8, 16],
+        ];
+        let operand_auxes: Vec<_> = operand_shapes
+            .iter()
+            .map(|shape| TensorSpecAux {
+                memory: GL,
+                layout: row_major(shape),
+                vector_size: None,
+            })
+            .collect();
+        let spec = Spec::<Avx2Target>(
+            LogicalSpec::Compose {
+                components: vec![basics_accum, basics],
+                operand_auxes,
+                serial_only: true,
+            },
+            MemoryLimits::Standard(MemVec::new_for_target::<Avx2Target>([0, 16, 1024, 524288])),
+        );
+        assert!(
+            spec.is_canonical(),
+            "compose spec in regression test must stay canonical"
+        );
+        spec
+    }
 
     fn shared_test_no_action_panics<Tgt: Target>(spec: Spec<Tgt>) {
         for action in Tgt::actions(&spec.0) {
@@ -4267,68 +4267,68 @@ mod tests {
 
     /// Asserts that actions appear at all memory limits at and above memory consumed.
     fn shared_test_actions_are_valid_through_consumed_memory<Tgt: Target>(
-    logical_spec: LogicalSpec<Tgt>,
-) {
-    fn peak_memory<Tgt: Target>(imp: &ImplNode<Tgt>) -> MemVec {
-        let children = imp.children();
-        let mut child_peaks = Vec::with_capacity(children.len());
-        for child in children {
-            child_peaks.push(peak_memory(child));
+        logical_spec: LogicalSpec<Tgt>,
+    ) {
+        fn peak_memory<Tgt: Target>(imp: &ImplNode<Tgt>) -> MemVec {
+            let children = imp.children();
+            let mut child_peaks = Vec::with_capacity(children.len());
+            for child in children {
+                child_peaks.push(peak_memory(child));
+            }
+            imp.memory_allocated()
+                .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
         }
-        imp.memory_allocated()
-            .peak_memory_from_child_peaks::<Tgt>(&child_peaks)
-    }
 
-    // If an action consumes x bytes, then it should be valid for any Spec
-    // with the same logical Spec at that memory limit and up. To keep
-    // performance acceptable, we limit memory.
-    let mut maxes = vec![];
-    let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
-    for v in maxes_vec.iter() {
-        maxes.push(v.min(64));
-    }
+        // If an action consumes x bytes, then it should be valid for any Spec
+        // with the same logical Spec at that memory limit and up. To keep
+        // performance acceptable, we limit memory.
+        let mut maxes = vec![];
+        let MemoryLimits::Standard(maxes_vec) = Tgt::max_mem();
+        for v in maxes_vec.iter() {
+            maxes.push(v.min(64));
+        }
 
-    // The list of actions depends only on the logical Spec. Filtering by memory limit happens
-    // at application. So it's safe to just collect the list of actions once, up front.
-    let mut unseen_actions = Tgt::actions(&logical_spec).collect::<Vec<_>>();
+        // The list of actions depends only on the logical Spec. Filtering by memory limit happens
+        // at application. So it's safe to just collect the list of actions once, up front.
+        let mut unseen_actions = Tgt::actions(&logical_spec).collect::<Vec<_>>();
 
-    let mut shared_spec = Spec(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>()));
-    let mut diagonal_idx = 0;
-    loop {
-        let mut empty = true;
-        for pt in sum_seqs(&maxes, diagonal_idx) {
-            empty = false;
-            let Ok(pt_arr): Result<[u64; MEMORY_COUNT], _> = pt.try_into() else {
-                panic!("Expected length {MEMORY_COUNT}");
-            };
-            shared_spec.1 = MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(pt_arr));
-            assert!(shared_spec.is_canonical());
-            let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
-            // TODO: Assert that nothing disappears?
-            for i in (0..unseen_actions.len()).rev() {
-                // We could use `apply` for safety, but instead we use `apply_unchecked_canon`
-                // since we assert the shared_spec is canonical outside the loop.
-                match unseen_actions[i].apply_unchecked_canon(&shared_spec) {
-                    Ok(applied) => {
-                        unseen_actions.swap_remove(i);
-                        // TODO: Should we also assert that applying the same action for each target memory
-                        //   doesn't actually accumulate additional memory?.
-                        // TODO: Can we assert that the change in peak memory is exactly the
-                        //   additional amount at the limit?.
-                        // TODO: Assert here that the min of each memory-wise limit is zero.
-                        assert_eq!(&peak_memory(&applied), limits_memvec);
+        let mut shared_spec = Spec(logical_spec, MemoryLimits::Standard(MemVec::zero::<Tgt>()));
+        let mut diagonal_idx = 0;
+        loop {
+            let mut empty = true;
+            for pt in sum_seqs(&maxes, diagonal_idx) {
+                empty = false;
+                let Ok(pt_arr): Result<[u64; MEMORY_COUNT], _> = pt.try_into() else {
+                    panic!("Expected length {MEMORY_COUNT}");
+                };
+                shared_spec.1 = MemoryLimits::Standard(MemVec::new_for_target::<Tgt>(pt_arr));
+                assert!(shared_spec.is_canonical());
+                let MemoryLimits::Standard(limits_memvec) = &shared_spec.1;
+                // TODO: Assert that nothing disappears?
+                for i in (0..unseen_actions.len()).rev() {
+                    // We could use `apply` for safety, but instead we use `apply_unchecked_canon`
+                    // since we assert the shared_spec is canonical outside the loop.
+                    match unseen_actions[i].apply_unchecked_canon(&shared_spec) {
+                        Ok(applied) => {
+                            unseen_actions.swap_remove(i);
+                            // TODO: Should we also assert that applying the same action for each target memory
+                            //   doesn't actually accumulate additional memory?.
+                            // TODO: Can we assert that the change in peak memory is exactly the
+                            //   additional amount at the limit?.
+                            // TODO: Assert here that the min of each memory-wise limit is zero.
+                            assert_eq!(&peak_memory(&applied), limits_memvec);
+                        }
+                        Err(ApplyError::NotApplicable(_)) => {}
+                        Err(ApplyError::SpecNotCanonical) => panic!(),
                     }
-                    Err(ApplyError::NotApplicable(_)) => {}
-                    Err(ApplyError::SpecNotCanonical) => panic!(),
                 }
             }
+            if empty {
+                break;
+            }
+            diagonal_idx += 1;
         }
-        if empty {
-            break;
-        }
-        diagonal_idx += 1;
     }
-}
 
     fn arb_spec_action_and_lower_limit<Tgt: Target>(
     ) -> impl Strategy<Value = (Spec<Tgt>, Action<Tgt>, ImplNode<Tgt>, MemoryLimits)> {
