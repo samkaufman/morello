@@ -1,8 +1,7 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::mem::replace;
-use std::rc::Rc;
-use std::slice;
+mod algo;
+mod bindings;
+mod reducer;
+mod spectask;
 
 use crate::cost::Cost;
 use crate::db::{ActionCostVec, ActionNum, FilesDatabase};
@@ -13,196 +12,78 @@ use crate::reconstruct::reconstruct_impls_from_actions;
 use crate::spec::Spec;
 use crate::target::Target;
 
+use bindings::SpecProblem;
 pub use reducer::ImplReducer; // TODO: Ideally, ImplReducer isn't `pub`
 use spectask::SpecTask;
 
-mod blocksearch;
-mod reducer;
-mod spectask;
-mod utils;
-
 type RequestId = (usize, usize);
-type WorkingPartialImplHandle = (usize, RequestId);
 
-struct TopDownSearch<'d, Tgt: Target> {
-    db: &'d FilesDatabase,
-    top_k: usize,
-    thread_idx: usize,
-    thread_count: usize,
-    phantom: std::marker::PhantomData<Tgt>,
-}
-
-// Computes an optimal Impl for `goal` and stores it in `db`.
-pub fn top_down<Tgt>(db: &FilesDatabase, goal: &Spec<Tgt>, top_k: usize) -> Vec<(ActionNum, Cost)>
+pub fn top_down_many<Tgt>(db: &FilesDatabase, goals: &[Spec<Tgt>]) -> Vec<ActionCostVec>
 where
     Tgt: Target,
     Tgt::Memory: CanonicalBimap,
     <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    top_down_many(db, slice::from_ref(goal), top_k)
+    assert!(db.max_k().is_none_or(|k| k >= 1));
+
+    let problem = SpecProblem::<Tgt>::default();
+
+    goals
+        .iter()
+        .map(|goal| {
+            let mut canonical_goal = goal.clone();
+            canonical_goal
+                .canonicalize()
+                .expect("should be possible to canonicalize goal Spec");
+            debug_assert!(canonical_goal.is_canonical());
+            algo::solve(problem.clone(), db, canonical_goal)
+        })
+        .collect()
+}
+
+pub fn top_down<Tgt>(db: &FilesDatabase, goal: &Spec<Tgt>) -> Vec<(ActionNum, Cost)>
+where
+    Tgt: Target,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+{
+    top_down_many(db, std::slice::from_ref(goal))
         .into_iter()
         .next()
         .unwrap()
         .0
 }
 
-/// Synthesizes implementations of the given goals.
-pub fn top_down_many<Tgt>(
-    db: &FilesDatabase,
-    goals: &[Spec<Tgt>],
-    top_k: usize,
-) -> Vec<ActionCostVec>
-where
-    Tgt: Target,
-    Tgt::Memory: CanonicalBimap,
-    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
-    top_down_many_internal(db, goals, top_k)
-}
-
-/// Synthesizes implementations of the given goals using spatial database queries
-/// to accelerate batched child lookups.
-pub fn top_down_many_spatial<Tgt>(
-    db: &FilesDatabase,
-    goals: &[Spec<Tgt>],
-    top_k: usize,
-) -> Vec<ActionCostVec>
-where
-    Tgt: Target,
-    Tgt::Memory: CanonicalBimap,
-    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
-    top_down_many_internal_with_spatial_queries(db, goals, top_k, true)
-}
-
 /// Returns optimal implementations of each goal [Spec].
-///
-/// In contrast to [top_down_many], this function returns fully materialized [ImplNode]s, not just
-/// [ActionCostVec]s.
-pub fn top_down_many_impls<Tgt>(
-    db: &FilesDatabase,
-    goals: &[Spec<Tgt>],
-    top_k: usize,
-) -> Vec<Vec<ImplNode<Tgt>>>
+pub fn top_down_many_impls<Tgt>(db: &FilesDatabase, goals: &[Spec<Tgt>]) -> Vec<Vec<ImplNode<Tgt>>>
 where
     Tgt: Target,
     Tgt::Memory: CanonicalBimap,
     <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
 {
-    let action_costs = top_down_many_internal(db, goals, top_k);
+    let canonical_goals = goals
+        .iter()
+        .map(|goal| {
+            let mut canonical_goal = goal.clone();
+            canonical_goal
+                .canonicalize()
+                .expect("should be possible to canonicalize goal Spec");
+            canonical_goal
+        })
+        .collect::<Vec<_>>();
+    let action_costs = top_down_many(db, &canonical_goals);
     let lookup = move |spec: &Spec<Tgt>| db.get(spec);
     action_costs
         .into_iter()
-        .zip(goals.iter())
+        .zip(canonical_goals.iter())
         .map(|(costs, goal)| {
             if costs.0.is_empty() {
                 Vec::new()
             } else {
-                let mut canonical_goal = goal.clone();
-                canonical_goal
-                    .canonicalize()
-                    .expect("should be possible to canonicalize goal Spec");
-                reconstruct_impls_from_actions(&lookup, &canonical_goal, costs)
+                reconstruct_impls_from_actions(&lookup, goal, costs)
             }
         })
         .collect()
-}
-
-fn top_down_many_internal<Tgt>(
-    db: &FilesDatabase,
-    goals: &[Spec<Tgt>],
-    top_k: usize,
-) -> Vec<ActionCostVec>
-where
-    Tgt: Target,
-    Tgt::Memory: CanonicalBimap,
-    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
-    top_down_many_internal_with_spatial_queries(db, goals, top_k, false)
-}
-
-/// Shared implementation for top-down synthesis with optional spatial database-page probing.
-fn top_down_many_internal_with_spatial_queries<Tgt>(
-    db: &FilesDatabase,
-    goals: &[Spec<Tgt>],
-    top_k: usize,
-    spatial_queries: bool,
-) -> Vec<ActionCostVec>
-where
-    Tgt: Target,
-    Tgt::Memory: CanonicalBimap,
-    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
-    assert!(db.max_k().is_none_or(|k| k >= top_k));
-    if top_k > 1 {
-        unimplemented!("Search for top_k > 1 not yet implemented.");
-    }
-
-    // Group goals by database page (or `None` if they use the non-spatial cache).
-    let mut grouped_canonical_goals = HashMap::<_, (Vec<_>, Vec<usize>)>::new();
-    for (idx, goal) in goals.iter().enumerate() {
-        let mut canonical_goal = goal.clone();
-        canonical_goal
-            .canonicalize()
-            .expect("should be possible to canonicalize goal Spec");
-
-        let key = db.can_memoize_efficiently(&canonical_goal).then(|| {
-            let page = db.page_id(&canonical_goal);
-            (page.table_key, page.page_id)
-        });
-        let group_tuple = grouped_canonical_goals.entry(key).or_default();
-        group_tuple.0.push(canonical_goal);
-        group_tuple.1.push(idx);
-    }
-
-    // Synthesize each group with BlockSearch. Scatter results into combined_results.
-    let mut combined_results = vec![Default::default(); goals.len()];
-    for (group, original_indices) in grouped_canonical_goals.values() {
-        let search = TopDownSearch {
-            db,
-            top_k,
-            thread_idx: 0,
-            thread_count: 1,
-            phantom: std::marker::PhantomData,
-        };
-        let mut complete = |spec: &Spec<Tgt>, task: Rc<RefCell<SpecTask<Tgt>>>| {
-            process_complete_task(&search, spec, task)
-        };
-        let result = if spatial_queries {
-            blocksearch::synthesize::<true, _, _>(group, &search, None, None, &mut complete)
-        } else {
-            blocksearch::synthesize::<false, _, _>(group, &search, None, None, &mut complete)
-        };
-
-        for (r, &i) in result.into_iter().zip(original_indices) {
-            combined_results[i] = r;
-        }
-    }
-
-    combined_results
-}
-
-fn process_complete_task<Tgt>(
-    search: &TopDownSearch<'_, Tgt>,
-    spec: &Spec<Tgt>,
-    task: Rc<RefCell<SpecTask<Tgt>>>,
-) -> ActionCostVec
-where
-    Tgt: Target,
-    Tgt::Memory: CanonicalBimap,
-    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
-{
-    let Some((task_result, from_db)) = replace(
-        &mut *task.borrow_mut(),
-        SpecTask::completed(ActionCostVec(Vec::new()), true),
-    )
-    .into_result() else {
-        unreachable!("Expected goal to be complete.");
-    };
-    if !from_db {
-        search.db.put_canon(spec, task_result.0.clone());
-    }
-    task_result
 }
 
 #[cfg(test)]
@@ -241,7 +122,7 @@ mod tests {
             spec in arb_canonical_primitive_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
             let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 2048, 1);
-            top_down(&db, &spec, 1);
+            top_down_one(&db, &spec);
         }
 
         // TODO: Uncomment this test once search performance is back.
@@ -253,7 +134,7 @@ mod tests {
         //     spec in arb_canonical_compose_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         // ) {
         //     let db = FilesDatabase::new(None, TileScale::Linear, 1, 2048, 1);
-        //     top_down(&db, &spec, 1);
+        //     top_down_one(&db, &spec);
         // }
 
         // TODO: Uncomment this test once search performance is back.
@@ -265,7 +146,7 @@ mod tests {
         //     spec in arb_canonical_compose_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         // ) {
         //     let db = FilesDatabase::new(None, TileScale::Linear, 1, 2048, 1);
-        //     top_down(&db, &spec, 1);
+        //     top_down_one(&db, &spec);
         // }
 
         #[test]
@@ -277,15 +158,16 @@ mod tests {
             let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
 
             // Solve the first, lower Spec.
-            let lower_result_vec = top_down(&db, &spec, 1);
+            let lower_result_vec = top_down_one(&db, &spec);
 
             // If the lower spec can't be solved, then there is no way for the raised Spec to have
             // a worse solution, so we can return here.
-            if let Some((_, lower_cost)) = lower_result_vec.first() {
+            if let Some((_, lower_cost)) = lower_result_vec.0.first() {
                 // Check that the raised result has no lower cost and does not move from being
                 // possible to impossible.
-                let raised_result = top_down(&db, &raised_spec, 1);
+                let raised_result = top_down_one(&db, &raised_spec);
                 let (_, raised_cost) = raised_result
+                    .0
                     .first()
                     .expect("raised result should be possible");
                 assert!(raised_cost <= lower_cost);
@@ -297,18 +179,23 @@ mod tests {
         fn test_synthesis_at_peak_memory_yields_same_decision(
             spec in arb_canonical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE), Some(TEST_SMALL_MEM))
         ) {
+            println!("synth (new) test: {spec}");
+
             let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
-            let first_solutions = top_down(&db, &spec, 1);
+            let first_solutions = top_down_many(&db, std::slice::from_ref(&spec));
             let first_peak = if let Some(first_sol) = first_solutions.first() {
-                first_sol.1.peaks.clone()
+                first_sol
+                    .0
+                    .first()
+                    .map(|(_, cost)| cost.peaks.clone())
+                    .unwrap_or_else(MemVec::zero::<Avx2Target>)
             } else {
                 MemVec::zero::<Avx2Target>()
             };
             let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-            let lower_solutions = top_down(&db, &lower_spec, 1);
+            let lower_solutions = top_down_many(&db, std::slice::from_ref(&lower_spec));
             assert_eq!(first_solutions, lower_solutions);
         }
-
     }
 
     // TODO: Add a variant which checks that all Impls have their deps, not just the solution.
@@ -331,13 +218,13 @@ mod tests {
         );
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
 
-        let action_costs = top_down(&db, &spec, 1);
+        let action_costs = top_down_one(&db, &spec);
 
         // Check that the synthesized Impl, include all sub-Impls are in the database. `get_impl`
         // requires all dependencies, so we use that.
         assert!(
             db.get_impl(&spec).is_some(),
-            "No Impl stored for Spec: {spec}; top_down returned: {action_costs:?}"
+            "No Impl stored for Spec: {spec}; top_down_many returned: {action_costs:?}"
         );
     }
 
@@ -349,49 +236,44 @@ mod tests {
         );
 
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
-        let first_solutions = top_down(&db, &spec, 1);
+        let first_solutions = top_down_many(&db, std::slice::from_ref(&spec));
         let first_peak = if let Some(first_sol) = first_solutions.first() {
-            first_sol.1.peaks.clone()
+            first_sol
+                .0
+                .first()
+                .map(|(_, cost)| cost.peaks.clone())
+                .unwrap_or_else(MemVec::zero::<Avx2Target>)
         } else {
             MemVec::zero::<Avx2Target>()
         };
         let lower_spec = Spec(spec.0, MemoryLimits::Standard(first_peak));
-        let lower_solutions = top_down(&db, &lower_spec, 1);
+        let lower_solutions = top_down_many(&db, std::slice::from_ref(&lower_spec));
         assert_eq!(first_solutions, lower_solutions);
     }
 
     #[test]
-    fn test_factorized_shape_db_memoizes_representable_subspecs_not_original() {
+    fn test_binary_scale_db_memoizes_power_of_two_subspecs_not_original() {
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOfTwo, 1, 128, 1);
 
-        // Non-factorizable spec (should be stored in FilesDatabase's non-spatial cache)
-        let spec_5 = Spec::<Avx2Target>(
-            lspec!(Move([5], (u8, GL, row_major), (u8, RF, row_major))),
-            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
-        );
-        let result = top_down(&db, &spec_5, 1);
-        assert!(!result.is_empty(), "Should be able to synthesize Move([5])");
-        assert!(
-            db.get(&spec_5).is_some(),
-            "Database should contain Move([5]) despite not being a factorized size"
-        );
-
-        // Factorizable subspecs should be memoized spatially.
+        // Non-power-of-two spec (should not be memoized)
         let spec_3 = Spec::<Avx2Target>(
             lspec!(Move([3], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
+        let result = top_down_many(&db, std::slice::from_ref(&spec_3));
         assert!(
-            db.get(&spec_3).is_some(),
-            "Database should contain Move([3]) after synthesizing Move([5])"
+            result.first().is_some_and(|r| !r.0.is_empty()),
+            "Should be able to synthesize Move([3])"
         );
+
+        // Power-of-two subspecs should be memoized
         let spec_2 = Spec::<Avx2Target>(
             lspec!(Move([2], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
         assert!(
             db.get(&spec_2).is_some(),
-            "Database should contain Move([2]) after synthesizing Move([5])"
+            "Database should contain Move([2]) after synthesizing Move([3])"
         );
         let spec_1 = Spec::<Avx2Target>(
             lspec!(Move([1], (u8, GL, row_major), (u8, RF, row_major))),
@@ -399,8 +281,20 @@ mod tests {
         );
         assert!(
             db.get(&spec_1).is_some(),
-            "Database should contain Move([1]) after synthesizing Move([5])"
+            "Database should contain Move([1]) after synthesizing Move([3])"
         );
+    }
+
+    fn top_down_one<Tgt>(db: &FilesDatabase, spec: &Spec<Tgt>) -> ActionCostVec
+    where
+        Tgt: Target,
+        Tgt::Memory: CanonicalBimap,
+        <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
+    {
+        top_down_many(db, std::slice::from_ref(spec))
+            .into_iter()
+            .next()
+            .unwrap()
     }
 
     fn lower_and_higher_canonical_specs<Tgt: Target>(

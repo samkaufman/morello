@@ -421,7 +421,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         Tgt::Memory: CanonicalBimap,
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        top_down_many_impls(db, slice::from_ref(self), 1)
+        top_down_many_impls(db, slice::from_ref(self))
             .into_iter()
             .flatten()
             .next()

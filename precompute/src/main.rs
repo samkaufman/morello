@@ -29,7 +29,7 @@ use morello::grid::general::SurMap;
 use morello::grid::linear::BimapInt;
 use morello::layout::row_major;
 use morello::memorylimits::{MemVec, MemoryLimits};
-use morello::search::{top_down_many, top_down_many_spatial};
+use morello::search::top_down_many;
 use morello::smallvec::smallvec;
 use morello::spec::{
     FillValue, LogicalSpec, LogicalSpecSurMap, PrimitiveBasics, PrimitiveBasicsBimap,
@@ -63,8 +63,6 @@ struct Args {
     db: Option<path::PathBuf>,
     #[arg(long, default_value = "2000", help = "Cache size in database pages.")]
     cache_size: usize,
-    #[arg(long, default_value_t = false)]
-    spatial: bool,
     /// Target architecture
     #[arg(long, value_enum, hide_default_value = true, default_value_t = TargetId::default())]
     target: TargetId,
@@ -238,7 +236,6 @@ where
                     &memories,
                     &top,
                     spec_completed,
-                    args.spatial,
                     meta_update_tx.clone(),
                 );
             });
@@ -282,7 +279,6 @@ fn process_spec<Tgt>(
     memories: &[Tgt::Memory],
     top: &MemVec,
     spec_completed: usize,
-    spatial: bool,
     progress_sender: mpsc::Sender<(LogicalSpec<Tgt>, usize)>,
 ) where
     Tgt: CpuTarget,
@@ -356,7 +352,7 @@ fn process_spec<Tgt>(
                 #[cfg(feature = "db-stats")]
                 let synthesis_start = Instant::now();
 
-                let stage_results = process_worklist_chunks(db, &worklist, spatial);
+                let stage_results = process_worklist_chunks(db, &worklist);
 
                 #[cfg(feature = "db-stats")]
                 {
@@ -406,11 +402,7 @@ fn validate_stage_worklist_unique<Tgt: Target>(worklist: &[Spec<Tgt>]) {
     }
 }
 
-fn process_worklist_chunks<Tgt>(
-    db: &FilesDatabase,
-    worklist: &[Spec<Tgt>],
-    spatial: bool,
-) -> Vec<ActionCostVec>
+fn process_worklist_chunks<Tgt>(db: &FilesDatabase, worklist: &[Spec<Tgt>]) -> Vec<ActionCostVec>
 where
     Tgt: CpuTarget,
     Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
@@ -425,11 +417,7 @@ where
             ..worklist
                 .len()
                 .min(subworklist_offset + SUBWORKLIST_MAX_SIZE)];
-        if spatial {
-            stage_results.extend(top_down_many_spatial(db, subworklist, 1));
-        } else {
-            stage_results.extend(top_down_many(db, subworklist, 1));
-        }
+        stage_results.extend(top_down_many(db, subworklist));
 
         subworklist_offset += subworklist.len();
     }

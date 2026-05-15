@@ -42,9 +42,6 @@ struct Args {
     #[arg(long, default_value = "128", help = "Cache size in database pages.")]
     cache_size: usize,
 
-    #[arg(long, default_value_t = false)]
-    spatial: bool,
-
     /// Color mode
     #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
     color: ColorMode,
@@ -296,11 +293,7 @@ where
 
     let start_time = std::time::Instant::now();
 
-    if args.spatial {
-        morello::search::top_down_many_spatial(&db, std::slice::from_ref(&spec), K.into());
-    } else {
-        morello::search::top_down(&db, &spec, K.into());
-    }
+    morello::search::top_down(&db, &spec);
     info!("top_down took {:?}", start_time.elapsed());
 
     let Some(results) = db.get_impl(&spec) else {

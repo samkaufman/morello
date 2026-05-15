@@ -1,4 +1,4 @@
-use super::{reducer::ImplReducer, RequestId, TopDownSearch};
+use super::{reducer::ImplReducer, RequestId};
 use crate::{
     cost::Cost,
     db::{ActionCostVec, ActionNum},
@@ -44,29 +44,25 @@ enum WorkingPartialImpl<Tgt: Target> {
 }
 
 impl<Tgt: Target> SpecTask<Tgt> {
-    /// Begin computing the optimal implementation of a Spec.
+    /// Creates a [SpecTask] for computing the optimal implementation of `goal`.
     ///
-    /// Internally, this will expand partial [Impl]s for all actions.
-    pub fn start(
-        goal: Spec<Tgt>,
-        preferences: Option<Vec<ActionNum>>,
-        search: &TopDownSearch<'_, Tgt>,
-    ) -> Self
+    /// This evaluates all actions that can be completed without child [Spec] dependencies
+    /// immediately. If any applicable actions need child costs, they will be exposed through
+    /// [Self::next_request_batch].
+    pub fn start(goal: Spec<Tgt>) -> Self
     where
         Tgt: Target,
         Tgt::Memory: CanonicalBimap,
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        let mut reducer = ImplReducer::new(search.top_k, preferences.unwrap_or_default());
+        let mut reducer = ImplReducer::new(1, Vec::new());
         let mut max_children = 0;
         let mut partial_impls = Vec::new();
         let mut partial_impls_incomplete = 0;
 
         let all_actions = Tgt::actions(&goal.0).collect::<Vec<_>>();
-        let initial_skip = search.thread_idx * all_actions.len() / search.thread_count;
 
-        for action_num in (initial_skip..all_actions.len()).chain(0..initial_skip) {
-            let action = &all_actions[action_num];
+        for (action_num, action) in all_actions.iter().enumerate() {
             match action.top_down_solver(&goal) {
                 Ok(solver) => {
                     let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
@@ -117,14 +113,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
 
     pub fn is_running(&self) -> bool {
         matches!(self.0, SpecTaskState::Running { .. })
-    }
-
-    /// Returns the completed result if the task has finished; `None` otherwise.
-    pub fn result(&self) -> Option<&ActionCostVec> {
-        match &self.0 {
-            SpecTaskState::Complete { result, .. } => Some(result),
-            SpecTaskState::Running { .. } => None,
-        }
     }
 
     /// Converts a completed task into its result. Returns `None` if is running.
