@@ -16,9 +16,10 @@ use std::time::Instant;
 use std::{fs, iter, path};
 
 #[cfg(feature = "db-stats")]
-use std::sync::atomic::{self, AtomicU64};
-#[cfg(feature = "db-stats")]
-use std::time::Duration;
+use std::{
+    sync::atomic::{self, AtomicU64},
+    time::Duration,
+};
 
 use morello::common::{DimSize, Dtype, Shape};
 use morello::db::{ActionCostVec, FilesDatabase};
