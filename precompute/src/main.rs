@@ -158,7 +158,7 @@ where
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new::<Tgt>(
         args.db.as_deref(),
-        TileScale::PowerOrThreePower,
+        TileScale::PowerOfTwo,
         K,
         args.cache_size,
         threads,
@@ -285,7 +285,7 @@ fn process_spec<Tgt>(
 {
     let unscaled_surmap = LogicalSpecSurMap::new(
         PrimitiveBasicsBimap {
-            tile_scale: TileScale::PowerOrThreePower,
+            tile_scale: TileScale::PowerOfTwo,
         },
         TensorSpecAuxSurMap::new,
     );

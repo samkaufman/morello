@@ -32,14 +32,8 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    let db = FilesDatabase::open(
-        Some(&args.db),
-        TileScale::PowerOrThreePower,
-        K,
-        args.cache_size,
-        1,
-    )
-    .expect("Failed to open database");
+    let db = FilesDatabase::open(Some(&args.db), TileScale::PowerOfTwo, K, args.cache_size, 1)
+        .expect("Failed to open database");
     fs::create_dir_all(&args.out).unwrap();
     db.analyze(&args.out, args.sample, args.keep_going);
 }
