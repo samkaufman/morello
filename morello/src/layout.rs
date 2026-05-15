@@ -14,8 +14,6 @@ use std::{collections::HashSet, fmt::Display, hash::Hash};
 #[cfg(any(debug_assertions, test))]
 use nonzero::nonzero as nz;
 
-const MIN_PACKING_SIZE: u32 = 2;
-
 pub trait LayoutBuilder {
     fn build(self, shape: &[DimSize]) -> Layout;
 }
