@@ -333,7 +333,7 @@ macro_rules! rtreedyn_cases {
                 debug_assert_eq!(top.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => {
-                        Box::new(t.locate_in_envelope_intersecting(&AABB::from_ordered_corners(
+                        Box::new(t.locate_in_envelope_intersecting(&AABB::from_bounds(
                             padded_pt::<$underlying>(bottom),
                             padded_pt::<$underlying>(top),
                         )).map(|r| (&r.bottom.arr[..$n], &r.top.arr[..$n], &r.value)))
@@ -480,7 +480,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         debug_assert_eq!(low.len(), high.len());
         let insert_low = padded_pt::<D>(low);
         let insert_high = padded_pt::<D>(high);
-        let insert_envelope = AABB::from_ordered_corners(insert_low.clone(), insert_high.clone());
+        let insert_envelope = AABB::from_bounds(insert_low.clone(), insert_high.clone());
         let mut uncovered = vec![(insert_low.clone(), insert_high.clone())];
         let mut intersecting_values = Vec::new();
 
@@ -521,7 +521,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         debug_assert_eq!(low.len(), high.len());
         let insert_bottom = padded_pt::<D>(low);
         let insert_top = padded_pt::<D>(high);
-        let insert_envelope = AABB::from_ordered_corners(insert_bottom.clone(), insert_top.clone());
+        let insert_envelope = AABB::from_bounds(insert_bottom.clone(), insert_top.clone());
         let mut preserved = Vec::new();
 
         self.drain_in_envelope_intersecting(insert_envelope)
@@ -601,7 +601,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         while should_repeat {
             should_repeat = false;
             needs_overlap_subtraction = false;
-            let candidate_area = AABB::from_ordered_corners(
+            let candidate_area = AABB::from_bounds(
                 to_insert.bottom.arr.map(|b| b.saturating_sub(1)).into(),
                 to_insert.top.arr.map(|t| t.saturating_add(1)).into(),
             );
@@ -709,7 +709,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         let mut next_lhs_rects = vec![]; // double-buffer lhs_rects'
         let mut rhs_subrects = vec![];
 
-        let insert_envelope = AABB::from_ordered_corners(
+        let insert_envelope = AABB::from_bounds(
             insert_low.clone().try_into().unwrap(),
             insert_high.clone().try_into().unwrap(),
         );
@@ -809,7 +809,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
             debug_assert!(new_subrectangles.is_empty());
             let rhs_bottom = padded_pt::<D>(rhs_bottom);
             let rhs_top = padded_pt::<D>(rhs_top);
-            let rhs_envelope = AABB::from_ordered_corners(rhs_bottom.clone(), rhs_top.clone());
+            let rhs_envelope = AABB::from_bounds(rhs_bottom.clone(), rhs_top.clone());
             for intersecting_rect in self.drain_in_envelope_intersecting(rhs_envelope) {
                 let RTreeRect { bottom, top, value } = intersecting_rect;
                 let subrectangles =
@@ -872,7 +872,7 @@ impl<const D: usize, T> RTreeObject for RTreeRect<D, T> {
     type Envelope = AABB<D>;
 
     fn envelope(&self) -> Self::Envelope {
-        AABB::from_ordered_corners(self.bottom.clone(), self.top.clone())
+        AABB::from_bounds(self.bottom.clone(), self.top.clone())
     }
 }
 
@@ -1156,7 +1156,7 @@ where
 }
 
 fn expanded_merge_candidate_envelope<const D: usize, T>(rect: &RTreeRect<D, T>) -> AABB<D> {
-    AABB::from_ordered_corners(
+    AABB::from_bounds(
         RTreePt {
             arr: rect.bottom.arr.map(|b| b.saturating_sub(1)),
         },

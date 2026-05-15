@@ -28,7 +28,7 @@ impl<const D: usize> AABB<D> {
         }
     }
 
-    pub(crate) fn from_ordered_corners(lower: RTreePt<D>, upper: RTreePt<D>) -> Self {
+    pub(crate) fn from_bounds(lower: RTreePt<D>, upper: RTreePt<D>) -> Self {
         debug_assert!(lower.arr.iter().zip(&upper.arr).all(|(l, u)| l <= u));
         AABB { lower, upper }
     }
