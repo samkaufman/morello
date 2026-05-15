@@ -34,7 +34,7 @@ use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
 use std::sync::{
     atomic::{AtomicUsize, Ordering as AtomicOrdering},
-    mpsc, Arc,
+    mpsc, Arc, OnceLock,
 };
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,17 @@ type PageKey = DbKey;
 type SpatialQueryPageResult = (Vec<BimapSInt>, Vec<BimapSInt>, Option<NormalizedCost>);
 type DbValue = Option<(CostIntensity, MemVec, u8, ActionNum)>;
 pub type ActionNum = u16;
+
+fn simulated_page_load_delay() -> Option<Duration> {
+    static DELAY: OnceLock<Option<Duration>> = OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::env::var("MORELLO_SIMULATED_PAGE_LOAD_US")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&micros| micros > 0)
+            .map(Duration::from_micros)
+    })
+}
 
 #[cfg(test)]
 type MemoizedThroughputsByPoint =
@@ -1112,6 +1123,9 @@ impl Shard {
                     match command_rx.recv() {
                         Ok(ShardThreadMsg::Get(key)) => {
                             let path = page_file_path(db_root.path(), &key);
+                            if let Some(delay) = simulated_page_load_delay() {
+                                std::thread::sleep(delay);
+                            }
 
                             #[cfg(feature = "db-stats")]
                             {
