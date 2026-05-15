@@ -24,7 +24,7 @@ use parking_lot::{Mutex, MutexGuard};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
@@ -1566,11 +1566,17 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
 }
 
 /// Compute the block coordinate from a global coordinate.
-fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
+///
+/// If the value type is not [BimapInt], this will try to convert and panic if that fails.
+fn blockify_point<T>(pt: &[T]) -> Vec<BimapInt>
+where
+    T: Copy + TryInto<BimapInt>,
+    T::Error: Debug,
+{
     let rank = pt.len();
     pt.iter()
         .enumerate()
-        .map(|(i, &d)| d / block_size_dim(i, rank))
+        .map(|(i, &d)| d.try_into().unwrap() / block_size_dim(i, rank))
         .collect()
 }
 
