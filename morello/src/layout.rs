@@ -6,11 +6,15 @@ use crate::{
     target::Target,
 };
 use itertools::Itertools;
-use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use std::fmt;
 use std::{collections::HashSet, fmt::Display, hash::Hash};
+
+#[cfg(any(debug_assertions, test))]
+use nonzero::nonzero as nz;
+
+const MIN_PACKING_SIZE: u32 = 2;
 
 pub trait LayoutBuilder {
     fn build(self, shape: &[DimSize]) -> Layout;
