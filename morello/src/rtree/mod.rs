@@ -133,6 +133,15 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
+            pub fn bulk_load(rank: usize, rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>) -> Self {
+                match rank {
+                    $( $n => RTreeDyn::$name(RTree::bulk_load(rects.into_iter().map(|(bottom, top, value)| {
+                        RTreeRect { bottom: padded_pt(&bottom), top: padded_pt(&top), value }
+                    }).collect())), )*
+                    _ => panic!("Unsupported rank: {}", rank),
+                }
+            }
+
             pub fn size(&self) -> usize {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::size(t), )*
