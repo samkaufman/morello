@@ -84,7 +84,7 @@ impl<const D: usize> AABB<D> {
             let dl_nonneg = dl_raw & !(dl_raw >> 63i64);
             let du_nonneg = du_raw & !(du_raw >> 63i64);
             let d = dl_nonneg + du_nonneg;
-            vacc = vacc + (d * d);
+            vacc += d * d;
             i += 4;
         }
 
@@ -139,7 +139,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             let bl = i64x4::from(&other.lower.arr[i..i + 4]);
             let au = i64x4::from(&self.upper.arr[i..i + 4]);
             let bu = i64x4::from(&other.upper.arr[i..i + 4]);
-            fail = fail | (al.simd_gt(bl) | bu.simd_gt(au));
+            fail |= al.simd_gt(bl) | bu.simd_gt(au);
             i += 4;
         }
         if fail.any() {
@@ -256,11 +256,11 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             let mmax = a - (c & k);
             let mmin = b + (c & k);
             let diff = mmax - mmin;
-            sum_max = sum_max + mmax;
+            sum_max += mmax;
 
             let cd = max_diff - diff;
             let kd = cd >> 63i64;
-            max_diff = max_diff - (cd & kd);
+            max_diff -= cd & kd;
             i += 4;
         }
 
@@ -351,7 +351,7 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
         while i + 4 <= D {
             let l = i64x4::from(&self.lower.arr[i..i + 4]);
             let u = i64x4::from(&self.upper.arr[i..i + 4]);
-            vacc = vacc + (u - l);
+            vacc += u - l;
             i += 4;
         }
         let lanes = vacc.as_array();
