@@ -182,7 +182,6 @@ where
 {
     let memories = Tgt::memories();
     let MemoryLimits::Standard(top) = memory_limits_for_args::<Tgt>(&args.memory)?;
-
     let phases = goal_phases::<Tgt>(args);
     let bounds: Vec<_> = phases.iter().flatten().cloned().collect();
 

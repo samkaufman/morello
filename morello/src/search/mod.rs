@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn test_factorized_shape_db_memoizes_representable_subspecs_not_original() {
+    fn test_binary_scale_db_memoizes_power_of_two_subspecs_not_original() {
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOfTwo, 1, 128, 1);
 
         // Non-factorizable spec (should be stored in FilesDatabase's non-spatial cache)
@@ -272,9 +272,10 @@ mod tests {
             lspec!(Move([3], (u8, GL, row_major), (u8, RF, row_major))),
             MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
         );
+        let result = top_down_many(&db, std::slice::from_ref(&spec_3));
         assert!(
-            db.get(&spec_3).is_some(),
-            "Database should contain Move([3]) after synthesizing Move([5])"
+            result.first().is_some_and(|r| !r.0.is_empty()),
+            "Should be able to synthesize Move([3])"
         );
 
         let spec_2 = Spec::<Avx2Target>(
@@ -283,7 +284,7 @@ mod tests {
         );
         assert!(
             db.get(&spec_2).is_some(),
-            "Database should contain Move([2]) after synthesizing Move([5])"
+            "Database should contain Move([2]) after synthesizing Move([3])"
         );
 
         let spec_1 = Spec::<Avx2Target>(
@@ -292,7 +293,7 @@ mod tests {
         );
         assert!(
             db.get(&spec_1).is_some(),
-            "Database should contain Move([1]) after synthesizing Move([5])"
+            "Database should contain Move([1]) after synthesizing Move([3])"
         );
     }
 
