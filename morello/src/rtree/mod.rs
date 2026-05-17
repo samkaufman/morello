@@ -382,6 +382,10 @@ rtreedyn_cases!(
     53 => 64, D53, 54 => 64, D54, 55 => 64, D55, 56 => 64, D56,
     57 => 64, D57, 58 => 64, D58, 59 => 64, D59, 60 => 64, D60,
     61 => 64, D61, 62 => 64, D62, 63 => 64, D63, 64 => 64, D64,
+    // The following break the power-of-two pattern
+    65 => 76, D65, 66 => 76, D66, 67 => 76, D67, 68 => 76, D68,
+    69 => 76, D69, 70 => 76, D70, 71 => 76, D71, 72 => 76, D72,
+    73 => 76, D73, 74 => 76, D74, 75 => 76, D75, 76 => 76, D76,
 );
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
