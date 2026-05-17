@@ -1419,11 +1419,11 @@ fn rect_subtract_fixed_for_each<const D: usize, F>(
 /// returning replacement rectangles which cover the same space as the minuend but exclude the
 /// subtrahend.
 fn rect_subtract(
-    rect_bottom: &[i64],
-    rect_top: &[i64],
-    subtrahend_bottom: &[i64],
-    subtrahend_top: &[i64],
-) -> Vec<(Vec<i64>, Vec<i64>)> {
+    rect_bottom: &[BimapSInt],
+    rect_top: &[BimapSInt],
+    subtrahend_bottom: &[BimapSInt],
+    subtrahend_top: &[BimapSInt],
+) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>)> {
     assert_eq!(rect_bottom.len(), rect_top.len());
     assert_eq!(rect_bottom.len(), subtrahend_bottom.len());
     assert_eq!(rect_bottom.len(), subtrahend_top.len());
@@ -1461,10 +1461,10 @@ fn rect_subtract(
 /// subrectangles/tiles which cover the remainders of each rectangle. If the two rectangles do not
 /// intersect, the result will be `None`.
 fn rect_partition_intersection(
-    lhs_bottom: &[i64],
-    lhs_top: &[i64],
-    rhs_bottom: &[i64],
-    rhs_top: &[i64],
+    lhs_bottom: &[BimapSInt],
+    lhs_top: &[BimapSInt],
+    rhs_bottom: &[BimapSInt],
+    rhs_top: &[BimapSInt],
 ) -> Option<RectPartitionIntersection> {
     assert_eq!(lhs_bottom.len(), lhs_top.len());
     assert_eq!(rhs_bottom.len(), rhs_top.len());
@@ -2184,8 +2184,13 @@ mod tests {
     // }
 
     #[allow(clippy::type_complexity)]
-    fn arb_rect_subtract() -> impl Strategy<Value = ((Vec<i64>, Vec<i64>), (Vec<i64>, Vec<i64>))> {
-        proptest::collection::vec((0..6i64, 0..6i64, 0..6i64, 0..6i64), 0..4).prop_map(
+    fn arb_rect_subtract() -> impl Strategy<
+        Value = (
+            (Vec<BimapSInt>, Vec<BimapSInt>),
+            (Vec<BimapSInt>, Vec<BimapSInt>),
+        ),
+    > {
+        proptest::collection::vec((0..6i32, 0..6i32, 0..6i32, 0..6i32), 0..4).prop_map(
             |dim_tuples| {
                 let mut result = ((vec![], vec![]), (vec![], vec![]));
                 for (num0, num1, num2, num3) in dim_tuples {

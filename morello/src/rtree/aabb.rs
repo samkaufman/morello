@@ -1,9 +1,11 @@
 use super::RTreePt;
+use crate::grid::linear::BimapSInt;
 use rstar::{Point, RTreeObject};
 use serde::{Deserialize, Serialize};
+use wide::{i32x8, CmpGt};
+
 #[cfg(target_feature = "avx512f")]
-use wide::i64x8;
-use wide::{i64x4, CmpGt};
+use wide::i32x16;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
@@ -34,29 +36,31 @@ impl<const D: usize> AABB<D> {
     }
 
     pub(crate) fn ordered_corners_contain_point(
-        lower: &[i64; D],
-        upper: &[i64; D],
-        point: &[i64; D],
+        lower: &[BimapSInt; D],
+        upper: &[BimapSInt; D],
+        point: &[BimapSInt; D],
     ) -> bool {
         let mut i = 0usize;
-        #[cfg(target_feature = "avx512f")]
+        // TODO: Uncomment the below case if we switch to u32, because u32x16 has an any fn, even
+        //       though i32x16 does not.
+        // #[cfg(target_feature = "avx512f")]
+        // while i + 16 <= D {
+        //     let pv = i32x16::from(&point[i..i + 16]);
+        //     let l = i32x16::from(&lower[i..i + 16]);
+        //     let u = i32x16::from(&upper[i..i + 16]);
+        //     if (l.simd_gt(pv) | pv.simd_gt(u)).any() {
+        //         return false;
+        //     }
+        //     i += 16;
+        // }
         while i + 8 <= D {
-            let pv = i64x8::from(&point[i..i + 8]);
-            let l = i64x8::from(&lower[i..i + 8]);
-            let u = i64x8::from(&upper[i..i + 8]);
+            let pv = i32x8::from(&point[i..i + 8]);
+            let l = i32x8::from(&lower[i..i + 8]);
+            let u = i32x8::from(&upper[i..i + 8]);
             if (l.simd_gt(pv) | pv.simd_gt(u)).any() {
                 return false;
             }
             i += 8;
-        }
-        while i + 4 <= D {
-            let pv = i64x4::from(&point[i..i + 4]);
-            let l = i64x4::from(&lower[i..i + 4]);
-            let u = i64x4::from(&upper[i..i + 4]);
-            if (l.simd_gt(pv) | pv.simd_gt(u)).any() {
-                return false;
-            }
-            i += 4;
         }
         while i < D {
             let p = point[i];
@@ -69,27 +73,27 @@ impl<const D: usize> AABB<D> {
     }
 
     pub(crate) fn ordered_corners_distance_2(
-        lower: &[i64; D],
-        upper: &[i64; D],
-        point: &[i64; D],
-    ) -> i64 {
-        let mut vacc = i64x4::ZERO;
+        lower: &[BimapSInt; D],
+        upper: &[BimapSInt; D],
+        point: &[BimapSInt; D],
+    ) -> BimapSInt {
+        let mut vacc = i32x8::ZERO;
         let mut i = 0usize;
-        while i + 4 <= D {
-            let p = i64x4::from(&point[i..i + 4]);
-            let l = i64x4::from(&lower[i..i + 4]);
-            let u = i64x4::from(&upper[i..i + 4]);
+        while i + 8 <= D {
+            let p = i32x8::from(&point[i..i + 8]);
+            let l = i32x8::from(&lower[i..i + 8]);
+            let u = i32x8::from(&upper[i..i + 8]);
             let dl_raw = l - p;
             let du_raw = p - u;
-            let dl_nonneg = dl_raw & !(dl_raw >> 63i64);
-            let du_nonneg = du_raw & !(du_raw >> 63i64);
+            let dl_nonneg = dl_raw & !(dl_raw >> 31i32);
+            let du_nonneg = du_raw & !(du_raw >> 31i32);
             let d = dl_nonneg + du_nonneg;
             vacc += d * d;
-            i += 4;
+            i += 8;
         }
 
         let lanes = vacc.as_array();
-        let mut acc: i64 = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+        let mut acc: BimapSInt = lanes.iter().sum();
 
         while i < D {
             let p = point[i];
@@ -122,8 +126,12 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
 
     fn new_empty() -> Self {
         AABB {
-            lower: RTreePt { arr: [i64::MAX; D] },
-            upper: RTreePt { arr: [i64::MIN; D] },
+            lower: RTreePt {
+                arr: [BimapSInt::MAX; D],
+            },
+            upper: RTreePt {
+                arr: [BimapSInt::MIN; D],
+            },
         }
     }
 
@@ -132,15 +140,15 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn contains_envelope(&self, other: &Self) -> bool {
-        let mut fail = i64x4::ZERO;
+        let mut fail = i32x8::ZERO;
         let mut i = 0usize;
-        while i + 4 <= D {
-            let al = i64x4::from(&self.lower.arr[i..i + 4]);
-            let bl = i64x4::from(&other.lower.arr[i..i + 4]);
-            let au = i64x4::from(&self.upper.arr[i..i + 4]);
-            let bu = i64x4::from(&other.upper.arr[i..i + 4]);
+        while i + 8 <= D {
+            let al = i32x8::from(&self.lower.arr[i..i + 8]);
+            let bl = i32x8::from(&other.lower.arr[i..i + 8]);
+            let au = i32x8::from(&self.upper.arr[i..i + 8]);
+            let bu = i32x8::from(&other.upper.arr[i..i + 8]);
             fail |= al.simd_gt(bl) | bu.simd_gt(au);
-            i += 4;
+            i += 8;
         }
         if fail.any() {
             return false;
@@ -157,22 +165,22 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     fn merge(&mut self, other: &Self) {
         // Vectorized min for lower and max for upper per 4-lane chunk.
         let mut i = 0usize;
-        while i + 4 <= D {
+        while i + 8 <= D {
             // lower = min(self.lower, other.lower)
-            let al = i64x4::from(&self.lower.arr[i..i + 4]);
-            let bl = i64x4::from(&other.lower.arr[i..i + 4]);
+            let al = i32x8::from(&self.lower.arr[i..i + 8]);
+            let bl = i32x8::from(&other.lower.arr[i..i + 8]);
             let m_l = al.simd_gt(bl);
             let lmin = (bl & m_l) | (al & !m_l);
-            self.lower.arr[i..i + 4].copy_from_slice(lmin.as_array());
+            self.lower.arr[i..i + 8].copy_from_slice(lmin.as_array());
 
             // upper = max(self.upper, other.upper)
-            let au = i64x4::from(&self.upper.arr[i..i + 4]);
-            let bu = i64x4::from(&other.upper.arr[i..i + 4]);
+            let au = i32x8::from(&self.upper.arr[i..i + 8]);
+            let bu = i32x8::from(&other.upper.arr[i..i + 8]);
             let m_u = au.simd_gt(bu);
             let umax = (au & m_u) | (bu & !m_u);
-            self.upper.arr[i..i + 4].copy_from_slice(umax.as_array());
+            self.upper.arr[i..i + 8].copy_from_slice(umax.as_array());
 
-            i += 4;
+            i += 8;
         }
 
         while i < D {
@@ -194,15 +202,15 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
 
     fn intersects(&self, other: &Self) -> bool {
         let mut i = 0usize;
-        while i + 4 <= D {
-            let al = i64x4::from(&self.lower.arr[i..i + 4]);
-            let au = i64x4::from(&self.upper.arr[i..i + 4]);
-            let bl = i64x4::from(&other.lower.arr[i..i + 4]);
-            let bu = i64x4::from(&other.upper.arr[i..i + 4]);
+        while i + 8 <= D {
+            let al = i32x8::from(&self.lower.arr[i..i + 8]);
+            let au = i32x8::from(&self.upper.arr[i..i + 8]);
+            let bl = i32x8::from(&other.lower.arr[i..i + 8]);
+            let bu = i32x8::from(&other.upper.arr[i..i + 8]);
             if (al.simd_gt(bu) | bl.simd_gt(au)).any() {
                 return false;
             }
-            i += 4;
+            i += 8;
         }
         while i < D {
             if self.lower.arr[i] > other.upper.arr[i] || self.upper.arr[i] < other.lower.arr[i] {
@@ -214,18 +222,18 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn area(&self) -> <Self::Point as Point>::Scalar {
-        let ones = [1i64; 4];
-        let mut vacc = i64x4::from(&ones[..]);
+        let ones = [1; 8];
+        let mut vacc = i32x8::from(&ones[..]);
         let mut i = 0usize;
-        while i + 4 <= D {
-            let l = i64x4::from(&self.lower.arr[i..i + 4]);
-            let u = i64x4::from(&self.upper.arr[i..i + 4]);
+        while i + 8 <= D {
+            let l = i32x8::from(&self.lower.arr[i..i + 8]);
+            let u = i32x8::from(&self.upper.arr[i..i + 8]);
             let d = u - l;
-            vacc = vacc * d;
-            i += 4;
+            vacc *= d;
+            i += 8;
         }
         let lanes = vacc.as_array();
-        let mut prod: i64 = lanes[0] * lanes[1] * lanes[2] * lanes[3];
+        let mut prod: BimapSInt = lanes.iter().product();
         while i < D {
             prod *= self.upper.arr[i] - self.lower.arr[i];
             i += 1;
@@ -238,13 +246,13 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn min_max_dist_2(&self, point: &Self::Point) -> <Self::Point as Point>::Scalar {
-        let mut sum_max = i64x4::ZERO;
-        let mut max_diff = i64x4::MIN;
+        let mut sum_max = i32x8::ZERO;
+        let mut max_diff = i32x8::MIN;
         let mut i = 0usize;
-        while i + 4 <= D {
-            let p = i64x4::from(&point.arr[i..i + 4]);
-            let l = i64x4::from(&self.lower.arr[i..i + 4]);
-            let u = i64x4::from(&self.upper.arr[i..i + 4]);
+        while i + 8 <= D {
+            let p = i32x8::from(&point.arr[i..i + 8]);
+            let l = i32x8::from(&self.lower.arr[i..i + 8]);
+            let u = i32x8::from(&self.upper.arr[i..i + 8]);
 
             let dl = l - p;
             let du = u - p;
@@ -252,25 +260,22 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
             let b = du * du;
 
             let c = a - b;
-            let k = c >> 63i64; // all ones if a < b, else 0
+            let k = c >> 31i32; // all ones if a < b, else 0
             let mmax = a - (c & k);
             let mmin = b + (c & k);
             let diff = mmax - mmin;
             sum_max += mmax;
 
             let cd = max_diff - diff;
-            let kd = cd >> 63i64;
+            let kd = cd >> 31i32;
             max_diff -= cd & kd;
-            i += 4;
+            i += 8;
         }
 
         let lanes_sum = sum_max.as_array();
-        let mut acc_sum: i64 = lanes_sum[0] + lanes_sum[1] + lanes_sum[2] + lanes_sum[3];
+        let mut acc_sum: BimapSInt = lanes_sum.iter().sum();
         let lanes_maxd = max_diff.as_array();
-        let mut acc_maxdiff: i64 = lanes_maxd[0]
-            .max(lanes_maxd[1])
-            .max(lanes_maxd[2])
-            .max(lanes_maxd[3]);
+        let mut acc_maxdiff: BimapSInt = *lanes_maxd.iter().max().unwrap();
 
         while i < D {
             let p = point.arr[i];
@@ -290,15 +295,15 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn center(&self) -> Self::Point {
-        let mut out = [0i64; D];
+        let mut out = [0; D];
         let mut i = 0usize;
-        while i + 4 <= D {
-            let l = i64x4::from(&self.lower.arr[i..i + 4]);
-            let u = i64x4::from(&self.upper.arr[i..i + 4]);
-            let mid = l + ((u - l) >> 1i64);
+        while i + 8 <= D {
+            let l = i32x8::from(&self.lower.arr[i..i + 8]);
+            let u = i32x8::from(&self.upper.arr[i..i + 8]);
+            let mid = l + ((u - l) >> 1i32);
             // Store lanes into the output slice without horizontal ops.
-            out[i..i + 4].copy_from_slice(mid.as_array());
-            i += 4;
+            out[i..i + 8].copy_from_slice(mid.as_array());
+            i += 8;
         }
         while i < D {
             let l = self.lower.arr[i];
@@ -310,31 +315,31 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn intersection_area(&self, other: &Self) -> <Self::Point as Point>::Scalar {
-        let mut vacc = i64x4::ONE;
+        let mut vacc = i32x8::ONE;
         let mut i = 0usize;
-        while i + 4 <= D {
+        while i + 8 <= D {
             // lmax = max(al, bl)
-            let al = i64x4::from(&self.lower.arr[i..i + 4]);
-            let bl = i64x4::from(&other.lower.arr[i..i + 4]);
+            let al = i32x8::from(&self.lower.arr[i..i + 8]);
+            let bl = i32x8::from(&other.lower.arr[i..i + 8]);
             let c1 = al - bl;
-            let k1 = c1 >> 63i64;
+            let k1 = c1 >> 31i32;
             let lmax = al - (c1 & k1);
 
             // umin = min(au, bu)
-            let au = i64x4::from(&self.upper.arr[i..i + 4]);
-            let bu = i64x4::from(&other.upper.arr[i..i + 4]);
+            let au = i32x8::from(&self.upper.arr[i..i + 8]);
+            let bu = i32x8::from(&other.upper.arr[i..i + 8]);
             let c2 = au - bu;
-            let k2 = c2 >> 63i64;
+            let k2 = c2 >> 31i32;
             let umin = bu + (c2 & k2);
 
             // d = max(0, umin - lmax)
             let d_raw = umin - lmax;
-            let d = d_raw & !(d_raw >> 63i64);
-            vacc = vacc * d;
-            i += 4;
+            let d = d_raw & !(d_raw >> 31i32);
+            vacc *= d;
+            i += 8;
         }
         let lanes = vacc.as_array();
-        let mut prod: i64 = lanes[0] * lanes[1] * lanes[2] * lanes[3];
+        let mut prod: BimapSInt = lanes.iter().product();
         while i < D {
             let lmax = self.lower.arr[i].max(other.lower.arr[i]);
             let umin = self.upper.arr[i].min(other.upper.arr[i]);
@@ -346,16 +351,16 @@ impl<const D: usize> rstar::Envelope for AABB<D> {
     }
 
     fn perimeter_value(&self) -> <Self::Point as Point>::Scalar {
-        let mut vacc = i64x4::ZERO;
+        let mut vacc = i32x8::ZERO;
         let mut i = 0usize;
-        while i + 4 <= D {
-            let l = i64x4::from(&self.lower.arr[i..i + 4]);
-            let u = i64x4::from(&self.upper.arr[i..i + 4]);
+        while i + 8 <= D {
+            let l = i32x8::from(&self.lower.arr[i..i + 8]);
+            let u = i32x8::from(&self.upper.arr[i..i + 8]);
             vacc += u - l;
-            i += 4;
+            i += 8;
         }
         let lanes = vacc.as_array();
-        let mut sum: i64 = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+        let mut sum: BimapSInt = lanes.iter().sum();
         while i < D {
             sum += self.upper.arr[i] - self.lower.arr[i];
             i += 1;
@@ -412,7 +417,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_eq_contains_point(ours in arb_aabb(), p in prop::collection::vec(-2i64..18, 3)) {
+        fn test_eq_contains_point(ours in arb_aabb(), p in prop::collection::vec(-2..18, 3)) {
             let theirs = rstar::AABB::from_corners(ours.lower().clone(), ours.upper().clone());
             let pt = RTreePt::<3> { arr: [p[0], p[1], p[2]] };
             prop_assert_eq!(ours.contains_point(&pt), theirs.contains_point(&pt));
@@ -456,7 +461,7 @@ mod tests {
         }
 
         #[test]
-        fn test_eq_min_max_dist_2(ours in arb_aabb(), p in prop::collection::vec(-2i64..18, 3)) {
+        fn test_eq_min_max_dist_2(ours in arb_aabb(), p in prop::collection::vec(-2..18, 3)) {
             let theirs = rstar::AABB::from_corners(ours.lower().clone(), ours.upper().clone());
             let pt = RTreePt::<3> { arr: [p[0], p[1], p[2]] };
             prop_assert_eq!(ours.min_max_dist_2(&pt), theirs.min_max_dist_2(&pt));
@@ -483,7 +488,7 @@ mod tests {
 
         // distance_2 should match rstar::AABB for small ranges (no overflow)
         #[test]
-        fn test_eq_distance_2_small(ours in arb_aabb(), p in prop::collection::vec(-2i64..18, 3)) {
+        fn test_eq_distance_2_small(ours in arb_aabb(), p in prop::collection::vec(-2..18, 3)) {
             let theirs = rstar::AABB::from_corners(ours.lower().clone(), ours.upper().clone());
             let pt = RTreePt::<3> { arr: [p[0], p[1], p[2]] };
             prop_assert_eq!(ours.distance_2(&pt), theirs.distance_2(&pt));
@@ -500,9 +505,9 @@ mod tests {
             AABB::<3>::sort_envelopes(0, &mut ours);
             rstar::AABB::<RTreePt<3>>::sort_envelopes(0, &mut theirs);
 
-            let ours_boxes: Vec<([i64;3],[i64;3])> =
+            let ours_boxes: Vec<([BimapSInt;3],[BimapSInt;3])> =
                 ours.iter().map(|a| (a.lower().arr, a.upper().arr)).collect();
-            let theirs_boxes: Vec<([i64;3],[i64;3])> =
+            let theirs_boxes: Vec<([BimapSInt;3],[BimapSInt;3])> =
                 theirs.iter().map(|o| (o.envelope().lower().arr, o.envelope().upper().arr)).collect();
             prop_assert_eq!(ours_boxes, theirs_boxes);
         }
@@ -553,24 +558,33 @@ mod tests {
     /// and select the wrong lane, producing an invalid envelope.
     #[test]
     fn test_merge_extreme_values() {
-        let a = AABB::<6>::from_corners(RTreePt { arr: [i64::MIN; 6] }, RTreePt { arr: [0; 6] });
+        let a = AABB::<6>::from_corners(
+            RTreePt {
+                arr: [BimapSInt::MIN; 6],
+            },
+            RTreePt { arr: [0; 6] },
+        );
         let b = AABB::<6>::from_corners(
-            RTreePt { arr: [i64::MAX; 6] },
-            RTreePt { arr: [i64::MAX; 6] },
+            RTreePt {
+                arr: [BimapSInt::MAX; 6],
+            },
+            RTreePt {
+                arr: [BimapSInt::MAX; 6],
+            },
         );
 
         let mut m = a.clone();
         m.merge(&b);
-        assert_eq!(m.lower().arr, [i64::MIN; 6]);
-        assert_eq!(m.upper().arr, [i64::MAX; 6]);
+        assert_eq!(m.lower().arr, [BimapSInt::MIN; 6]);
+        assert_eq!(m.upper().arr, [BimapSInt::MAX; 6]);
     }
 
     // Generate an axis-aligned box by sampling a base point and a non-negative offset.
     // Returns an AABB directly. Name reflects that: arb_aabb.
     fn arb_aabb() -> impl Strategy<Value = AABB<3>> {
-        prop::collection::vec(0i64..16, 3)
+        prop::collection::vec(0..16, 3)
             .prop_flat_map(|base| {
-                prop::collection::vec(0i64..16, 3).prop_map(move |delta| (base.clone(), delta))
+                prop::collection::vec(0..16, 3).prop_map(move |delta| (base.clone(), delta))
             })
             .prop_map(|(base, delta)| {
                 let low = RTreePt::<3> {

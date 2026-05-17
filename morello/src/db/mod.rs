@@ -30,7 +30,7 @@ use std::fmt::{self, Debug};
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
-use std::ops::{Deref, DerefMut, Range};
+use std::ops::{Deref, DerefMut, Range, RangeInclusive};
 use std::path::{self, Path};
 use std::sync::{
     atomic::{AtomicUsize, Ordering as AtomicOrdering},
@@ -382,10 +382,11 @@ impl FilesDatabase {
         let (table_key, global_pt) = BiMap::apply(&bimap, query);
 
         let page_pt = blockify_point(&global_pt);
+        let page_local_pt = localize_point(&global_pt, &page_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
         let page: &Page = &self.load_live_page(&page_key);
-        page.contents.get_with_preference(query, &global_pt)
+        page.contents.get_with_preference(query, &page_local_pt)
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -537,7 +538,7 @@ impl FilesDatabase {
                 };
                 let start = (page_idx * block_dim_size).max(bottom[dim]);
                 let end = ((page_idx + 1) * block_dim_size).min(global_top_noninc);
-                dim_ranges.push(start..end);
+                dim_ranges.push(localize_range(start..=end - 1, page_idx, block_dim_size));
             }
 
             // Do some awkward mutation of `key_tuple.1` to avoid cloning `table_key`/ `key_tuple.0`
@@ -1553,6 +1554,44 @@ where
         .collect()
 }
 
+/// Maps `pt` into the page's coordinate space.
+fn localize_point(pt: &[BimapInt], page_pt: &[BimapInt]) -> Vec<BimapInt> {
+    debug_assert_eq!(pt.len(), page_pt.len());
+    let rank = pt.len();
+    pt.iter()
+        .zip(page_pt)
+        .enumerate()
+        .map(|(dim, (&coord, &page_coord))| coord - (page_coord * block_size_dim(dim, rank)))
+        .collect()
+}
+
+/// Maps `global_range` into the page's coordinate space.
+fn localize_range(
+    global_range: RangeInclusive<BimapInt>,
+    page_coord: BimapInt,
+    block_dim_size: BimapInt,
+) -> Range<BimapInt> {
+    let block_start = page_coord * block_dim_size;
+    let block_end_inclusive = block_end_inclusive(block_start, block_dim_size);
+    let range_start = *global_range.start();
+    let range_end_inclusive = *global_range.end();
+    debug_assert!(range_start >= block_start);
+    debug_assert!(range_end_inclusive <= block_end_inclusive);
+
+    let local_start = range_start - block_start;
+    let local_end_inclusive = range_end_inclusive - block_start;
+    debug_assert!(local_end_inclusive < block_dim_size);
+    local_start..local_end_inclusive + 1
+}
+
+#[inline]
+fn block_end_inclusive(block_start: BimapInt, block_dim_size: BimapInt) -> BimapInt {
+    // A block is clipped to the representable BimapInt coordinate universe. For the
+    // final block, the mathematical end can exceed BimapInt::MAX, but no valid
+    // global range can contain coordinates above BimapInt::MAX.
+    block_start.saturating_add(block_dim_size - 1)
+}
+
 /// Compute the bottom and top points (inclusive) to fill in a database table.
 ///
 /// Returned points are in global coordinates, not within-block coordinates.
@@ -1598,9 +1637,9 @@ where
 /// ```
 /// # use morello::db::iter_blocks_in_single_dim_range;
 /// assert_eq!(iter_blocks_in_single_dim_range(0, 3, 4).collect::<Vec<_>>(),
-///           vec![(0, 0..4)]);
+///           vec![(0, 0..=3)]);
 /// assert_eq!(iter_blocks_in_single_dim_range(1, 7, 4).collect::<Vec<_>>(),
-///            vec![(0, 1..4), (1, 4..8)]);
+///            vec![(0, 1..=3), (1, 4..=7)]);
 /// ```
 ///
 /// `global_bottom` and `global_top` are inclusive, forming a closed range. For example,
@@ -1608,7 +1647,7 @@ where
 /// ```
 /// # use morello::db::iter_blocks_in_single_dim_range;
 /// assert_eq!(iter_blocks_in_single_dim_range(4, 4, 4).collect::<Vec<_>>(),
-///            vec![(1, 4..5)]);
+///            vec![(1, 4..=4)]);
 /// ```
 ///
 // TODO: Make private. (Will break doctests.)
@@ -1616,24 +1655,21 @@ pub fn iter_blocks_in_single_dim_range(
     global_bottom: BimapInt,
     global_top: BimapInt,
     block_dim_size: BimapInt,
-) -> impl Iterator<Item = (BimapInt, Range<BimapInt>)> + Clone {
+) -> impl Iterator<Item = (BimapInt, RangeInclusive<BimapInt>)> + Clone {
     debug_assert_ne!(block_dim_size, 0);
     debug_assert!(global_bottom <= global_top);
 
-    // Change global_top to a non-inclusive upper bound.
-    let Some(global_top_noninc) = global_top.checked_add(1) else {
-        todo!("support global_top equal to MAX");
-    };
-
-    // Compute half-open range of blocks.
+    // Compute closed range of blocks.
     let block_bottom = global_bottom / block_dim_size;
     let block_top = global_top / block_dim_size;
 
     (block_bottom..=block_top).map(move |block_idx| {
         // Compute the largest possible range for the block, then clip to given bounds.
-        let start = (block_idx * block_dim_size).max(global_bottom);
-        let end = ((block_idx + 1) * block_dim_size).min(global_top_noninc);
-        (block_idx, start..end)
+        let block_start = block_idx * block_dim_size;
+        let block_end_inclusive = block_end_inclusive(block_start, block_dim_size);
+        let start = block_start.max(global_bottom);
+        let end = block_end_inclusive.min(global_top);
+        (block_idx, start..=end)
     })
 }
 
@@ -1882,6 +1918,7 @@ fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::linear::BimapSInt;
     use crate::layout::row_major;
     use crate::scheduling::ActionT as _;
     use crate::scheduling_sugar::SchedulingSugar;
@@ -1892,7 +1929,11 @@ mod tests {
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
         spec::arb_canonical_spec,
-        target::{Avx2Target, Avx512Target, CpuMemory::L1, Memory},
+        target::{
+            Avx2Target, Avx512Target,
+            CpuMemory::{GL, L1},
+            Memory,
+        },
         utils::{bit_length, bit_length_inverse_u32},
     };
     use itertools::{izip, Itertools};
@@ -2207,6 +2248,91 @@ mod tests {
         spec.canonicalize().unwrap();
         let db = FilesDatabase::new::<Avx512Target>(None, TileScale::PowerOrThreePower, 1, 2, 1);
         assert!(db.can_memoize_efficiently(&spec));
+    }
+
+    #[test]
+    fn test_large_spec_above_rtree_precision_round_trips() {
+        let large_dim = BimapInt::MAX;
+        let mut spec: Spec<Avx2Target> =
+            spec!(Move([large_dim], (u8, GL, row_major), (u8, GL, row_major)));
+        spec.canonicalize().unwrap();
+
+        // Use TileScale::Linear as the pessimistic case
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 2, 1);
+        assert!(db.can_memoize_efficiently(&spec));
+
+        let bimap = db.spec_bimap::<Avx2Target>();
+        let (_, global_pt) = BiMap::apply(&bimap, &spec);
+        assert!(
+            global_pt
+                .iter()
+                .any(|&coord| coord > BimapSInt::MAX as BimapInt),
+            "test Spec should have at least one global coordinate above R-tree precision: \
+             {global_pt:?}"
+        );
+
+        let page_pt = blockify_point(&global_pt);
+        let page_local_pt = localize_point(&global_pt, &page_pt);
+        assert!(
+            page_local_pt
+                .iter()
+                .all(|&coord| BimapSInt::try_from(coord).is_ok()),
+            "page-local coordinates should fit R-tree precision: {page_local_pt:?}"
+        );
+
+        let decisions = vec![(
+            0,
+            Cost {
+                main: 7,
+                peaks: MemVec::zero::<Avx2Target>(),
+                depth: 0,
+            },
+        )];
+        db.put(spec.clone(), decisions.clone());
+
+        assert_eq!(db.get(&spec), Some(ActionCostVec(decisions)));
+    }
+
+    #[test]
+    fn test_large_spec_at_high_page_local_coordinate_round_trips() {
+        let first_non_memory_dim = 0;
+        let rank_with_non_memory_dim = MEMORY_COUNT + 1;
+        let non_memory_block_size = block_size_dim(first_non_memory_dim, rank_with_non_memory_dim);
+        let large_dim = BimapInt::MAX - (BimapInt::MAX % non_memory_block_size);
+        let mut spec: Spec<Avx2Target> =
+            spec!(Move([large_dim], (u8, GL, row_major), (u8, GL, row_major)));
+        spec.canonicalize().unwrap();
+
+        // Use TileScale::Linear as the pessimistic case
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 2, 1);
+        assert!(db.can_memoize_efficiently(&spec));
+
+        let bimap = db.spec_bimap::<Avx2Target>();
+        let (_, global_pt) = BiMap::apply(&bimap, &spec);
+        let page_pt = blockify_point(&global_pt);
+        let page_local_pt = localize_point(&global_pt, &page_pt);
+        let rank = page_local_pt.len();
+        assert!(
+            page_local_pt
+                .iter()
+                .enumerate()
+                .any(|(dim, &coord)| dim + MEMORY_COUNT < rank
+                    && coord == block_size_dim(dim, rank) - 1),
+            "test Spec should land on a non-memory page high corner: global={global_pt:?}, \
+             local={page_local_pt:?}"
+        );
+
+        let decisions = vec![(
+            0,
+            Cost {
+                main: 11,
+                peaks: MemVec::zero::<Avx2Target>(),
+                depth: 0,
+            },
+        )];
+        db.put(spec.clone(), decisions.clone());
+
+        assert_eq!(db.get(&spec), Some(ActionCostVec(decisions)));
     }
 
     #[test]

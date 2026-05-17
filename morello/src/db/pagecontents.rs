@@ -1,7 +1,11 @@
 use super::{ActionCostVec, ActionNormalizedCostVec, ActionNum, DbValue, GetPreference};
 use crate::{
     cost::NormalizedCost,
-    grid::{canon::CanonicalBimap, general::BiMap, linear::BimapInt},
+    grid::{
+        canon::CanonicalBimap,
+        general::BiMap,
+        linear::{BimapInt, BimapSInt},
+    },
     rtree::{RTreeDyn, RegionScanResult},
     spec::Spec,
     target::Target,
@@ -89,8 +93,10 @@ impl RTreePageContents {
     }
 
     pub fn get(&self, inner_pt: &[BimapInt], spec_volume: NonZeroU64) -> Option<ActionCostVec> {
-        // TODO: Avoid conversion. Instead forward a slice right into locate_at_point.
-        let arr = inner_pt.iter().map(|v| (*v).into()).collect::<Vec<_>>();
+        let arr = inner_pt
+            .iter()
+            .map(|&v| local_coord_to_rtree(v))
+            .collect::<Vec<_>>();
 
         // TODO: Return (and test!) k > 1. (The above point may be in a space without k dim.)
         let value = self.0.locate_at_point(&arr)?;
@@ -121,8 +127,8 @@ impl RTreePageContents {
         let mut top = Vec::with_capacity(dim_ranges.len());
         for rng in dim_ranges {
             assert!(rng.start < rng.end);
-            bottom.push(rng.start.into());
-            top.push((rng.end - 1).into());
+            bottom.push(local_coord_to_rtree(rng.start));
+            top.push(local_coord_to_rtree(rng.end - 1));
         }
 
         let value = normalized_action_costs
@@ -168,6 +174,10 @@ impl RTreePageContents {
             }
         }
     }
+}
+
+fn local_coord_to_rtree(coord: BimapInt) -> BimapSInt {
+    BimapSInt::try_from(coord).expect("database page-local coordinate exceeded R-tree precision")
 }
 
 fn action_dominates(lhs: &DbValue, rhs: &DbValue) -> bool {
