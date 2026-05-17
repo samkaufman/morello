@@ -22,26 +22,26 @@ use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Preh
 use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Range};
 use std::path::{self, Path};
-use std::sync::{mpsc, Arc};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    mpsc, Arc,
+};
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "db-stats")]
-use {
-    std::sync::atomic::{self, AtomicU64},
-    std::time::Instant,
-};
+use std::sync::atomic::{self, AtomicU64};
 
 type DbKey = (TableKey, Vec<BimapInt>);
 type TableKey = (SpecKey, Vec<()>);
 type PageKey = DbKey;
 pub type ActionNum = u16;
-type NonSpatialCache = Mutex<HashMap<NonSpatialKey, ActionCostVec>>;
 
 /// The number of shards/locks per thread.
 const THREAD_SHARDS: usize = 2;
@@ -49,6 +49,9 @@ const CHANNEL_SIZE: usize = 2;
 /// Compress pages when writing to disk.
 const COMPRESS_PAGES: bool = true;
 const NONSPATIAL_CACHE_FILE: &str = "NONSPATIAL_CACHE";
+const DEFAULT_PROACTIVE_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+const BACKGROUND_SAVE_SHARDS_PER_PUT: usize = THREAD_SHARDS;
+const BACKGROUND_SAVE_PAGES_PER_SHARD: usize = CHANNEL_SIZE;
 const TARGET_FILE: &str = "TARGET";
 const TILESCALE_FILE: &str = "TILESCALE";
 
@@ -58,8 +61,11 @@ pub struct FilesDatabase {
     tile_scale: TileScale,
     k: u8,
     shards: ShardVec,
-    nonspatial_cache: NonSpatialCache,
+    nonspatial_cache: Mutex<NonSpatialCache>,
     prehasher: DefaultPrehasher,
+    proactive_saves_enabled: bool,
+    proactive_save_interval: Duration,
+    next_proactive_save_shard: AtomicUsize,
     #[cfg(feature = "db-stats")]
     stats: Arc<FilesDatabaseStats>,
 }
@@ -87,6 +93,7 @@ pub struct PageId<'a> {
 struct Page {
     contents: PageContents,
     modified: bool,
+    last_save: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -94,8 +101,16 @@ struct NonSpatialKey {
     spec: Vec<u8>,
 }
 
+struct NonSpatialCache {
+    entries: HashMap<NonSpatialKey, ActionCostVec>,
+    modified: bool,
+    last_save: Option<Instant>,
+}
+
 struct Shard {
     cache: WTinyLfuCache<Prehashed<PageKey>, Page>,
+    modified_pages: PrehashedSet<PageKey>,
+    modified_page_queue: VecDeque<Prehashed<PageKey>>,
     outstanding_gets: PrehashedSet<PageKey>,
     thread: Option<std::thread::JoinHandle<()>>,
     thread_tx: mpsc::SyncSender<ShardThreadMsg>,
@@ -114,6 +129,7 @@ struct AnalyzeWriters {
 enum ShardThreadMsg {
     Get(Prehashed<PageKey>),
     Put(PageKey, PageContents),
+    PutNonSpatial(path::PathBuf, HashMap<NonSpatialKey, ActionCostVec>),
     Flush(mpsc::Sender<()>),
     Exit,
 }
@@ -177,7 +193,14 @@ impl FilesDatabase {
         ensure_target_file::<Tgt>(dir_handle.path()).expect("Target validation failed");
         ensure_tilescale_file(dir_handle.path(), tile_scale).expect("TILESCALE validation failed");
 
-        Self::new_with_dir_handle(dir_handle, tile_scale, k, cache_size, thread_count)
+        Self::new_with_dir_handle(
+            dir_handle,
+            tile_scale,
+            k,
+            cache_size,
+            thread_count,
+            file_path.is_some(),
+        )
     }
 
     /// Open an existing database.
@@ -205,6 +228,7 @@ impl FilesDatabase {
             k,
             cache_size,
             thread_count,
+            true,
         ))
     }
 
@@ -215,6 +239,7 @@ impl FilesDatabase {
         k: u8,
         cache_size: usize,
         thread_count: usize,
+        proactive_saves_enabled: bool,
     ) -> Self {
         #[cfg(feature = "db-stats")]
         let stats = Arc::new(FilesDatabaseStats::default());
@@ -245,7 +270,11 @@ impl FilesDatabase {
                 })
                 .collect(),
         );
-        let nonspatial_cache = Mutex::new(read_nonspatial_cache(dir_handle.path()));
+        let nonspatial_cache = Mutex::new(NonSpatialCache {
+            entries: read_nonspatial_cache(dir_handle.path()),
+            modified: false,
+            last_save: None,
+        });
         Self {
             dir_handle,
             tile_scale,
@@ -253,6 +282,9 @@ impl FilesDatabase {
             shards,
             nonspatial_cache,
             prehasher: DefaultPrehasher::default(),
+            proactive_saves_enabled,
+            proactive_save_interval: DEFAULT_PROACTIVE_SAVE_INTERVAL,
+            next_proactive_save_shard: AtomicUsize::new(0),
             #[cfg(feature = "db-stats")]
             stats,
         }
@@ -268,6 +300,18 @@ impl FilesDatabase {
             GetPreference::Hit(v) => Some(v),
             GetPreference::Miss(_) => None,
         }
+    }
+
+    pub fn set_proactive_saves_enabled(&mut self, enabled: bool) {
+        self.proactive_saves_enabled = enabled;
+    }
+
+    pub fn proactive_save_interval(&self) -> Duration {
+        self.proactive_save_interval
+    }
+
+    pub fn set_proactive_save_interval(&mut self, interval: Duration) {
+        self.proactive_save_interval = interval;
     }
 
     pub fn get_impl<Tgt>(&self, query: &Spec<Tgt>) -> Option<Vec<ImplNode<Tgt>>>
@@ -316,7 +360,7 @@ impl FilesDatabase {
 
         if !self.can_memoize_efficiently(query) {
             let key = self.nonspatial_key(query);
-            return match self.nonspatial_cache.lock().get(&key).cloned() {
+            return match self.nonspatial_cache.lock().entries.get(&key).cloned() {
                 Some(v) => GetPreference::Hit(v),
                 None => GetPreference::Miss(None),
             };
@@ -430,9 +474,16 @@ impl FilesDatabase {
 
         if !self.can_memoize_efficiently(spec) {
             let key = self.nonspatial_key(spec);
-            self.nonspatial_cache
-                .lock()
-                .insert(key, ActionCostVec(decisions));
+            {
+                let mut nonspatial_cache = self.nonspatial_cache.lock();
+                nonspatial_cache
+                    .entries
+                    .insert(key, ActionCostVec(decisions));
+                nonspatial_cache.modified = true;
+            }
+            if self.proactive_saves_enabled {
+                self.try_save_nonspatial_cache_in_background();
+            }
             return;
         }
 
@@ -465,26 +516,90 @@ impl FilesDatabase {
                 dim_ranges.push(t);
             }
 
-            // Load `page_guard`. We do some awkward mutation of `key_tuple.1` to avoid cloning
-            // `table_key`/`key_tuple.0` on each iteration.
+            // Do some awkward mutation of `key_tuple.1` to avoid cloning `table_key`/ `key_tuple.0`
+            // on each iteration.
             let key = self.prehasher.prehash(key_tuple);
-            let mut page_guard = self.load_live_page_mut(&key);
-            key_tuple = Prehashed::into_inner(key);
+            // Load or wait for the page while holding its shard lock, then update both the page and
+            // the shard's dirty-page bookkeeping together.
+            {
+                let shard = &self.shards.0[self.shard_index(&key)];
+                let mut shard_guard = shard.lock();
+                {
+                    let page = shard_guard.load_live_page_mut(&key);
+                    page.modified = true;
+                    page.contents
+                        .fill_region(self.k, &dim_ranges, &normalized_decisions);
+                }
 
-            page_guard.modified = true;
-            page_guard
-                .contents
-                .fill_region(self.k, &dim_ranges, &normalized_decisions);
+                if self.proactive_saves_enabled
+                    && shard_guard.modified_pages.insert(prehashed_clone(&key))
+                {
+                    shard_guard
+                        .modified_page_queue
+                        .push_back(prehashed_clone(&key));
+                }
+            }
+            key_tuple = Prehashed::into_inner(key);
+        }
+
+        if self.proactive_saves_enabled {
+            self.try_save_pages_in_background();
         }
     }
 
-    /// Saves anything cached in memory to disk, blocking until writes complete.
+    /// Saves anything cached in memory to disk, blocking until complete.
     pub fn save(&self) {
         for shard in &self.shards.0 {
             let mut shard_guard = shard.lock();
             shard_guard.save();
         }
         self.save_nonspatial_cache();
+    }
+
+    fn try_save_pages_in_background(&self) {
+        let shard_count = self.shards.0.len();
+        let scan_count = BACKGROUND_SAVE_SHARDS_PER_PUT.min(shard_count);
+        let start = self
+            .next_proactive_save_shard
+            .fetch_add(scan_count, AtomicOrdering::Relaxed);
+        for offset in 0..scan_count {
+            let shard_idx = (start + offset) % shard_count;
+            if let Some(mut shard_guard) = self.shards.0[shard_idx].try_lock() {
+                shard_guard.try_save_pages_in_background(self.proactive_save_interval);
+            }
+        }
+    }
+
+    fn try_save_nonspatial_cache_in_background(&self) {
+        let now = Instant::now();
+        let Some(mut nonspatial_cache) = self.nonspatial_cache.try_lock() else {
+            return;
+        };
+        if !nonspatial_cache.modified
+            || nonspatial_cache
+                .last_save
+                .is_some_and(|last| now.duration_since(last) < self.proactive_save_interval)
+        {
+            return;
+        }
+
+        let Some(shard_guard) = self.shards.0[0].try_lock() else {
+            return;
+        };
+        let msg = ShardThreadMsg::PutNonSpatial(
+            nonspatial_cache_file_path(self.dir_handle.path()),
+            nonspatial_cache.entries.clone(),
+        );
+        match shard_guard.thread_tx.try_send(msg) {
+            Ok(()) => {
+                nonspatial_cache.modified = false;
+                nonspatial_cache.last_save = Some(now);
+            }
+            Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                panic!("shard thread exited before accepting proactive non-spatial cache write");
+            }
+        }
     }
 
     #[inline]
@@ -538,8 +653,19 @@ impl FilesDatabase {
     }
 
     fn save_nonspatial_cache(&self) {
+        let mut nonspatial_cache = self.nonspatial_cache.lock();
+        if !nonspatial_cache.modified {
+            return;
+        }
         let path = nonspatial_cache_file_path(self.dir_handle.path());
-        write_nonspatial_cache_atomic(&path, &self.nonspatial_cache.lock());
+        let mut shard_guard = self.shards.0[0].lock();
+
+        let cache = nonspatial_cache.entries.clone();
+        shard_guard.send_msg(ShardThreadMsg::PutNonSpatial(path, cache));
+        shard_guard.flush();
+
+        nonspatial_cache.modified = false;
+        nonspatial_cache.last_save = Some(Instant::now());
     }
 
     fn load_live_page<'a>(&'a self, key: &Prehashed<PageKey>) -> impl Deref<Target = Page> + 'a {
@@ -560,15 +686,7 @@ impl FilesDatabase {
             Err(s) => s,
         };
 
-        MutexGuard::map(shard_guard, |s| {
-            s.async_get(key);
-            s.process_bg_thread_msgs_until(|resp| match resp {
-                ShardThreadResponse::Loaded(k, _) => k != key,
-            });
-            s.cache
-                .get_mut(key)
-                .unwrap_or_else(|| panic!("just-requested key in cache: {key:?}"))
-        })
+        MutexGuard::map(shard_guard, |s| s.load_live_page_mut(key))
     }
 
     fn shard_index(&self, key: &Prehashed<PageKey>) -> usize {
@@ -738,6 +856,7 @@ impl Shard {
                                                 RTreePageContents::empty(key.1.len()),
                                             )),
                                             modified: false,
+                                            last_save: None,
                                         }
                                     }
                                 },
@@ -746,6 +865,7 @@ impl Shard {
                                         RTreePageContents::empty(key.1.len()),
                                     )),
                                     modified: false,
+                                    last_save: None,
                                 },
                             };
                             response_tx
@@ -757,13 +877,30 @@ impl Shard {
 
                             #[cfg(feature = "db-stats")]
                             {
-                                log::debug!("Evicting page");
+                                log::debug!("Writing database page");
                             }
 
                             write_page_atomic(&path, &value);
 
                             #[cfg(feature = "db-stats")]
                             {
+                                stats.disk_bytes_written.fetch_add(
+                                    path.metadata().unwrap().len(),
+                                    atomic::Ordering::Relaxed,
+                                );
+                            }
+                        }
+                        Ok(ShardThreadMsg::PutNonSpatial(path, cache)) => {
+                            #[cfg(feature = "db-stats")]
+                            {
+                                log::debug!("Writing non-spatial database cache");
+                            }
+
+                            write_nonspatial_cache_atomic(&path, &cache);
+
+                            #[cfg(feature = "db-stats")]
+                            {
+                                // TODO: This has a race condition, but it's not a big concern.
                                 stats.disk_bytes_written.fetch_add(
                                     path.metadata().unwrap().len(),
                                     atomic::Ordering::Relaxed,
@@ -782,6 +919,8 @@ impl Shard {
 
         Self {
             cache: WTinyLfuCache::new(cache_per_shard_size, cache_per_shard_samples),
+            modified_pages: new_prehashed_set(),
+            modified_page_queue: VecDeque::new(),
             outstanding_gets: new_prehashed_set(),
             thread,
             thread_tx: command_tx,
@@ -845,9 +984,23 @@ impl Shard {
         debug_assert!(was_present);
         if let Some((evicted_key, evicted_value)) = self.cache.push(key, new_value) {
             if evicted_value.modified {
+                self.modified_pages.remove(&evicted_key);
                 self.async_put(Prehashed::into_inner(evicted_key), evicted_value.contents);
             }
         }
+    }
+
+    fn load_live_page_mut(&mut self, key: &Prehashed<PageKey>) -> &mut Page {
+        self.process_available_bg_thread_msgs();
+        if self.cache.peek(key).is_none() {
+            self.async_get(key);
+            self.process_bg_thread_msgs_until(|resp| match resp {
+                ShardThreadResponse::Loaded(k, _) => k != key,
+            });
+        }
+        self.cache
+            .get_mut(key)
+            .unwrap_or_else(|| panic!("just-requested key in cache: {key:?}"))
     }
 
     /// Start a background task to load a page. Do nothing if request already enqueued.
@@ -870,7 +1023,15 @@ impl Shard {
     }
 
     fn save(&mut self) {
-        self.finish_outstanding_gets();
+        // Finish outstanding gets before saving
+        while !self.outstanding_gets.is_empty() {
+            let msg = self
+                .blocking_recv()
+                .expect("shard thread exited before loading outstanding database pages");
+            self.process_bg_thread_msg_inner(msg);
+        }
+
+        let now = Instant::now();
         let mut writes = Vec::new();
         for (k, v) in self.cache.iter_mut() {
             // Clone so that the background thread has an immutable copy of the data to write, even
@@ -879,12 +1040,19 @@ impl Shard {
             //       we have the `&self` reference.
             if v.modified {
                 v.modified = false;
+                v.last_save = Some(now);
                 writes.push((Prehashed::as_inner(k).clone(), v.contents.clone()));
             }
         }
         for (key, value) in writes {
             self.async_put(key, value);
         }
+        self.modified_pages.clear();
+        self.modified_page_queue.clear();
+        self.flush();
+    }
+
+    fn flush(&mut self) {
         let (done_tx, done_rx) = mpsc::channel();
         self.send_msg(ShardThreadMsg::Flush(done_tx));
         done_rx
@@ -892,16 +1060,70 @@ impl Shard {
             .expect("shard thread exited before flushing database writes");
     }
 
-    fn finish_outstanding_gets(&mut self) {
-        while !self.outstanding_gets.is_empty() {
-            let msg = self
-                .blocking_recv()
-                .expect("shard thread exited before loading outstanding database pages");
-            self.process_bg_thread_msg_inner(msg);
+    fn try_save_pages_in_background(&mut self, proactive_save_interval: Duration) {
+        let now = Instant::now();
+        let tx = self.thread_tx.clone();
+
+        for _ in 0..BACKGROUND_SAVE_PAGES_PER_SHARD {
+            let Some(key) = self.modified_page_queue.pop_front() else {
+                break;
+            };
+            if !self.modified_pages.contains(&key) {
+                continue;
+            }
+
+            let mut remove_from_dirty = false;
+            let mut requeue = false;
+            let mut maybe_msg = None;
+            {
+                let Some(page) = self.cache.get_mut(&key) else {
+                    self.modified_pages.remove(&key);
+                    continue;
+                };
+                if !page.modified {
+                    remove_from_dirty = true;
+                } else if page.last_save.map_or_else(
+                    || true,
+                    |last| now.duration_since(last) >= proactive_save_interval,
+                ) {
+                    maybe_msg = Some(ShardThreadMsg::Put(
+                        Prehashed::as_inner(&key).clone(),
+                        page.contents.clone(),
+                    ));
+                } else {
+                    requeue = true;
+                }
+            }
+
+            let Some(msg) = maybe_msg else {
+                if remove_from_dirty {
+                    self.modified_pages.remove(&key);
+                } else if requeue {
+                    self.modified_page_queue.push_back(key);
+                }
+                continue;
+            };
+
+            match tx.try_send(msg) {
+                Ok(()) => {
+                    let page = self.cache.get_mut(&key).expect("just-saved page in cache");
+                    page.modified = false;
+                    page.last_save = Some(now);
+                    self.modified_pages.remove(&key);
+                }
+                Err(mpsc::TrySendError::Full(_)) => {
+                    self.modified_page_queue.push_front(key);
+                    return;
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    panic!("shard thread exited before accepting proactive database write");
+                }
+            }
         }
     }
 
     fn send_msg(&mut self, mut msg: ShardThreadMsg) {
+        // Send, processing background thread messages while the channel is full
         loop {
             match self.thread_tx.try_send(msg) {
                 Ok(()) => return,
@@ -1028,6 +1250,7 @@ fn read_any_format(file: fs::File) -> Result<Page, ReadAnyFormatError> {
     Ok(Page {
         contents,
         modified: false,
+        last_save: None,
     })
 }
 
@@ -1437,6 +1660,7 @@ mod tests {
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::spec;
     use crate::{
+        common::Dtype,
         imp::ImplNode,
         memorylimits::{MemVec, MemoryLimits},
         scheduling::ApplyError,
@@ -1451,6 +1675,137 @@ mod tests {
 
     const TEST_SMALL_SIZE: DimSize = nz!(2u32);
     const TEST_SMALL_MEM: u64 = 256;
+
+    #[test]
+    fn test_background_save_persists_without_explicit_save_or_drop() {
+        let db_path = tempfile::tempdir().unwrap();
+
+        let mut spec: Spec<Avx2Target> =
+            spec!(Move([1, 1], (f32, L1, row_major), (f32, L1, row_major)));
+        spec.canonicalize().unwrap();
+        let decisions = vec![(
+            0,
+            Cost {
+                main: 7,
+                peaks: MemVec::zero::<Avx2Target>(),
+                depth: 0,
+            },
+        )];
+
+        let mut db =
+            FilesDatabase::new::<Avx2Target>(Some(db_path.path()), TileScale::Linear, 1, 128, 1);
+        db.set_proactive_save_interval(Duration::from_millis(50));
+        db.put(spec.clone(), decisions.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reopened = FilesDatabase::new::<Avx2Target>(
+                Some(db_path.path()),
+                TileScale::Linear,
+                1,
+                128,
+                1,
+            );
+            if reopened.get(&spec) == Some(ActionCostVec(decisions.clone())) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background save did not persist the page before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// A proactive save triggered by one put must consider dirty pages from earlier puts, not just
+    /// the page touched by the triggering put.
+    #[test]
+    fn test_background_save_checks_previously_modified_pages() {
+        let db_path = tempfile::tempdir().unwrap();
+        let mut db =
+            FilesDatabase::new::<Avx2Target>(Some(db_path.path()), TileScale::Linear, 1, 128, 1);
+        db.set_proactive_save_interval(Duration::from_millis(50));
+        let dirty_key = db.prehasher.prehash((
+            (
+                SpecKey::Matmul {
+                    dtypes: [Dtype::Float32; 3],
+                },
+                Vec::new(),
+            ),
+            vec![10, 20],
+        ));
+        {
+            let shard = &db.shards.0[db.shard_index(&dirty_key)];
+            let mut shard_guard = shard.lock();
+            shard_guard.cache.push(
+                prehashed_clone(&dirty_key),
+                Page {
+                    contents: PageContents::RTree(Box::new(RTreePageContents::empty(2))),
+                    modified: true,
+                    last_save: None,
+                },
+            );
+            shard_guard
+                .modified_pages
+                .insert(prehashed_clone(&dirty_key));
+            shard_guard
+                .modified_page_queue
+                .push_back(prehashed_clone(&dirty_key));
+        }
+
+        let mut spec: Spec<Avx2Target> =
+            spec!(Move([1, 1], (f32, L1, row_major), (f32, L1, row_major)));
+        spec.canonicalize().unwrap();
+        db.put(
+            spec,
+            vec![(
+                0,
+                Cost {
+                    main: 7,
+                    peaks: MemVec::zero::<Avx2Target>(),
+                    depth: 0,
+                },
+            )],
+        );
+
+        let page_path = page_file_path(db_path.path(), Prehashed::as_inner(&dirty_key));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if page_path.exists() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background save did not check the previously modified page"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn test_proactive_save_disabled_for_temporary_database() {
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
+        assert!(!db.proactive_saves_enabled);
+    }
+
+    #[test]
+    fn test_proactive_save_enabled_for_new_path_backed_database() {
+        let db_path = tempfile::tempdir().unwrap();
+        let db =
+            FilesDatabase::new::<Avx2Target>(Some(db_path.path()), TileScale::Linear, 1, 128, 1);
+        assert!(db.proactive_saves_enabled);
+    }
+
+    #[test]
+    fn test_proactive_save_enabled_for_existing_path_backed_database() {
+        let db_path = tempfile::tempdir().unwrap();
+        let db =
+            FilesDatabase::new::<Avx2Target>(Some(db_path.path()), TileScale::Linear, 1, 128, 1);
+        drop(db);
+
+        let db = FilesDatabase::open(Some(db_path.path()), TileScale::Linear, 1, 128, 1).unwrap();
+        assert!(db.proactive_saves_enabled);
+    }
 
     // TODO: What about leaves!? This shouldn't be called `Decision`.
     #[derive(Clone)]
@@ -1661,6 +2016,46 @@ mod tests {
             1,
         );
         assert_eq!(db.get(&spec), Some(ActionCostVec(decisions)));
+    }
+
+    #[test]
+    fn test_background_save_persists_nonspatial_cache_without_explicit_save_or_drop() {
+        let mut spec: Spec<Avx2Target> = spec!(Move([5], (u8, L1, row_major), (u8, L1, row_major)));
+        spec.canonicalize().unwrap();
+        let decisions = vec![(
+            0,
+            Cost {
+                main: 7,
+                peaks: MemVec::zero::<Avx2Target>(),
+                depth: 0,
+            },
+        )];
+
+        let db_path = tempfile::tempdir().unwrap();
+        let mut db =
+            FilesDatabase::new::<Avx2Target>(Some(db_path.path()), TileScale::PowerOfTwo, 1, 2, 1);
+        db.set_proactive_save_interval(Duration::from_millis(100));
+        assert!(!db.can_memoize_efficiently(&spec));
+        db.put(spec.clone(), decisions.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let reopened = FilesDatabase::new::<Avx2Target>(
+                Some(db_path.path()),
+                TileScale::PowerOfTwo,
+                1,
+                2,
+                1,
+            );
+            if reopened.get(&spec) == Some(ActionCostVec(decisions.clone())) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background save did not persist the non-spatial cache before timeout"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     proptest! {

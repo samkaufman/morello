@@ -158,13 +158,14 @@ where
     info!("DB statistic collection enabled");
 
     let threads = rayon::current_num_threads();
-    let db = FilesDatabase::new::<Tgt>(
+    let mut db = FilesDatabase::new::<Tgt>(
         args.db.as_deref(),
         TileScale::PowerOfTwo,
         K,
         args.cache_size,
         threads,
     );
+    db.set_proactive_saves_enabled(false);
     main_per_db::<Tgt>(args, db, args.db.as_deref())
 }
 
