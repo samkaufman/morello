@@ -25,7 +25,7 @@ use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Preh
 use serde::{Deserialize, Serialize};
 use wtinylfu::WTinyLfuCache;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Debug};
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
@@ -533,12 +533,16 @@ impl FilesDatabase {
             dim_ranges.clear();
             for (dim, &page_idx) in page_point.iter().enumerate() {
                 let block_dim_size = block_size_dim(dim, rank);
-                let Some(global_top_noninc) = top[dim].checked_add(1) else {
-                    todo!("support global_top equal to MAX");
-                };
-                let start = (page_idx * block_dim_size).max(bottom[dim]);
-                let end = ((page_idx + 1) * block_dim_size).min(global_top_noninc);
-                dim_ranges.push(localize_range(start..=end - 1, page_idx, block_dim_size));
+                let block_start = page_idx * block_dim_size;
+                let start = block_start.max(bottom[dim]);
+                // Avoid `(page_idx + 1) * block_dim_size`: the final page can sit at the top of
+                // BimapInt's range, so the exclusive end may overflow.
+                let end_inclusive = block_end_inclusive(block_start, block_dim_size).min(top[dim]);
+                dim_ranges.push(localize_range(
+                    start..=end_inclusive,
+                    page_idx,
+                    block_dim_size,
+                ));
             }
 
             // Do some awkward mutation of `key_tuple.1` to avoid cloning `table_key`/ `key_tuple.0`
@@ -704,59 +708,15 @@ impl FilesDatabase {
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
         B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
     {
-        for (query_table_key, query_tree) in query.tables() {
-            let rank = query_tree.dim_count();
-            let mut visited_pages = HashSet::new();
-            for (query_bottom, query_top, ()) in query_tree.iter() {
-                let mut page_bottom = Vec::new();
-                let mut page_top = Vec::new();
-                page_bottom.reserve_exact(rank);
-                page_top.reserve_exact(rank);
-                for (dim, (&bottom, &top)) in query_bottom.iter().zip(query_top).enumerate() {
-                    let bottom = BimapInt::try_from(bottom).unwrap();
-                    let top = BimapInt::try_from(top).unwrap();
-                    let block_dim_size = block_size_dim(dim, rank);
-                    page_bottom.push(bottom / block_dim_size);
-                    page_top.push(top / block_dim_size);
-                }
-                multi_range_product(&page_bottom, &page_top, |page_point: &[BimapInt]| {
-                    if !visited_pages.insert(page_point.to_vec()) {
-                        return;
-                    }
-                    self.for_each_spatial_query_page_result(
-                        query_table_key,
-                        query_tree,
-                        page_point.to_vec(),
-                        |(bottom, top, memoized_cost)| {
-                            visit(query_table_key, &bottom, &top, memoized_cost);
-                        },
-                    );
-                });
-                let mut page_bottom = Vec::new();
-                let mut page_top = Vec::new();
-                page_bottom.reserve_exact(rank);
-                page_top.reserve_exact(rank);
-                for (dim, (&bottom, &top)) in query_bottom.iter().zip(query_top).enumerate() {
-                    let bottom = BimapInt::try_from(bottom).unwrap();
-                    let top = BimapInt::try_from(top).unwrap();
-                    let block_dim_size = block_size_dim(dim, rank);
-                    page_bottom.push(bottom / block_dim_size);
-                    page_top.push(top / block_dim_size);
-                }
-                multi_range_product(&page_bottom, &page_top, |page_point: &[BimapInt]| {
-                    if !visited_pages.insert(page_point.to_vec()) {
-                        return;
-                    }
-                    self.for_each_spatial_query_page_result(
-                        query_table_key,
-                        query_tree,
-                        page_point.to_vec(),
-                        |(bottom, top, memoized_cost)| {
-                            visit(query_table_key, &bottom, &top, memoized_cost);
-                        },
-                    );
-                });
-            }
+        for (query_table_key, page_point, query_tree) in query.page_tables() {
+            self.for_each_spatial_query_page_result(
+                query_table_key,
+                query_tree,
+                page_point,
+                |(bottom, top, memoized_cost)| {
+                    visit(query_table_key, &bottom, &top, memoized_cost);
+                },
+            );
         }
     }
 
@@ -764,12 +724,12 @@ impl FilesDatabase {
         &self,
         query_table_key: &TableKey,
         query_tree: &RTreeDyn<()>,
-        page_point: Vec<BimapInt>,
+        page_point: &[BimapInt],
         mut visit: impl FnMut(SpatialQueryPageResult),
     ) {
         let page_key = self
             .prehasher
-            .prehash((query_table_key.clone(), page_point));
+            .prehash((query_table_key.clone(), page_point.to_vec()));
 
         let Some(page) = self.try_load_live_page(&page_key) else {
             return;
@@ -782,12 +742,18 @@ impl FilesDatabase {
                     let bottom: Vec<_> = query_bottom
                         .iter()
                         .zip(memo_bottom)
-                        .map(|(lhs, rhs)| *lhs.max(rhs))
+                        .enumerate()
+                        .map(|(dim, (lhs, rhs))| {
+                            page_local_to_global(*lhs.max(rhs), page_point, dim)
+                        })
                         .collect();
                     let top: Vec<_> = query_top
                         .iter()
                         .zip(memo_top)
-                        .map(|(lhs, rhs)| *lhs.min(rhs))
+                        .enumerate()
+                        .map(|(dim, (lhs, rhs))| {
+                            page_local_to_global(*lhs.min(rhs), page_point, dim)
+                        })
                         .collect();
                     debug_assert!(bottom.iter().zip(&top).all(|(bottom, top)| bottom <= top));
 
@@ -826,7 +792,7 @@ impl FilesDatabase {
             let mut shard_guard = shard.lock();
             shard_guard.process_available_bg_thread_msgs();
             for (page_key, page) in shard_guard.cache.iter() {
-                let (table_key, _) = Prehashed::as_inner(page_key);
+                let (table_key, page_point) = Prehashed::as_inner(page_key);
                 let PageContents::RTree(page_tree) = &page.contents;
                 let table = result.entry(table_key.clone()).or_default();
                 for (bottom, top, memoized_cost) in page_tree.tree().iter() {
@@ -836,8 +802,9 @@ impl FilesDatabase {
                     multi_range_product(bottom, top, |point| {
                         let point = point
                             .iter()
-                            .map(|&coord| BimapInt::try_from(coord).unwrap())
-                            .collect();
+                            .enumerate()
+                            .map(|(dim, &coord)| page_local_to_global(coord, page_point, dim))
+                            .collect::<Vec<BimapInt>>();
                         let previous = table.insert(point, throughput);
                         assert!(
                             previous.is_none_or(|previous| previous == throughput),
@@ -1531,6 +1498,22 @@ fn analyze_visit_dir(
     }
 }
 
+#[inline]
+fn page_local_to_global<T, O>(coord: T, page_point: &[BimapInt], dim: usize) -> O
+where
+    T: TryInto<BimapInt>,
+    BimapInt: TryInto<O>,
+{
+    let Ok(local_coord): Result<BimapInt, _> = coord.try_into() else {
+        panic!("page-local coordinate should fit in BimapInt");
+    };
+    let global_coord = page_point[dim] * block_size_dim(dim, page_point.len()) + local_coord;
+    let Ok(result): Result<O, _> = global_coord.try_into() else {
+        panic!("global coordinate should fit in output type");
+    };
+    result
+}
+
 fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     if dim >= dim_count - MEMORY_COUNT {
         31
@@ -1918,8 +1901,8 @@ fn prehashed_clone<T: Clone>(value: &Prehashed<T>) -> Prehashed<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::linear::BimapSInt;
     use crate::layout::row_major;
+    use crate::rtree::RTreeInt;
     use crate::scheduling::ActionT as _;
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::spec;
@@ -2266,7 +2249,7 @@ mod tests {
         assert!(
             global_pt
                 .iter()
-                .any(|&coord| coord > BimapSInt::MAX as BimapInt),
+                .any(|&coord| coord > RTreeInt::MAX as BimapInt),
             "test Spec should have at least one global coordinate above R-tree precision: \
              {global_pt:?}"
         );
@@ -2276,7 +2259,7 @@ mod tests {
         assert!(
             page_local_pt
                 .iter()
-                .all(|&coord| BimapSInt::try_from(coord).is_ok()),
+                .all(|&coord| RTreeInt::try_from(coord).is_ok()),
             "page-local coordinates should fit R-tree precision: {page_local_pt:?}"
         );
 

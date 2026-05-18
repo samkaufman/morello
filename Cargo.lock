@@ -1612,9 +1612,8 @@ dependencies = [
 
 [[package]]
 name = "rstar"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "421400d13ccfd26dfa5858199c30a5d76f9c54e0dba7575273025b43c5175dbb"
+version = "0.12.1"
+source = "git+https://github.com/samkaufman/rstar.git?branch=low-precision-scalars#22915446e5bfd84b3e80e07c39c851f82af8fb4b"
 dependencies = [
  "heapless",
  "num-traits",

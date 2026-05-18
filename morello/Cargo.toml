@@ -31,7 +31,7 @@ rayon = "1.7.0"
 rle_vec = { git = "https://github.com/samkaufman/rle_vec.git", branch = "morello-main", features = [
     "serialize",
 ] }
-rstar = { version = "0.12", features = ["serde"] }
+rstar = { git = "https://github.com/samkaufman/rstar.git", branch = "low-precision-scalars", features = ["serde"] }
 serde = { version = "1.0.160", features = ["derive"] }
 smallvec = { version = "1.15.1", features = ["serde", "union", "const_generics"] }
 tempfile = "3"

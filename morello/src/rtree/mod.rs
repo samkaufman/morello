@@ -1,6 +1,5 @@
 //! Implementations of R*-Tree data structures storing rectangular geometry.
 
-use crate::grid::linear::BimapSInt;
 use crate::rtree::aabb::AABB;
 use enum_dispatch::enum_dispatch;
 use rstar::Envelope as _;
@@ -15,7 +14,12 @@ use std::mem::swap;
 
 mod aabb;
 
-pub type RTreeEntryRef<'a, T> = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
+// Page-local DB block coordinates are nonnegative, but rstar::Point::Scalar must implement
+// RTreeNum, which currently requires a signed numeric type.
+pub(super) type RTreeInt = i8;
+pub(super) type RTreeMetric = i64;
+
+type RTreeEntryRef<'a, T> = (&'a [RTreeInt], &'a [RTreeInt], &'a T);
 
 pub enum RegionScanResult {
     /// The queried region is fully covered by matching rectangles.
@@ -34,19 +38,19 @@ trait RTreeGeneric<T> {
 
     fn size(&self) -> usize;
 
-    fn envelope(&self) -> Option<(Vec<BimapSInt>, Vec<BimapSInt>)>;
+    fn envelope(&self) -> Option<(Vec<RTreeInt>, Vec<RTreeInt>)>;
 
-    fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T>;
+    fn locate_at_point(&self, pt: &[RTreeInt]) -> Option<&T>;
 
-    fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_>;
+    fn locate_all_at_point(&self, pt: &[RTreeInt]) -> Box<dyn Iterator<Item = &T> + '_>;
 
     /// Scans rectangles intersecting `low..=high` once, first checking whether `cover_pred`
     /// rectangles cover the region, then whether all intersections satisfy `intersect_pred` if
     /// coverage fails.
     fn covered_or_all_intersections_match<Cover, Intersect, Equal>(
         &self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
+        low: &[RTreeInt],
+        high: &[RTreeInt],
         cover_pred: Cover,
         intersect_pred: Intersect,
         equal_pred: Equal,
@@ -57,7 +61,7 @@ trait RTreeGeneric<T> {
         Equal: FnMut(&T) -> bool;
 
     // TODO: It would be nice to take low and high by value to avoid a clone.
-    fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T);
+    fn insert(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T);
 
     /// Overwrites the inclusive rectangle `low..=high` with `value`.
     ///
@@ -67,14 +71,14 @@ trait RTreeGeneric<T> {
     ///
     /// Unlike [Self::fold_insert], this does not combine `value` with old values in overlapping
     /// regions; the replacement value wins everywhere inside `low..=high`.
-    fn replace(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool)
+    fn replace(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T, merge: bool)
     where
         T: Clone + Eq + Hash;
 
     fn merge_insert(
         &mut self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
+        low: &[RTreeInt],
+        high: &[RTreeInt],
         value: T,
         disallow_overlap: bool,
     ) where
@@ -82,15 +86,15 @@ trait RTreeGeneric<T> {
 
     fn bulk_merge_insert(
         &mut self,
-        rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>,
+        rects: Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T)>,
         logical_rank: usize,
     ) where
         T: PartialEq + Eq + Hash + Clone;
 
     fn fold_insert<F>(
         &mut self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
+        low: &[RTreeInt],
+        high: &[RTreeInt],
         value: T,
         merge: bool,
         fold: F,
@@ -101,16 +105,16 @@ trait RTreeGeneric<T> {
 
     fn subtract(
         &mut self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
-    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
+        low: &[RTreeInt],
+        high: &[RTreeInt],
+    ) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T)>
     where
         T: Clone;
 
     fn subtract_tree<V>(
         &mut self,
         subtrahend_tree: &RTreeDyn<V>,
-    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
+    ) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T, V)>
     where
         T: Clone,
         V: Clone;
@@ -143,7 +147,7 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn bulk_load(rank: usize, rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>) -> Self {
+            pub fn bulk_load(rank: usize, rects: Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T)>) -> Self {
                 match rank {
                     $( $n => RTreeDyn::$name(RTree::bulk_load(rects.into_iter().map(|(bottom, top, value)| {
                         RTreeRect { bottom: padded_pt(&bottom), top: padded_pt(&top), value }
@@ -159,7 +163,7 @@ macro_rules! rtreedyn_cases {
             }
 
             /// Returns the smallest rectangle containing every rectangle in the tree.
-            pub fn envelope(&self) -> Option<(Vec<BimapSInt>, Vec<BimapSInt>)> {
+            pub fn envelope(&self) -> Option<(Vec<RTreeInt>, Vec<RTreeInt>)> {
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::envelope(t), )*
                 }
@@ -171,7 +175,7 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {
+            pub fn locate_at_point(&self, pt: &[RTreeInt]) -> Option<&T> {
                 debug_assert_eq!(pt.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::locate_at_point(t, pt), )*
@@ -179,7 +183,7 @@ macro_rules! rtreedyn_cases {
             }
 
 
-            pub fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_> {
+            pub fn locate_all_at_point(&self, pt: &[RTreeInt]) -> Box<dyn Iterator<Item = &T> + '_> {
                 debug_assert_eq!(pt.len(), self.dim_count());
                 match self {
                     $( RTreeDyn::$name(t) => RTreeGeneric::locate_all_at_point(t, pt), )*
@@ -188,8 +192,8 @@ macro_rules! rtreedyn_cases {
 
             pub fn covered_or_all_intersections_match<Cover, Intersect, Equal>(
                 &self,
-                low: &[BimapSInt],
-                high: &[BimapSInt],
+                low: &[RTreeInt],
+                high: &[RTreeInt],
                 cover_pred: Cover,
                 intersect_pred: Intersect,
                 equal_pred: Equal,
@@ -206,7 +210,7 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
+            pub fn insert(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T) {
                 debug_assert_eq!(low.len(), self.dim_count());
                 debug_assert_eq!(high.len(), self.dim_count());
                 match self {
@@ -214,7 +218,7 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn replace(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool)
+            pub fn replace(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T, merge: bool)
             where
                 T: Clone + Eq + Hash,
             {
@@ -225,7 +229,7 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn merge_insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, disallow_overlap: bool)
+            pub fn merge_insert(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T, disallow_overlap: bool)
             where
                 T: PartialEq + Eq + Hash + Clone,
             {
@@ -236,7 +240,7 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn bulk_merge_insert(&mut self, rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>)
+            pub fn bulk_merge_insert(&mut self, rects: Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T)>)
             where
                 T: PartialEq + Eq + Hash + Clone,
             {
@@ -304,7 +308,7 @@ macro_rules! rtreedyn_cases {
             ///     ])
             /// );
             /// ```
-            pub fn fold_insert<F>(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool, fold: F)
+            pub fn fold_insert<F>(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T, merge: bool, fold: F)
             where
                 // TODO: Shouldn't need to be Clone. Instead, give references.
                 T: Clone + Eq + Hash,  // Eq needed if `merge` is set
@@ -318,8 +322,8 @@ macro_rules! rtreedyn_cases {
             }
 
             pub fn subtract(
-                &mut self, low: &[BimapSInt], high: &[BimapSInt]
-            ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
+                &mut self, low: &[RTreeInt], high: &[RTreeInt]
+            ) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T)>
             where
                 T: Clone, // TODO: Remove this bound. Shouldn't be needed.
             {
@@ -336,7 +340,7 @@ macro_rules! rtreedyn_cases {
             /// Note: The current implementation is very slow.
             pub fn subtract_tree<V>(
                 &mut self, subtrahend_tree: &RTreeDyn<V>
-            ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
+            ) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T, V)>
             where
                 T: Clone,
                 V: Clone,
@@ -347,7 +351,7 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn iter(&self) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
+            pub fn iter(&self) -> Box<dyn Iterator<Item = (&[RTreeInt], &[RTreeInt], &T)> + '_> {
                 match self {
                     $( RTreeDyn::$name(t) => Box::new(
                         t.iter().map(|r| (&r.bottom.arr[..$n], &r.top.arr[..$n], &r.value))
@@ -357,9 +361,9 @@ macro_rules! rtreedyn_cases {
 
             pub fn locate_in_envelope_intersecting(
                 &self,
-                bottom: &[BimapSInt],
-                top: &[BimapSInt],
-            ) -> Box<dyn Iterator<Item = (&[BimapSInt], &[BimapSInt], &T)> + '_> {
+                bottom: &[RTreeInt],
+                top: &[RTreeInt],
+            ) -> Box<dyn Iterator<Item = (&[RTreeInt], &[RTreeInt], &T)> + '_> {
                 debug_assert_eq!(bottom.len(), self.dim_count());
                 debug_assert_eq!(top.len(), self.dim_count());
                 match self {
@@ -430,14 +434,14 @@ struct RTreeRect<const D: usize, T> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RTreePt<const D: usize> {
     #[serde_as(as = "[_; D]")] // TODO: Use manual serde impls instead of serde_as.
-    arr: [BimapSInt; D],
+    arr: [RTreeInt; D],
 }
 
 struct RectPartitionIntersection {
-    lhs_subrectangles: Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
+    lhs_subrectangles: Vec<(Vec<RTreeInt>, Vec<RTreeInt>)>,
     #[cfg_attr(not(test), allow(dead_code))]
-    rhs_subrectangles: Vec<(Vec<BimapSInt>, Vec<BimapSInt>)>,
-    intersection: (Vec<BimapSInt>, Vec<BimapSInt>),
+    rhs_subrectangles: Vec<(Vec<RTreeInt>, Vec<RTreeInt>)>,
+    intersection: (Vec<RTreeInt>, Vec<RTreeInt>),
 }
 
 /// An [rstar::SelectionFunction] which removes a set of [rstar::RTreeObject]s.
@@ -460,7 +464,7 @@ struct MergeCandidateSelFn<'a, const D: usize, T> {
 }
 
 impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
-    type Item = (&'a [BimapSInt], &'a [BimapSInt], &'a T);
+    type Item = (&'a [RTreeInt], &'a [RTreeInt], &'a T);
     type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -468,7 +472,7 @@ impl<'a, T> IntoIterator for &'a RTreeDyn<T> {
     }
 }
 
-fn padded_pt<const D: usize>(pt: &[BimapSInt]) -> RTreePt<D> {
+fn padded_pt<const D: usize>(pt: &[RTreeInt]) -> RTreePt<D> {
     debug_assert!(
         pt.len() <= D,
         "point has {} dimensions, but underlying RTree has {} dimensions",
@@ -487,7 +491,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         self.size()
     }
 
-    fn envelope(&self) -> Option<(Vec<BimapSInt>, Vec<BimapSInt>)> {
+    fn envelope(&self) -> Option<(Vec<RTreeInt>, Vec<RTreeInt>)> {
         if self.size() == 0 {
             return None;
         }
@@ -498,12 +502,12 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         Some((bottom, top))
     }
 
-    fn locate_at_point(&self, pt: &[BimapSInt]) -> Option<&T> {
+    fn locate_at_point(&self, pt: &[RTreeInt]) -> Option<&T> {
         self.locate_at_point(&padded_pt::<D>(pt))
             .map(|rect| &rect.value)
     }
 
-    fn locate_all_at_point(&self, pt: &[BimapSInt]) -> Box<dyn Iterator<Item = &T> + '_> {
+    fn locate_all_at_point(&self, pt: &[RTreeInt]) -> Box<dyn Iterator<Item = &T> + '_> {
         Box::new(
             self.locate_all_at_point(&padded_pt::<D>(pt))
                 .map(|rect| &rect.value),
@@ -512,8 +516,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
     fn covered_or_all_intersections_match<Cover, Intersect, Equal>(
         &self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
+        low: &[RTreeInt],
+        high: &[RTreeInt],
         mut cover_pred: Cover,
         mut intersect_pred: Intersect,
         mut equal_pred: Equal,
@@ -553,14 +557,14 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         }
     }
 
-    fn insert(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T) {
+    fn insert(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T) {
         debug_assert_eq!(low.len(), high.len());
         let bottom = padded_pt::<D>(low);
         let top = padded_pt::<D>(high);
         self.insert(RTreeRect { top, bottom, value });
     }
 
-    fn replace(&mut self, low: &[BimapSInt], high: &[BimapSInt], value: T, merge: bool)
+    fn replace(&mut self, low: &[RTreeInt], high: &[RTreeInt], value: T, merge: bool)
     where
         T: Clone + Eq + Hash,
     {
@@ -608,8 +612,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
     fn merge_insert(
         &mut self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
+        low: &[RTreeInt],
+        high: &[RTreeInt],
         value: T,
         disallow_overlap: bool,
     ) where
@@ -736,7 +740,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
     fn bulk_merge_insert(
         &mut self,
-        rects: Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>,
+        rects: Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T)>,
         logical_rank: usize,
     ) where
         T: PartialEq + Eq + Hash + Clone,
@@ -765,8 +769,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
     fn fold_insert<F>(
         &mut self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
+        low: &[RTreeInt],
+        high: &[RTreeInt],
         value: T,
         merge: bool,
         mut fold: F,
@@ -854,9 +858,9 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
 
     fn subtract(
         &mut self,
-        low: &[BimapSInt],
-        high: &[BimapSInt],
-    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T)>
+        low: &[RTreeInt],
+        high: &[RTreeInt],
+    ) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T)>
     where
         T: Clone,
     {
@@ -872,7 +876,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     fn subtract_tree<V>(
         &mut self,
         subtrahend_tree: &RTreeDyn<V>,
-    ) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>, T, V)>
+    ) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>, T, V)>
     where
         T: Clone,
         V: Clone,
@@ -952,7 +956,7 @@ impl<const D: usize, T> RTreeObject for RTreeRect<D, T> {
 }
 
 impl<const D: usize, T> PointDistance for RTreeRect<D, T> {
-    fn distance_2(&self, point: &RTreePt<D>) -> BimapSInt {
+    fn distance_2(&self, point: &RTreePt<D>) -> RTreeMetric {
         AABB::<D>::ordered_corners_distance_2(&self.bottom.arr, &self.top.arr, &point.arr)
     }
 
@@ -963,8 +967,8 @@ impl<const D: usize, T> PointDistance for RTreeRect<D, T> {
     fn distance_2_if_less_or_equal(
         &self,
         point: &RTreePt<D>,
-        max_distance_2: BimapSInt,
-    ) -> Option<BimapSInt> {
+        max_distance_2: RTreeMetric,
+    ) -> Option<RTreeMetric> {
         let distance_2 = self.distance_2(point);
         if distance_2 <= max_distance_2 {
             Some(distance_2)
@@ -1060,26 +1064,26 @@ fn compare_rects_for_dim<const D: usize, T>(
         })
 }
 
-impl<const D: usize> From<[BimapSInt; D]> for RTreePt<D> {
-    fn from(value: [BimapSInt; D]) -> Self {
+impl<const D: usize> From<[RTreeInt; D]> for RTreePt<D> {
+    fn from(value: [RTreeInt; D]) -> Self {
         RTreePt { arr: value }
     }
 }
 
-impl<const D: usize> TryFrom<Vec<BimapSInt>> for RTreePt<D> {
-    type Error = <[BimapSInt; D] as TryFrom<Vec<BimapSInt>>>::Error;
+impl<const D: usize> TryFrom<Vec<RTreeInt>> for RTreePt<D> {
+    type Error = <[RTreeInt; D] as TryFrom<Vec<RTreeInt>>>::Error;
 
-    fn try_from(value: Vec<BimapSInt>) -> Result<Self, Self::Error> {
+    fn try_from(value: Vec<RTreeInt>) -> Result<Self, Self::Error> {
         Ok(RTreePt {
             arr: value.try_into()?,
         })
     }
 }
 
-impl<'a, const D: usize> TryFrom<&'a [BimapSInt]> for RTreePt<D> {
-    type Error = <[BimapSInt; D] as TryFrom<&'a [BimapSInt]>>::Error;
+impl<'a, const D: usize> TryFrom<&'a [RTreeInt]> for RTreePt<D> {
+    type Error = <[RTreeInt; D] as TryFrom<&'a [RTreeInt]>>::Error;
 
-    fn try_from(value: &'a [BimapSInt]) -> Result<Self, Self::Error> {
+    fn try_from(value: &'a [RTreeInt]) -> Result<Self, Self::Error> {
         Ok(RTreePt {
             arr: value.try_into()?,
         })
@@ -1087,7 +1091,8 @@ impl<'a, const D: usize> TryFrom<&'a [BimapSInt]> for RTreePt<D> {
 }
 
 impl<const D: usize> Point for RTreePt<D> {
-    type Scalar = BimapSInt;
+    type Scalar = RTreeInt;
+    type ComposedScalar = RTreeMetric;
     const DIMENSIONS: usize = D;
 
     fn generate(generator: impl FnMut(usize) -> Self::Scalar) -> Self {
@@ -1419,11 +1424,11 @@ fn rect_subtract_fixed_for_each<const D: usize, F>(
 /// returning replacement rectangles which cover the same space as the minuend but exclude the
 /// subtrahend.
 fn rect_subtract(
-    rect_bottom: &[BimapSInt],
-    rect_top: &[BimapSInt],
-    subtrahend_bottom: &[BimapSInt],
-    subtrahend_top: &[BimapSInt],
-) -> Vec<(Vec<BimapSInt>, Vec<BimapSInt>)> {
+    rect_bottom: &[RTreeInt],
+    rect_top: &[RTreeInt],
+    subtrahend_bottom: &[RTreeInt],
+    subtrahend_top: &[RTreeInt],
+) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>)> {
     assert_eq!(rect_bottom.len(), rect_top.len());
     assert_eq!(rect_bottom.len(), subtrahend_bottom.len());
     assert_eq!(rect_bottom.len(), subtrahend_top.len());
@@ -1461,10 +1466,10 @@ fn rect_subtract(
 /// subrectangles/tiles which cover the remainders of each rectangle. If the two rectangles do not
 /// intersect, the result will be `None`.
 fn rect_partition_intersection(
-    lhs_bottom: &[BimapSInt],
-    lhs_top: &[BimapSInt],
-    rhs_bottom: &[BimapSInt],
-    rhs_top: &[BimapSInt],
+    lhs_bottom: &[RTreeInt],
+    lhs_top: &[RTreeInt],
+    rhs_bottom: &[RTreeInt],
+    rhs_top: &[RTreeInt],
 ) -> Option<RectPartitionIntersection> {
     assert_eq!(lhs_bottom.len(), lhs_top.len());
     assert_eq!(rhs_bottom.len(), rhs_top.len());
@@ -1495,10 +1500,10 @@ fn rect_partition_intersection(
 }
 
 fn count_matching_dimensions(
-    new_rect_bottom: &[BimapSInt],
-    new_rect_top: &[BimapSInt],
-    candidate_bottom: &[BimapSInt],
-    candidate_top: &[BimapSInt],
+    new_rect_bottom: &[RTreeInt],
+    new_rect_top: &[RTreeInt],
+    candidate_bottom: &[RTreeInt],
+    candidate_top: &[RTreeInt],
 ) -> usize {
     let mut matching_dimensions = 0usize;
     for dim in 0..new_rect_bottom.len() {
@@ -1511,10 +1516,10 @@ fn count_matching_dimensions(
 }
 
 fn all_dimensions_adjacent_or_overlap(
-    lhs_bottom: &[BimapSInt],
-    lhs_top: &[BimapSInt],
-    rhs_bottom: &[BimapSInt],
-    rhs_top: &[BimapSInt],
+    lhs_bottom: &[RTreeInt],
+    lhs_top: &[RTreeInt],
+    rhs_bottom: &[RTreeInt],
+    rhs_top: &[RTreeInt],
 ) -> bool {
     for dim in 0..lhs_bottom.len() {
         let lhs_bottom_val = lhs_bottom[dim];
@@ -2166,8 +2171,8 @@ mod tests {
             .prop_map(|(bottom, top, value)| RTreeRect { bottom, top, value })
     }
 
-    fn arb_rect_range<const D: usize>() -> impl Strategy<Value = (BimapSInt, BimapSInt)> {
-        (0..BimapSInt::from(4)).prop_flat_map(|b| (Just(b), (b..((b + 4).min(6)))))
+    fn arb_rect_range<const D: usize>() -> impl Strategy<Value = (RTreeInt, RTreeInt)> {
+        (0i8..4i8).prop_flat_map(|b| (Just(b), (b..((b + 4).min(6)))))
     }
 
     // fn arb_rect_value() -> impl Strategy<Value = DbValue> {
@@ -2186,11 +2191,11 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn arb_rect_subtract() -> impl Strategy<
         Value = (
-            (Vec<BimapSInt>, Vec<BimapSInt>),
-            (Vec<BimapSInt>, Vec<BimapSInt>),
+            (Vec<RTreeInt>, Vec<RTreeInt>),
+            (Vec<RTreeInt>, Vec<RTreeInt>),
         ),
     > {
-        proptest::collection::vec((0..6i32, 0..6i32, 0..6i32, 0..6i32), 0..4).prop_map(
+        proptest::collection::vec((0i8..6i8, 0i8..6i8, 0i8..6i8, 0i8..6i8), 0..4).prop_map(
             |dim_tuples| {
                 let mut result = ((vec![], vec![]), (vec![], vec![]));
                 for (num0, num1, num2, num3) in dim_tuples {
@@ -2206,7 +2211,7 @@ mod tests {
 
     /// Construct an RTree, insert rects with the given points and the same value, and assert that
     /// they are all merged into a single rectangle
-    fn assert_merged<const D: usize>(rects: &[([BimapSInt; D], [BimapSInt; D])]) {
+    fn assert_merged<const D: usize>(rects: &[([RTreeInt; D], [RTreeInt; D])]) {
         let mut tree = RTree::new();
         for (bottom, top) in rects {
             tree.merge_insert(bottom, top, (), true);
@@ -2298,7 +2303,7 @@ mod tests {
         assert_eq!(merged_rhs_coverage, expected_rhs_coverage);
     }
 
-    fn covered_points(bottom: &[BimapSInt], top: &[BimapSInt]) -> HashSet<Vec<BimapSInt>> {
+    fn covered_points(bottom: &[RTreeInt], top: &[RTreeInt]) -> HashSet<Vec<RTreeInt>> {
         assert_eq!(bottom.len(), top.len());
         let mut points = HashSet::new();
         multi_range_product(bottom, top, |point| {

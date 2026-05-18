@@ -1,12 +1,8 @@
 use super::{ActionCostVec, ActionNormalizedCostVec, ActionNum, DbValue, GetPreference};
 use crate::{
     cost::NormalizedCost,
-    grid::{
-        canon::CanonicalBimap,
-        general::BiMap,
-        linear::{BimapInt, BimapSInt},
-    },
-    rtree::{RTreeDyn, RegionScanResult},
+    grid::{canon::CanonicalBimap, general::BiMap, linear::BimapInt},
+    rtree::{RTreeDyn, RTreeInt, RegionScanResult},
     spec::Spec,
     target::Target,
 };
@@ -176,8 +172,8 @@ impl RTreePageContents {
     }
 }
 
-fn local_coord_to_rtree(coord: BimapInt) -> BimapSInt {
-    BimapSInt::try_from(coord).expect("database page-local coordinate exceeded R-tree precision")
+fn local_coord_to_rtree(coord: BimapInt) -> RTreeInt {
+    RTreeInt::try_from(coord).expect("database page-local coordinate exceeded R-tree precision")
 }
 
 fn action_dominates(lhs: &DbValue, rhs: &DbValue) -> bool {

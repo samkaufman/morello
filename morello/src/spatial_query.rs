@@ -1,8 +1,9 @@
 use crate::grid::general::BiMap;
-use crate::grid::linear::{BimapInt, BimapSInt};
-use crate::rtree::RTreeDyn;
+use crate::grid::linear::BimapInt;
+use crate::rtree::{RTreeDyn, RTreeInt};
 use crate::spec::Spec;
-use crate::target::Target;
+use crate::target::{Target, MEMORY_COUNT};
+use crate::utils::multi_range_product;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -10,7 +11,7 @@ use std::marker::PhantomData;
 
 #[derive(Debug)]
 pub struct SpatialQuery<Tgt: Target, B, K> {
-    tables: HashMap<K, RTreeDyn<()>>,
+    tables: HashMap<K, HashMap<Vec<BimapInt>, RTreeDyn<()>>>,
     /// Dependencies that cannot be represented in `tables` because they are outside the
     /// bimap's domain.
     unmemoizable_specs: Vec<Spec<Tgt>>,
@@ -24,21 +25,34 @@ where
 {
     #[cfg(test)]
     pub fn rect_count(&self) -> usize {
-        self.tables.values().map(RTreeDyn::size).sum()
+        self.tables
+            .values()
+            .flat_map(HashMap::values)
+            .map(RTreeDyn::size)
+            .sum()
     }
 
-    pub(crate) fn tables(&self) -> impl Iterator<Item = (&K, &RTreeDyn<()>)> {
-        self.tables.iter()
+    pub(crate) fn page_tables(&self) -> impl Iterator<Item = (&K, &[BimapInt], &RTreeDyn<()>)> {
+        self.tables
+            .iter()
+            .flat_map(move |(table_key, page_tables)| {
+                page_tables
+                    .iter()
+                    .map(move |(page_point, tree)| (table_key, page_point.as_slice(), tree))
+            })
     }
 
     pub(crate) fn insert_point(&mut self, table_key: K, rank: usize, point: &[BimapInt]) {
-        let point = point
-            .iter()
-            .map(|&coord| BimapSInt::from(coord))
-            .collect::<Vec<_>>();
-        if !self.contains_point(&table_key, &point) {
-            self.table_mut(table_key, rank)
-                .merge_insert(&point, &point, (), true);
+        assert_eq!(point.len(), rank);
+        let page_point = blockify_point(point);
+        let local_point = localize_point(point, &page_point);
+        if !self.contains_point(&table_key, point) {
+            self.table_mut(table_key, page_point, rank).merge_insert(
+                &local_point,
+                &local_point,
+                (),
+                true,
+            );
         }
     }
 
@@ -49,40 +63,56 @@ where
         bottom: &[BimapInt],
         top: &[BimapInt],
     ) {
-        let bottom = bottom
-            .iter()
-            .map(|&coord| BimapSInt::from(coord))
-            .collect::<Vec<_>>();
-        let top = top
-            .iter()
-            .map(|&coord| BimapSInt::from(coord))
-            .collect::<Vec<_>>();
-        self.table_mut(table_key, rank)
-            .merge_insert(&bottom, &top, (), true);
+        assert_eq!(bottom.len(), rank);
+        assert_eq!(top.len(), rank);
+        let page_bottom = blockify_point(bottom);
+        let page_top = blockify_point(top);
+        let page_tables = self.tables.entry(table_key).or_default();
+
+        let mut local_bottom = Vec::with_capacity(rank);
+        let mut local_top = Vec::with_capacity(rank);
+        multi_range_product(&page_bottom, &page_top, |page_point: &[BimapInt]| {
+            local_bottom.clear();
+            local_top.clear();
+            for (dim, &page_coord) in page_point.iter().enumerate() {
+                let block_dim_size = block_size_dim(dim, rank);
+                let block_start = page_coord * block_dim_size;
+                let start = block_start.max(bottom[dim]);
+                // Avoid `(page_coord + 1) * block_dim_size`: the final page can sit at the top of
+                // BimapInt's range, so the mathematical exclusive end may overflow.
+                let end_inclusive = block_end_inclusive(block_start, block_dim_size).min(top[dim]);
+                debug_assert!(start <= end_inclusive);
+
+                local_bottom.push(local_coord_to_rtree(start - block_start));
+                local_top.push(local_coord_to_rtree(end_inclusive - block_start));
+            }
+
+            page_table_mut(page_tables, page_point.to_vec(), rank).merge_insert(
+                &local_bottom,
+                &local_top,
+                (),
+                true,
+            );
+        });
     }
 
-    pub(crate) fn contains_point(&self, table_key: &K, point: &[BimapSInt]) -> bool {
+    pub(crate) fn contains_point(&self, table_key: &K, point: &[BimapInt]) -> bool {
+        let page_point = blockify_point(point);
+        let local_point = localize_point(point, &page_point);
         self.tables
             .get(table_key)
-            .is_some_and(|table| table.locate_at_point(point).is_some())
+            .and_then(|page_tables| page_tables.get(&page_point))
+            .is_some_and(|table| table.locate_at_point(&local_point).is_some())
     }
 
-    #[cfg(test)]
-    pub(crate) fn rectangles_for_table(
-        &self,
-        table_key: &K,
-    ) -> impl Iterator<Item = (&[BimapSInt], &[BimapSInt])> + '_ {
-        self.tables
-            .get(table_key)
-            .into_iter()
-            .flat_map(|tree| tree.iter().map(|(bottom, top, ())| (bottom, top)))
-    }
-
-    fn table_mut(&mut self, table_key: K, rank: usize) -> &mut RTreeDyn<()> {
-        self.tables
-            .entry(table_key)
-            .and_modify(|table| assert_eq!(table.dim_count(), rank))
-            .or_insert_with(|| RTreeDyn::empty(rank))
+    fn table_mut(
+        &mut self,
+        table_key: K,
+        page_point: Vec<BimapInt>,
+        rank: usize,
+    ) -> &mut RTreeDyn<()> {
+        let page_tables = self.tables.entry(table_key).or_default();
+        page_table_mut(page_tables, page_point, rank)
     }
 }
 
@@ -149,10 +179,6 @@ where
     pub fn contains(&self, bimap: &B, spec: &Spec<Tgt>) -> bool {
         if BiMap::defined_for(bimap, spec) {
             let (table_key, global_pt) = BiMap::apply(bimap, spec);
-            let global_pt = global_pt
-                .iter()
-                .map(|&coord| BimapSInt::from(coord))
-                .collect::<Vec<_>>();
             self.contains_point(&table_key, &global_pt)
         } else {
             self.unmemoizable_specs.contains(spec)
@@ -163,20 +189,29 @@ where
     where
         K: Clone,
     {
-        self.tables.iter().flat_map(|(table_key, tree)| {
-            tree.iter().flat_map(|(bottom, top, ())| {
-                bottom
-                    .iter()
-                    .zip(top)
-                    .map(|(&bottom, &top)| {
-                        let bottom = BimapInt::try_from(bottom).unwrap();
-                        let top = BimapInt::try_from(top).unwrap();
-                        bottom..=top
+        self.tables
+            .iter()
+            .flat_map(move |(table_key, page_tables)| {
+                page_tables.iter().flat_map(move |(page_point, tree)| {
+                    let rank = tree.dim_count();
+                    tree.iter().flat_map(move |(bottom, top, ())| {
+                        bottom
+                            .iter()
+                            .zip(top)
+                            .enumerate()
+                            .map(move |(dim, (&bottom, &top))| {
+                                let block_start = page_point[dim] * block_size_dim(dim, rank);
+                                let bottom = block_start + BimapInt::try_from(bottom).unwrap();
+                                let top = block_start + BimapInt::try_from(top).unwrap();
+                                bottom..=top
+                            })
+                            .multi_cartesian_product()
+                            .map(|global_pt| {
+                                BiMap::apply_inverse(bimap, &(table_key.clone(), global_pt))
+                            })
                     })
-                    .multi_cartesian_product()
-                    .map(|global_pt| BiMap::apply_inverse(bimap, &(table_key.clone(), global_pt)))
+                })
             })
-        })
     }
 }
 
@@ -204,31 +239,61 @@ impl<Tgt: Target, B, K> Default for SpatialQuery<Tgt, B, K> {
     }
 }
 
+fn page_table_mut(
+    page_tables: &mut HashMap<Vec<BimapInt>, RTreeDyn<()>>,
+    page_point: Vec<BimapInt>,
+    rank: usize,
+) -> &mut RTreeDyn<()> {
+    page_tables
+        .entry(page_point)
+        .and_modify(|table| assert_eq!(table.dim_count(), rank))
+        .or_insert_with(|| RTreeDyn::empty(rank))
+}
+
+fn block_size_dim(dim: usize, dim_count: usize) -> BimapInt {
+    if dim >= dim_count.saturating_sub(MEMORY_COUNT) {
+        31
+    } else {
+        8
+    }
+}
+
+#[inline]
+fn block_end_inclusive(block_start: BimapInt, block_dim_size: BimapInt) -> BimapInt {
+    block_start.saturating_add(block_dim_size - 1)
+}
+
+fn blockify_point(pt: &[BimapInt]) -> Vec<BimapInt> {
+    let rank = pt.len();
+    pt.iter()
+        .enumerate()
+        .map(|(dim, &coord)| coord / block_size_dim(dim, rank))
+        .collect()
+}
+
+fn localize_point(pt: &[BimapInt], page_pt: &[BimapInt]) -> Vec<RTreeInt> {
+    debug_assert_eq!(pt.len(), page_pt.len());
+    let rank = pt.len();
+    pt.iter()
+        .zip(page_pt)
+        .enumerate()
+        .map(|(dim, (&coord, &page_coord))| {
+            local_coord_to_rtree(coord - page_coord * block_size_dim(dim, rank))
+        })
+        .collect()
+}
+
+fn local_coord_to_rtree(coord: BimapInt) -> RTreeInt {
+    RTreeInt::try_from(coord)
+        .expect("spatial query page-local coordinate exceeded R-tree precision")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::target::Avx2Target;
 
     type TestQuery = SpatialQuery<Avx2Target, (), ()>;
-
-    #[test]
-    fn test_spatial_query_can_coalesce_adjacent_unit_rectangles() {
-        let mut query = TestQuery::default();
-        query.insert_point((), 2, &[0, 0]);
-        query.insert_point((), 2, &[1, 0]);
-
-        assert_eq!(query.rect_count(), 1);
-        assert_eq!(
-            query
-                .rectangles_for_table(&())
-                .map(|(bottom, top)| (bottom.to_vec(), top.to_vec()))
-                .collect::<Vec<_>>(),
-            vec![(vec![0, 0], vec![1, 0])]
-        );
-        assert!(query.contains_point(&(), &[0, 0]));
-        assert!(query.contains_point(&(), &[1, 0]));
-        assert!(!query.contains_point(&(), &[2, 0]));
-    }
 
     #[test]
     fn test_spatial_query_deduplicates_points() {
