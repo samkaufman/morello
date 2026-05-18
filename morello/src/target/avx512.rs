@@ -4,6 +4,7 @@ use crate::common::Dtype;
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
+use crate::layout::PhysDim;
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
 use crate::target::{CpuMemory, Memory};
@@ -75,6 +76,7 @@ pub struct Avx512Target;
 pub enum Avx512Kernel {
     Cpu(CpuKernel),
     DotProductLoopVdpbf16ps,
+    MatmulLoopVdpbf16ps,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
@@ -105,7 +107,10 @@ impl CpuTarget for Avx512Target {
                 _,
             )
         ) {
-            vec![Avx512Kernel::DotProductLoopVdpbf16ps]
+            vec![
+                Avx512Kernel::DotProductLoopVdpbf16ps,
+                Avx512Kernel::MatmulLoopVdpbf16ps,
+            ]
         } else {
             Vec::new()
         }
@@ -125,7 +130,7 @@ impl Kernel for Avx512Kernel {
     fn argument_count(&self) -> u8 {
         match self {
             Avx512Kernel::Cpu(cpu_kernel) => cpu_kernel.argument_count(),
-            Avx512Kernel::DotProductLoopVdpbf16ps => 3,
+            Avx512Kernel::DotProductLoopVdpbf16ps | Avx512Kernel::MatmulLoopVdpbf16ps => 3,
         }
     }
 
@@ -134,6 +139,9 @@ impl Kernel for Avx512Kernel {
             Avx512Kernel::Cpu(cpu_kernel) => cpu_kernel.applies_to_logical_spec(logical_spec),
             Avx512Kernel::DotProductLoopVdpbf16ps => {
                 vdpbf16ps_applies_to_logical_spec(logical_spec)
+            }
+            Avx512Kernel::MatmulLoopVdpbf16ps => {
+                matmul_vdpbf16ps_applies_to_logical_spec(logical_spec)
             }
         }
     }
@@ -149,6 +157,11 @@ impl Kernel for Avx512Kernel {
                     .and_then(|k| vector_accum_count(k.get(), strip))
                     .unwrap_or(VECTOR_ACCUM_COUNT);
                 MemoryAllocation::Simple([0, u64::from(accum_count) + 2, 0, 0])
+            }
+            Avx512Kernel::MatmulLoopVdpbf16ps => {
+                // For RF: 3 intermediates before broadcast.
+                // For VRF: one f32 accumulator, one broadcast A-pair vector, and one B-pair vector.
+                MemoryAllocation::Simple([3, 3, 0, 0])
             }
         }
     }
@@ -166,9 +179,44 @@ impl Kernel for Avx512Kernel {
                 let instr_count = k / 32;
                 let accum_count = vector_accum_count(k, 32).unwrap_or(VECTOR_ACCUM_COUNT);
 
-                // VDPBF16PS ZMM,..,M512 has RThroughput of 0.50 cycles on Zen 5
+                // VDPBF16PS ZMM,..,M512 has RThroughput of 0.5 cycles (1 unit) on Zen 5
                 const REDUCTION_COST: MainCost = 4;
                 instr_count + REDUCTION_COST * accum_count
+            }
+            Avx512Kernel::MatmulLoopVdpbf16ps => {
+                let [lhs_spec, rhs_spec, _] = parameters else {
+                    unreachable!();
+                };
+                let [_, m, k] = lhs_spec.spec().shape() else {
+                    unreachable!();
+                };
+                let [_, _, n] = rhs_spec.spec().shape() else {
+                    unreachable!();
+                };
+                let n_vectors = n.get().div_ceil(16);
+                let full_k_pairs = k.get() / 2;
+                let has_tail_pair = u32::from(!k.get().is_multiple_of(2));
+                let rhs_unit_stride = tensor_has_unit_stride_dim(rhs_spec.spec(), 2);
+
+                // The fast bf16 microkernel executes one VDPBF16PS for each M row, output vector,
+                // and K pair. VDPBF16PS has an RThroughput of 0.5 cycles, so each execution costs
+                // one unit. Also, count the vector prep code emitted by this lowering: a broadcast
+                // of the A bf16 pair and construction of the packed B pair.
+                let b_pair_vector_units = if rhs_unit_stride {
+                    3 // two expands + one vector blend
+                } else {
+                    32 // fallback load from scalar loads
+                };
+                let b_tail_vector_units = if rhs_unit_stride {
+                    1 // one expand
+                } else {
+                    16
+                };
+                let full_pair_units = b_pair_vector_units + 2;
+                let tail_pair_units = b_tail_vector_units + 2;
+                m.get()
+                    * n_vectors
+                    * (full_k_pairs * full_pair_units + has_tail_pair * tail_pair_units)
             }
         }
     }
@@ -177,13 +225,14 @@ impl Kernel for Avx512Kernel {
         match self {
             Avx512Kernel::Cpu(cpu_kernel) => cpu_kernel.name(),
             Avx512Kernel::DotProductLoopVdpbf16ps => "DotProductLoopVdpbf16ps",
+            Avx512Kernel::MatmulLoopVdpbf16ps => "MatmulLoopVdpbf16ps",
         }
     }
 
     fn into_cpu_kernel(self) -> Option<CpuKernel> {
         match self {
             Avx512Kernel::Cpu(cpu_kernel) => Some(cpu_kernel),
-            Avx512Kernel::DotProductLoopVdpbf16ps => None,
+            Avx512Kernel::DotProductLoopVdpbf16ps | Avx512Kernel::MatmulLoopVdpbf16ps => None,
         }
     }
 
@@ -252,6 +301,81 @@ fn vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Target>) -
         && lhs.memory() == CpuMemory::L1
         && rhs.memory() == CpuMemory::L1
         && out.memory() == CpuMemory::RF
+}
+
+fn matmul_vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Target>) -> bool {
+    let LogicalSpec::Primitive(
+        PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: true },
+            ..
+        },
+        _,
+        _,
+    ) = logical_spec
+    else {
+        return false;
+    };
+
+    let operands = logical_spec.parameters();
+    let [lhs, rhs, out] = &operands[..] else {
+        unreachable!("MatmulAccum should have 3 parameters");
+    };
+    if lhs.dtype() != Dtype::Bfloat16
+        || rhs.dtype() != Dtype::Bfloat16
+        || out.dtype() != Dtype::Float32
+    {
+        return false;
+    }
+
+    let [b, m, k] = lhs.shape() else {
+        return false;
+    };
+    let [rhs_b, rhs_k, n] = rhs.shape() else {
+        return false;
+    };
+    let [out_b, out_m, out_n] = out.shape() else {
+        return false;
+    };
+    debug_assert_eq!(b, rhs_b);
+    debug_assert_eq!(k, rhs_k);
+    debug_assert_eq!(b, out_b);
+    debug_assert_eq!(m, out_m);
+    debug_assert_eq!(n, out_n);
+
+    if *b != nz!(1u32) {
+        return false;
+    }
+
+    if n.get() % 16 != 0 || !tensor_has_unit_stride_dim(out, 2) {
+        return false;
+    }
+
+    let output_memory_ok = match out.memory().into() {
+        CpuMemory::VRF => out.vector_size() == Some(nz!(16u32)) && out.is_contiguous(),
+        CpuMemory::L1 | CpuMemory::GL => true,
+        CpuMemory::RF => false,
+    };
+    if !output_memory_ok {
+        return false;
+    }
+
+    match rhs.memory().into() {
+        CpuMemory::VRF => rhs.vector_size() == Some(nz!(16u32)),
+        CpuMemory::RF | CpuMemory::L1 | CpuMemory::GL => true,
+    }
+}
+
+// TODO: This is probably more general than we need after tiling.
+fn tensor_has_unit_stride_dim<Tgt: crate::target::Target>(
+    tensor: &crate::tensorspec::TensorSpec<Tgt>,
+    logical_dim: u8,
+) -> bool {
+    let layout = tensor.layout();
+    layout.contig() > 0
+        && matches!(
+            layout.dims.last(),
+            Some((dim, PhysDim::Dynamic | PhysDim::Packed(_))) if *dim == logical_dim
+        )
 }
 
 impl Memory for Avx512Memory {
@@ -344,10 +468,12 @@ impl CanonicalBimap for Avx512Memory {
 mod tests {
     use super::{Avx512Kernel, Avx512Target};
     use crate::codegen::CodeGen;
+    use crate::cost::Cost;
     use crate::layout::row_major;
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::spec::{LogicalSpec, Spec};
-    use crate::target::CpuMemory::{L1, RF};
+    use crate::target::cpu::CpuKernel;
+    use crate::target::CpuMemory::{GL, L1, RF, VRF};
     use crate::target::{Kernel, Target};
     use crate::{layout, lspec};
 
@@ -393,5 +519,44 @@ mod tests {
         let mut c = String::new();
         implementation.emit(true, None, &mut c).unwrap();
         assert!(c.contains("_mm512_dpbf16_ps"));
+    }
+
+    #[test]
+    fn test_matmul_vdpbf16ps_kernel_applies_to_bf16_matmul_tile() {
+        let mut logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 3, 128, 16],
+            (bf16, L1, row_major),
+            (bf16, L1, layout![0, 2, 1]),
+            (f32, VRF, row_major, 16),
+            serial
+        ));
+        logical_spec.canonicalize().unwrap();
+        assert!(Avx512Kernel::MatmulLoopVdpbf16ps.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_matmul_vdpbf16ps_kernel_accepts_row_major_rhs() {
+        let mut logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 3, 128, 16],
+            (bf16, L1, row_major),
+            (bf16, L1, row_major),
+            (f32, L1, row_major),
+            serial
+        ));
+        logical_spec.canonicalize().unwrap();
+        assert!(Avx512Kernel::MatmulLoopVdpbf16ps.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_matmul_vdpbf16ps_kernel_accepts_short_k() {
+        let mut logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 3, 15, 16],
+            (bf16, L1, row_major),
+            (bf16, L1, layout![0, 2, 1]),
+            (f32, L1, row_major),
+            serial
+        ));
+        logical_spec.canonicalize().unwrap();
+        assert!(Avx512Kernel::MatmulLoopVdpbf16ps.applies_to_logical_spec(&logical_spec));
     }
 }

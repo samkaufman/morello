@@ -18,7 +18,7 @@ use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{unique_dims_per_axis, Loop};
 use crate::imp::pipeline::Pipeline;
 use crate::imp::{Impl, ImplNode};
-use crate::layout::BufferVar;
+use crate::layout::{BufferVar, PhysDim};
 use crate::opaque_symbol::OpaqueSymbol;
 use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
@@ -667,7 +667,353 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 }
                 Ok(())
             }
+            Avx512Kernel::MatmulLoopVdpbf16ps => {
+                let lhs_spec = arguments[0].spec();
+                let rhs_spec = arguments[1].spec();
+                let m = lhs_spec.shape()[1].get();
+                let k = lhs_spec.shape()[2].get();
+                let n = rhs_spec.shape()[2].get();
+                let m_idx_name = self.namer.fresh_name();
+                let n_idx_name = self.namer.fresh_name();
+
+                writeln!(w, "{}// MatmulLoopVdpbf16ps", indent(depth))?;
+
+                let needs_unroll = arguments
+                    .iter()
+                    .any(|argument| self.c_buffer_for_view(argument).needs_unroll());
+                if needs_unroll {
+                    for m_idx in 0..m {
+                        for n_idx in (0..n).step_by(16) {
+                            self.emit_matmul_vdpbf16ps_body(
+                                w,
+                                arguments,
+                                NonAffineExpr::constant(i32::try_from(m_idx).unwrap()),
+                                NonAffineExpr::constant(i32::try_from(n_idx).unwrap()),
+                                k,
+                                true,
+                                depth,
+                            )?;
+                        }
+                    }
+                } else {
+                    writeln!(
+                        w,
+                        "{0}for (size_t {1} = 0; {1} < {m}; {1}++) {{",
+                        indent(depth),
+                        m_idx_name,
+                    )?;
+                    writeln!(
+                        w,
+                        "{0}for (size_t {1} = 0; {1} < {n}; {1} += 16) {{",
+                        indent(depth),
+                        n_idx_name,
+                    )?;
+                    self.emit_matmul_vdpbf16ps_body(
+                        w,
+                        arguments,
+                        CName(m_idx_name).into(),
+                        CName(n_idx_name).into(),
+                        k,
+                        false,
+                        depth + 2,
+                    )?;
+                    writeln!(w, "{}}}", indent(depth))?;
+                    writeln!(w, "{}}}", indent(depth))?;
+                }
+                Ok(())
+            }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_matmul_vdpbf16ps_body<W: Write>(
+        &mut self,
+        w: &mut W,
+        arguments: &[ViewE<Tgt>],
+        m_expr: NonAffineExpr<CName>,
+        n_start_expr: NonAffineExpr<CName>,
+        k: u32,
+        unroll_k: bool,
+        depth: usize,
+    ) -> fmt::Result {
+        let acc_name = self.namer.fresh_name();
+        let out_ptr = self.c_index_ptr_with_point_exprs(
+            &arguments[2],
+            &[
+                (0, NonAffineExpr::constant(0)),
+                (1, m_expr.clone()),
+                (2, n_start_expr.clone()),
+            ],
+        );
+        writeln!(w, "{}__m512 {acc_name};", indent(depth))?;
+        writeln!(
+            w,
+            "{}__builtin_memcpy(&{acc_name}, {out_ptr}, sizeof({acc_name}));",
+            indent(depth),
+        )?;
+
+        if unroll_k {
+            for k_idx in (0..k).step_by(2) {
+                self.emit_matmul_vdpbf16ps_step(
+                    w,
+                    arguments,
+                    &acc_name,
+                    m_expr.clone(),
+                    n_start_expr.clone(),
+                    NonAffineExpr::constant(i32::try_from(k_idx).expect("K index should fit i32")),
+                    k_idx + 1 < k,
+                    depth,
+                )?;
+            }
+        } else {
+            let full_k = (k / 2) * 2;
+            if full_k != 0 {
+                let k_idx_name = self.namer.fresh_name();
+                writeln!(
+                    w,
+                    "{0}for (size_t {1} = 0; {1} < {2}; {1} += 2) {{",
+                    indent(depth),
+                    k_idx_name,
+                    full_k,
+                )?;
+                self.emit_matmul_vdpbf16ps_step(
+                    w,
+                    arguments,
+                    &acc_name,
+                    m_expr.clone(),
+                    n_start_expr.clone(),
+                    CName(k_idx_name).into(),
+                    true,
+                    depth + 1,
+                )?;
+                writeln!(w, "{}}}", indent(depth))?;
+            }
+            if !k.is_multiple_of(2) {
+                self.emit_matmul_vdpbf16ps_step(
+                    w,
+                    arguments,
+                    &acc_name,
+                    m_expr,
+                    n_start_expr,
+                    NonAffineExpr::constant(i32::try_from(full_k).unwrap()),
+                    false,
+                    depth,
+                )?;
+            }
+        }
+
+        writeln!(
+            w,
+            "{}__builtin_memcpy({out_ptr}, &{acc_name}, sizeof({acc_name}));",
+            indent(depth),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_matmul_vdpbf16ps_step<W: Write>(
+        &mut self,
+        w: &mut W,
+        arguments: &[ViewE<Tgt>],
+        acc_name: &str,
+        m_expr: NonAffineExpr<CName>,
+        n_start_expr: NonAffineExpr<CName>,
+        k_expr: NonAffineExpr<CName>,
+        has_high_k: bool,
+        depth: usize,
+    ) -> fmt::Result {
+        let lhs_vec_name = self.namer.fresh_name();
+        let lo_expr = self.avx512_bf16_scalar_load_expr(
+            &arguments[0],
+            &[
+                (0, NonAffineExpr::constant(0)),
+                (1, m_expr.clone()),
+                (2, k_expr.clone()),
+            ],
+        );
+        let lo_name = self.namer.fresh_name();
+        writeln!(w, "{}uint16_t {lo_name} = {lo_expr};", indent(depth))?;
+
+        let hi_expr = if has_high_k {
+            self.avx512_bf16_scalar_load_expr(
+                &arguments[0],
+                &[
+                    (0, NonAffineExpr::constant(0)),
+                    (1, m_expr),
+                    (2, k_expr.clone() + 1),
+                ],
+            )
+        } else {
+            "0".to_string()
+        };
+        let hi_name = self.namer.fresh_name();
+        writeln!(w, "{}uint16_t {hi_name} = {hi_expr};", indent(depth))?;
+
+        let pair_name = self.namer.fresh_name();
+        writeln!(
+            w,
+            "{}uint32_t {pair_name} = ((uint32_t){lo_name}) | ((uint32_t){hi_name} << 16);",
+            indent(depth),
+        )?;
+        writeln!(
+            w,
+            "{}__m512bh {lhs_vec_name} = (__m512bh)_mm512_set1_epi32((int){pair_name});",
+            indent(depth),
+        )?;
+
+        let rhs_vec_name = self.namer.fresh_name();
+        self.emit_avx512_bf16_n_pair_vector(
+            w,
+            &rhs_vec_name,
+            &arguments[1],
+            k_expr,
+            n_start_expr,
+            has_high_k,
+            depth,
+        )?;
+
+        writeln!(
+            w,
+            "{0}{1} = _mm512_dpbf16_ps({1}, {2}, {3});",
+            indent(depth),
+            acc_name,
+            lhs_vec_name,
+            rhs_vec_name,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_avx512_bf16_n_pair_vector<W: Write>(
+        &mut self,
+        w: &mut W,
+        name: &str,
+        arg: &ViewE<Tgt>,
+        k_expr: NonAffineExpr<CName>,
+        n_start_expr: NonAffineExpr<CName>,
+        has_high_k: bool,
+        depth: usize,
+    ) -> fmt::Result {
+        if self.view_has_unit_stride_dim(arg, 2) {
+            let lo_ptr = self.c_index_ptr_with_point_exprs(
+                arg,
+                &[
+                    (0, NonAffineExpr::constant(0)),
+                    (1, k_expr.clone()),
+                    (2, n_start_expr.clone()),
+                ],
+            );
+            let lo_packed_name = self.namer.fresh_name();
+            let lo_expanded_name = self.namer.fresh_name();
+            writeln!(w, "{}__m512i {lo_packed_name} =", indent(depth))?;
+            writeln!(
+                w,
+                "{}_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i *)({lo_ptr})));",
+                indent(depth + 1),
+            )?;
+            writeln!(w, "{}__m512i {lo_expanded_name} =", indent(depth))?;
+            writeln!(
+                w,
+                "{}_mm512_maskz_expand_epi16((__mmask32)0x55555555u, {lo_packed_name});",
+                indent(depth + 1),
+            )?;
+
+            if has_high_k {
+                let hi_ptr = self.c_index_ptr_with_point_exprs(
+                    arg,
+                    &[
+                        (0, NonAffineExpr::constant(0)),
+                        (1, k_expr + 1),
+                        (2, n_start_expr),
+                    ],
+                );
+                let hi_packed_name = self.namer.fresh_name();
+                let hi_expanded_name = self.namer.fresh_name();
+                writeln!(w, "{}__m512i {hi_packed_name} =", indent(depth))?;
+                writeln!(
+                    w,
+                    "{}_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i *)({hi_ptr})));",
+                    indent(depth + 1),
+                )?;
+                writeln!(w, "{}__m512i {hi_expanded_name} =", indent(depth))?;
+                writeln!(
+                    w,
+                    "{}_mm512_maskz_expand_epi16((__mmask32)0xAAAAAAAAu, {hi_packed_name});",
+                    indent(depth + 1),
+                )?;
+                writeln!(
+                    w,
+                    "{}__m512bh {name} = (__m512bh)_mm512_or_si512({lo_expanded_name}, {hi_expanded_name});",
+                    indent(depth),
+                )
+            } else {
+                writeln!(
+                    w,
+                    "{}__m512bh {name} = (__m512bh){lo_expanded_name};",
+                    indent(depth),
+                )
+            }?;
+            return Ok(());
+        }
+
+        let mut lane_exprs = Vec::with_capacity(32);
+        for lane in (0..16u32).rev() {
+            let n_expr = n_start_expr.clone() + i32::try_from(lane).expect("N lane should fit i32");
+            let hi_expr = if has_high_k {
+                self.avx512_bf16_scalar_load_expr(
+                    arg,
+                    &[
+                        (0, NonAffineExpr::constant(0)),
+                        (1, k_expr.clone() + 1),
+                        (2, n_expr.clone()),
+                    ],
+                )
+            } else {
+                "0".to_string()
+            };
+            let lo_expr = self.avx512_bf16_scalar_load_expr(
+                arg,
+                &[
+                    (0, NonAffineExpr::constant(0)),
+                    (1, k_expr.clone()),
+                    (2, n_expr),
+                ],
+            );
+            lane_exprs.push(hi_expr);
+            lane_exprs.push(lo_expr);
+        }
+
+        writeln!(
+            w,
+            "{}__m512bh {name} = (__m512bh)_mm512_set_epi16(",
+            indent(depth)
+        )?;
+        for (idx, lane_expr) in lane_exprs.iter().enumerate() {
+            let suffix = if idx + 1 == lane_exprs.len() { "" } else { "," };
+            writeln!(w, "{}{}{}", indent(depth + 1), lane_expr, suffix)?;
+        }
+        writeln!(w, "{});", indent(depth))
+    }
+
+    fn avx512_bf16_scalar_load_expr(
+        &self,
+        arg: &ViewE<Tgt>,
+        point_exprs: &[(u8, NonAffineExpr<CName>)],
+    ) -> String {
+        let ptr = self.c_index_ptr_with_point_exprs(arg, point_exprs);
+        format!("*((const uint16_t *)({ptr}))")
+    }
+
+    fn c_buffer_for_view(&self, arg: &ViewE<Tgt>) -> &CBuffer {
+        let backing_tensor = arg.backing_tensor().unwrap();
+        self.name_env.get(&backing_tensor.identifier()).unwrap()
+    }
+
+    fn view_has_unit_stride_dim(&self, arg: &ViewE<Tgt>, logical_dim: u8) -> bool {
+        let layout = arg.spec().layout();
+        layout.contig() > 0
+            && matches!(
+                layout.dims.last(),
+                Some((dim, PhysDim::Dynamic | PhysDim::Packed(_))) if *dim == logical_dim
+            )
     }
 
     fn make_buffer(
@@ -2904,6 +3250,45 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 if reinterpret.is_some() {
                     unimplemented!();
                 };
+                if vec_offset == 0 {
+                    format!("&{name}")
+                } else {
+                    format!("&{name}[{}]", expr_to_c(&vec_offset))
+                }
+            }
+        }
+    }
+
+    fn c_index_ptr_with_point_exprs(
+        &self,
+        arg: &ViewE<Tgt>,
+        point_exprs: &[(u8, NonAffineExpr<CName>)],
+    ) -> String {
+        let buffer = self.c_buffer_for_view(arg);
+        let buffer_indexing_expr = arg.make_buffer_indexing_expr().map_vars(&mut |v| match v {
+            BufferVar::Pt(dim, _) => point_exprs
+                .iter()
+                .find_map(|(point_dim, expr)| (*point_dim == dim).then(|| expr.clone()))
+                .unwrap_or_else(NonAffineExpr::zero),
+            BufferVar::TileIdx(_, _) => match self.loop_iter_bindings.get(&v) {
+                Some(Either::Left(var_name)) => CName(var_name.clone()).into(),
+                Some(Either::Right(c)) => NonAffineExpr::constant(*c),
+                None => panic!("var was not bound: {v:?}"),
+            },
+        });
+
+        match buffer {
+            CBuffer::HeapArray { name, .. }
+            | CBuffer::WorkspaceSlice { name, .. }
+            | CBuffer::Ptr { name, .. } => {
+                format!("{name} + {}", expr_to_c(&buffer_indexing_expr))
+            }
+            CBuffer::StackArray { name, .. } => {
+                format!("&{name}[{}]", expr_to_c(&buffer_indexing_expr))
+            }
+            CBuffer::RegVars { .. } => {
+                let (name, vec_offset) = buffer.inner_reg_from_expr(&buffer_indexing_expr);
+                debug_assert!(vec_offset.as_constant().is_some());
                 if vec_offset == 0 {
                     format!("&{name}")
                 } else {
