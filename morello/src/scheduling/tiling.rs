@@ -905,10 +905,17 @@ fn create_region_output_tiling<Tgt: Target>(
     for (dim_idx, &tile_size) in output_tile.tile.shape().iter().enumerate() {
         let original_size = original_param_shape[dim_idx];
         let actual_axis = output_tile.axes[dim_idx];
-        if region_id.get() & (1_usize << actual_axis) != 0 {
-            let remainder = DimSize::new(original_size.get() % tile_size.get()).unwrap();
-            region_tile_shape[dim_idx] = remainder;
+        let remainder = original_size.get() % tile_size.get();
+        if remainder == 0 {
+            continue;
         }
+
+        let region_dim_size = if region_id.get() & (1_usize << actual_axis) != 0 {
+            remainder
+        } else {
+            original_size.get() - remainder
+        };
+        region_tile_shape[dim_idx] = DimSize::new(region_dim_size).unwrap();
     }
     debug_assert_ne!(region_tile_shape, original_param_shape);
     Ok(Tiling::new_simple(region_tile_shape.into()))
@@ -1478,6 +1485,32 @@ mod tests {
             Ok(n) => panic!("Expected Loop implementation, got {n:?}"),
             Err(err) => panic!("Expected successful tiling application, got {err:?}"),
         };
+    }
+
+    proptest! {
+        #[test]
+        fn test_multi_boundary_regions_are_disjoint(
+            (spec, output_tile_shape) in arb_canonical_spec_and_multi_boundary_tile_shape()
+        ) {
+            let output_idx = spec.0.unique_output_index().unwrap();
+            let original_output_shape = spec.0.parameter_shape(output_idx).to_vec();
+
+            let tile_action = Action::TileOut(TileOut::MultiLoop {
+                output_shape: output_tile_shape.clone(),
+                parallel: false,
+            });
+            let loop_impl = match tile_action.apply(&spec) {
+                Ok(ImplNode::Loop(loop_impl)) => loop_impl,
+                Ok(other) => {
+                    prop_assert!(false, "Expected Loop from TileOut, got {other:?}");
+                    unreachable!();
+                }
+                Err(_) => return Ok(()),
+            };
+
+            let output_regions = loop_output_regions(&loop_impl, output_idx);
+            assert_rects_cover_without_overlap(&output_regions, &original_output_shape)?;
+        }
     }
 
     #[test]
@@ -2550,6 +2583,160 @@ mod tests {
 
                 (Just(spec), prop::strategy::Union::new(strategies))
             })
+    }
+
+    fn arb_canonical_spec_and_multi_boundary_tile_shape(
+    ) -> impl Strategy<Value = (Spec<Avx2Target>, Shape)> {
+        arb_canonical_spec::<Avx2Target>(Some(nz!(16u32)), Some(1024))
+            .prop_filter_map(
+                "spec must have a unique output with at least two non-unit axes",
+                |spec| {
+                    let output_idx = spec.0.unique_output_index()?;
+                    let output_shape = spec.0.parameter_shape(output_idx).to_vec();
+                    (output_shape.iter().filter(|dim| dim.get() > 1).count() >= 2)
+                        .then_some((spec, output_shape))
+                },
+            )
+            .prop_flat_map(|(spec, output_shape)| {
+                (
+                    Just(spec),
+                    Just(output_shape.clone()),
+                    output_shape
+                        .iter()
+                        .map(|dim| 1..=dim.get())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .prop_filter(
+                "at least two output axes must have partial boundary regions",
+                |(_, output_shape, tile_shape)| {
+                    output_shape
+                        .iter()
+                        .zip(tile_shape)
+                        .filter(|&(&dim, &tile_dim)| dim.get() % tile_dim != 0)
+                        .count()
+                        >= 2
+                },
+            )
+            .prop_map(|(spec, _, tile_shape)| {
+                (
+                    spec,
+                    tile_shape
+                        .into_iter()
+                        .map(|dim| DimSize::new(dim).unwrap())
+                        .collect(),
+                )
+            })
+    }
+
+    #[derive(Debug)]
+    struct OutputRect {
+        offsets: Vec<u32>,
+        shape: Shape,
+    }
+
+    fn loop_output_regions(loop_impl: &Loop<Avx2Target>, output_idx: usize) -> Vec<OutputRect> {
+        let output_loop_tile = loop_impl
+            .tiles
+            .iter()
+            .find(|tile| usize::from(tile.parameter_index) == output_idx)
+            .expect("expected a loop tile for the output parameter");
+        let original_output_shape = output_loop_tile.tile.view.shape();
+        let main_shape = original_output_shape
+            .iter()
+            .zip(output_loop_tile.tile.step_sizes())
+            .map(|(&original_dim, &step_size)| {
+                DimSize::new(original_dim.get() / step_size.get() * step_size.get()).unwrap()
+            })
+            .collect();
+        let mut output_regions = vec![OutputRect {
+            offsets: vec![0; original_output_shape.len()],
+            shape: main_shape,
+        }];
+
+        for body in loop_impl.bodies.iter().skip(1) {
+            let ImplNode::SpecApp(spec_app) = body else {
+                panic!("Expected boundary body to be SpecApp, got {body:?}");
+            };
+            let ViewE::BoundaryTile(output_boundary_tile) = &spec_app.1[output_idx] else {
+                panic!(
+                    "Expected boundary body output argument to be BoundaryTile, got {:?}",
+                    spec_app.1[output_idx],
+                );
+            };
+            output_regions.push(OutputRect {
+                offsets: output_boundary_tile.offsets().to_vec(),
+                shape: output_boundary_tile.shape().iter().copied().collect(),
+            });
+        }
+
+        output_regions
+    }
+
+    fn assert_rects_cover_without_overlap(
+        rects: &[OutputRect],
+        original_shape: &[DimSize],
+    ) -> Result<(), TestCaseError> {
+        let original_volume = shape_volume(original_shape);
+        let rect_volume_sum = rects
+            .iter()
+            .map(|rect| {
+                assert_rect_within_shape(rect, original_shape)?;
+                Ok(shape_volume(&rect.shape))
+            })
+            .sum::<Result<u128, TestCaseError>>()?;
+
+        for (i, rect_a) in rects.iter().enumerate() {
+            for (j, rect_b) in rects.iter().enumerate().skip(i + 1) {
+                prop_assert!(
+                    !rects_intersect(rect_a, rect_b),
+                    "Output regions {i} and {j} overlap: {rect_a:?} vs {rect_b:?}"
+                );
+            }
+        }
+
+        prop_assert_eq!(
+            rect_volume_sum,
+            original_volume,
+            "Output regions do not cover original output volume: {:?}",
+            rects,
+        );
+        Ok(())
+    }
+
+    fn assert_rect_within_shape(
+        rect: &OutputRect,
+        original_shape: &[DimSize],
+    ) -> Result<(), TestCaseError> {
+        prop_assert_eq!(rect.offsets.len(), original_shape.len());
+        prop_assert_eq!(rect.shape.len(), original_shape.len());
+        for ((&offset, &rect_dim), &original_dim) in
+            rect.offsets.iter().zip(&rect.shape).zip(original_shape)
+        {
+            prop_assert!(rect_dim.get() > 0);
+            prop_assert!(
+                offset + rect_dim.get() <= original_dim.get(),
+                "Output region is out of bounds: {rect:?} within {original_shape:?}"
+            );
+        }
+        Ok(())
+    }
+
+    // TODO: Can probably replace this with a util implementation elsewhere in the codebase.
+    fn rects_intersect(a: &OutputRect, b: &OutputRect) -> bool {
+        a.offsets
+            .iter()
+            .zip(&a.shape)
+            .zip(b.offsets.iter().zip(&b.shape))
+            .all(|((&a_offset, &a_dim), (&b_offset, &b_dim))| {
+                let a_end = a_offset + a_dim.get();
+                let b_end = b_offset + b_dim.get();
+                a_offset < b_end && b_offset < a_end
+            })
+    }
+
+    fn shape_volume(shape: &[DimSize]) -> u128 {
+        shape.iter().map(|dim| u128::from(dim.get())).product()
     }
 
     fn arb_spec_and_nested_tilings() -> impl Strategy<Value = (Spec<Avx2Target>, TileOut, TileOut)>
