@@ -468,12 +468,10 @@ impl CanonicalBimap for Avx512Memory {
 mod tests {
     use super::{Avx512Kernel, Avx512Target};
     use crate::codegen::CodeGen;
-    use crate::cost::Cost;
     use crate::layout::row_major;
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::spec::{LogicalSpec, Spec};
-    use crate::target::cpu::CpuKernel;
-    use crate::target::CpuMemory::{GL, L1, RF, VRF};
+    use crate::target::CpuMemory::{L1, RF, VRF};
     use crate::target::{Kernel, Target};
     use crate::{layout, lspec};
 

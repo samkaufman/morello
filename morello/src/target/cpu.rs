@@ -2489,7 +2489,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        common::{DimSize, Dtype, Shape},
+        common::{DimSize, Dtype},
         layout::{row_major, Layout},
         lspec,
         memorylimits::MemVec,
