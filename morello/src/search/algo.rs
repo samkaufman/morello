@@ -50,12 +50,14 @@ where
     M: MemoDatabase<Pb::Node, Pb::Value>,
 {
     fn solve_node(&mut self, node: Pb::Node) -> Pb::Value {
+        #[cfg(debug_assertions)]
         debug_assert!(!self.active.contains(&node), "cyclic dependency detected");
 
         if let Some(value) = self.memo.get(&node) {
             return value;
         }
 
+        #[cfg(debug_assertions)]
         debug_assert!(self.active.insert(node.clone()));
 
         let mut task = self.problem.start(&node);
@@ -73,6 +75,8 @@ where
         }
 
         let result = self.problem.finish(task);
+
+        #[cfg(debug_assertions)]
         debug_assert!(self.active.remove(&node));
 
         let value = result.clone();
