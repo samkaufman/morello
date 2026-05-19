@@ -37,7 +37,10 @@ impl HeaderEmitter {
             out.write_str("#include <stdatomic.h>\n")?;
         }
         match target {
-            TargetId::Avx2 | TargetId::Avx512 => {
+            TargetId::Avx2 => {
+                out.write_str(include_str!("../codegen/partials/x86.c"))?;
+            }
+            TargetId::Avx512 => {
                 out.write_str(include_str!("../codegen/partials/x86.c"))?;
             }
             TargetId::Arm => {

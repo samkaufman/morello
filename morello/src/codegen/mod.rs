@@ -46,10 +46,11 @@ const OPENMP_FLAG: &str = "-fopenmp";
 const AVX2_CLI_VEC_FLAGS: [&str; 2] = ["-mavx2", "-mfma"];
 const AVX2_MAC_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-arch", "x86_64"];
 const AVX2_OTHER_HOST_CLI_VEC_FLAGS: [&str; 2] = ["-march=x86-64", "-lm"];
-const AVX512_CLI_VEC_FLAGS: [&str; 5] = [
+const AVX512_CLI_VEC_FLAGS: [&str; 6] = [
     "-mavx512f",
     "-mavx512bw",
     "-mavx512bf16",
+    "-mavx512vl",
     "-mavx512vbmi2",
     "-mfma",
 ];

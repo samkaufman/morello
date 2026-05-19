@@ -18,7 +18,7 @@ use crate::imp::kernels::KernelApp;
 use crate::imp::loops::{unique_dims_per_axis, Loop};
 use crate::imp::pipeline::Pipeline;
 use crate::imp::{Impl, ImplNode};
-use crate::layout::{BufferVar, PhysDim};
+use crate::layout::BufferVar;
 use crate::opaque_symbol::OpaqueSymbol;
 use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
@@ -28,7 +28,7 @@ use crate::target::{
         vector_accum_count, vector_max_loop_properties, x86_f32_horizontal_max_helper,
         DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
-    Avx512Kernel, CpuKernel, CpuMemory, CpuTarget, Kernel, Target,
+    Avx512Kernel, CpuKernel, CpuMemory, CpuTarget, Kernel, Target, TargetId,
 };
 use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
@@ -673,53 +673,22 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 let m = lhs_spec.shape()[1].get();
                 let k = lhs_spec.shape()[2].get();
                 let n = rhs_spec.shape()[2].get();
-                let m_idx_name = self.namer.fresh_name();
-                let n_idx_name = self.namer.fresh_name();
+                let n_vector_count = usize::try_from(n / 16).unwrap();
 
                 writeln!(w, "{}// MatmulLoopVdpbf16ps", indent(depth))?;
 
-                let needs_unroll = arguments
+                let needs_k_unroll = arguments[..2]
                     .iter()
                     .any(|argument| self.c_buffer_for_view(argument).needs_unroll());
-                if needs_unroll {
-                    for m_idx in 0..m {
-                        for n_idx in (0..n).step_by(16) {
-                            self.emit_matmul_vdpbf16ps_body(
-                                w,
-                                arguments,
-                                NonAffineExpr::constant(i32::try_from(m_idx).unwrap()),
-                                NonAffineExpr::constant(i32::try_from(n_idx).unwrap()),
-                                k,
-                                true,
-                                depth,
-                            )?;
-                        }
-                    }
-                } else {
-                    writeln!(
-                        w,
-                        "{0}for (size_t {1} = 0; {1} < {m}; {1}++) {{",
-                        indent(depth),
-                        m_idx_name,
-                    )?;
-                    writeln!(
-                        w,
-                        "{0}for (size_t {1} = 0; {1} < {n}; {1} += 16) {{",
-                        indent(depth),
-                        n_idx_name,
-                    )?;
-                    self.emit_matmul_vdpbf16ps_body(
-                        w,
-                        arguments,
-                        CName(m_idx_name).into(),
-                        CName(n_idx_name).into(),
-                        k,
-                        false,
-                        depth + 2,
-                    )?;
-                    writeln!(w, "{}}}", indent(depth))?;
-                    writeln!(w, "{}}}", indent(depth))?;
-                }
+                self.emit_matmul_vdpbf16ps_body(
+                    w,
+                    arguments,
+                    usize::try_from(m).unwrap(),
+                    k,
+                    needs_k_unroll,
+                    n_vector_count,
+                    depth,
+                )?;
                 Ok(())
             }
         }
@@ -730,290 +699,332 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         &mut self,
         w: &mut W,
         arguments: &[ViewE<Tgt>],
-        m_expr: NonAffineExpr<CName>,
-        n_start_expr: NonAffineExpr<CName>,
+        m_row_count: usize,
         k: u32,
         unroll_k: bool,
+        n_vector_count: usize,
         depth: usize,
     ) -> fmt::Result {
-        let acc_name = self.namer.fresh_name();
-        let out_ptr = self.c_index_ptr_with_point_exprs(
-            &arguments[2],
-            &[
-                (0, NonAffineExpr::constant(0)),
-                (1, m_expr.clone()),
-                (2, n_start_expr.clone()),
-            ],
-        );
-        writeln!(w, "{}__m512 {acc_name};", indent(depth))?;
-        writeln!(
+        debug_assert!((1..=2).contains(&n_vector_count));
+        debug_assert!(m_row_count >= 1);
+
+        let m_exprs = (0..m_row_count)
+            .map(|row_idx| NonAffineExpr::constant(i32::try_from(row_idx).unwrap()))
+            .collect::<Vec<_>>();
+        let n_start_exprs = (0..n_vector_count)
+            .map(|vector_idx| NonAffineExpr::constant(i32::try_from(vector_idx * 16).unwrap()))
+            .collect::<Vec<_>>();
+
+        let stripe_count = if m_row_count == 1 && n_vector_count == 2 {
+            5
+        } else {
+            1
+        };
+        let acc_name_groups = m_exprs
+            .iter()
+            .map(|m_expr| {
+                n_start_exprs
+                    .iter()
+                    .map(|n_expr| {
+                        let m_const = m_expr.as_constant().unwrap();
+                        let n_const = n_expr.as_constant().unwrap();
+                        let out_index_expr =
+                            arguments[2]
+                                .make_buffer_indexing_expr()
+                                .map_vars(&mut |v| match v {
+                                    BufferVar::Pt(dim, _) => match dim {
+                                        1 => NonAffineExpr::constant(m_const),
+                                        2 => NonAffineExpr::constant(n_const),
+                                        _ => NonAffineExpr::zero(),
+                                    },
+                                    BufferVar::TileIdx(_, _) => v.into(),
+                                });
+                        let out_acc_name = {
+                            let out_buffer = self.c_buffer_for_view(&arguments[2]);
+                            self.c_index_vec(out_buffer, &out_index_expr, None)
+                        };
+                        let mut acc_names = vec![out_acc_name];
+                        acc_names.extend((1..stripe_count).map(|_| self.namer.fresh_name()));
+                        acc_names
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // The first accumulator in each group is the scheduled output VRF value;
+        // extra stripe accumulators start at zero and are reduced into it later.
+        for row_acc_groups in &acc_name_groups {
+            for acc_names in row_acc_groups {
+                for acc_name in &acc_names[1..] {
+                    writeln!(
+                        w,
+                        "{}__m512 {acc_name} = _mm512_setzero_ps();",
+                        indent(depth)
+                    )?;
+                }
+            }
+        }
+
+        self.emit_matmul_vdpbf16ps_k_iterations(
             w,
-            "{}__builtin_memcpy(&{acc_name}, {out_ptr}, sizeof({acc_name}));",
-            indent(depth),
+            k,
+            stripe_count,
+            unroll_k,
+            depth,
+            |this, w, stripe_idx, k_expr, depth| {
+                let mut rhs_vec_names = Vec::with_capacity(n_vector_count);
+                for n_expr in &n_start_exprs {
+                    let rhs_vec_name = this.namer.fresh_name();
+                    let rhs_pair_ptr = this.c_index_ptr_with_point_exprs(
+                        &arguments[1],
+                        &[
+                            (0, NonAffineExpr::zero()),
+                            (1, k_expr.clone()),
+                            (2, n_expr.clone()),
+                        ],
+                    );
+                    writeln!(
+                        w,
+                        "{}__m512bh {rhs_vec_name} = (__m512bh)_mm512_loadu_si512((const void *)({rhs_pair_ptr}));",
+                        indent(depth),
+                    )?;
+                    rhs_vec_names.push(rhs_vec_name);
+                }
+
+                for (row_idx, m_expr) in m_exprs.iter().enumerate() {
+                    let lhs_vec_name = this.namer.fresh_name();
+                    let lhs_pair_ptr = this.c_index_ptr_with_point_exprs(
+                        &arguments[0],
+                        &[
+                            (0, NonAffineExpr::zero()),
+                            (1, m_expr.clone()),
+                            (2, k_expr.clone()),
+                        ],
+                    );
+                    let lhs_pair_name = this.namer.fresh_name();
+                    writeln!(w, "{}uint32_t {lhs_pair_name};", indent(depth))?;
+                    writeln!(
+                        w,
+                        "{}__builtin_memcpy(&{lhs_pair_name}, {lhs_pair_ptr}, sizeof({lhs_pair_name}));",
+                        indent(depth),
+                    )?;
+                    writeln!(
+                        w,
+                        "{}__m512bh {lhs_vec_name} = (__m512bh)_mm512_set1_epi32({lhs_pair_name});",
+                        indent(depth),
+                    )?;
+                    for (n_idx, rhs_vec_name) in rhs_vec_names.iter().enumerate() {
+                        let acc_name = acc_name_groups[row_idx][n_idx][stripe_idx].as_str();
+                        writeln!(
+                            w,
+                            "{0}{1} = _mm512_dpbf16_ps({1}, {2}, {3});",
+                            indent(depth),
+                            acc_name,
+                            lhs_vec_name,
+                            rhs_vec_name,
+                        )?;
+                    }
+                }
+
+                Ok(())
+            },
         )?;
 
+        // Emit accumulator group reductions.
+        for row_acc_groups in &acc_name_groups {
+            for acc_names in row_acc_groups {
+                let (acc_name, rest_acc_names) = acc_names.split_first().unwrap();
+                for acc_name_rhs in rest_acc_names {
+                    writeln!(
+                        w,
+                        "{}{} = _mm512_add_ps({}, {});",
+                        indent(depth),
+                        acc_name,
+                        acc_name,
+                        acc_name_rhs,
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Drives the K dimension for the AVX512 BF16 matmul microkernel.
+    ///
+    /// When K must be unrolled, the callback receives constant K expressions. Otherwise
+    /// this emits a runtime loop stepping by `2 * stripe_count`, calls the callback once
+    /// per stripe inside the loop, and emits any remaining full K-pairs with constants.
+    ///
+    /// Example emitted C for a single-stripe runtime K loop:
+    ///
+    /// ```c
+    /// for (size_t k0 = 0; k0 < 528; k0 += 2) {
+    ///   // one BF16-pair matmul step at k0
+    /// }
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    fn emit_matmul_vdpbf16ps_k_iterations<W: Write, F>(
+        &mut self,
+        w: &mut W,
+        k: u32,
+        stripe_count: usize,
+        unroll_k: bool,
+        depth: usize,
+        mut emit_step: F,
+    ) -> fmt::Result
+    where
+        F: FnMut(&mut Self, &mut W, usize, NonAffineExpr<CName>, usize) -> fmt::Result,
+    {
         if unroll_k {
-            for k_idx in (0..k).step_by(2) {
-                self.emit_matmul_vdpbf16ps_step(
-                    w,
-                    arguments,
-                    &acc_name,
-                    m_expr.clone(),
-                    n_start_expr.clone(),
-                    NonAffineExpr::constant(i32::try_from(k_idx).expect("K index should fit i32")),
-                    k_idx + 1 < k,
-                    depth,
-                )?;
+            let step = u32::try_from(stripe_count).unwrap() * 2;
+            for k_idx in (0..k).step_by(step as usize) {
+                for stripe_idx in 0..stripe_count {
+                    let lane_k = k_idx + u32::try_from(stripe_idx).unwrap() * 2;
+                    if lane_k >= k {
+                        break;
+                    }
+                    emit_step(
+                        self,
+                        w,
+                        stripe_idx,
+                        NonAffineExpr::constant(i32::try_from(lane_k).unwrap()),
+                        depth,
+                    )?;
+                }
             }
         } else {
-            let full_k = (k / 2) * 2;
+            let step = u32::try_from(stripe_count).unwrap() * 2;
+            let full_k = (k / step) * step;
             if full_k != 0 {
                 let k_idx_name = self.namer.fresh_name();
                 writeln!(
                     w,
-                    "{0}for (size_t {1} = 0; {1} < {2}; {1} += 2) {{",
+                    "{0}for (size_t {1} = 0; {1} < {2}; {1} += {step}) {{",
                     indent(depth),
                     k_idx_name,
                     full_k,
                 )?;
-                self.emit_matmul_vdpbf16ps_step(
-                    w,
-                    arguments,
-                    &acc_name,
-                    m_expr.clone(),
-                    n_start_expr.clone(),
-                    CName(k_idx_name).into(),
-                    true,
-                    depth + 1,
-                )?;
+                for stripe_idx in 0..stripe_count {
+                    let k_offset = i32::try_from(stripe_idx * 2).unwrap();
+                    emit_step(
+                        self,
+                        w,
+                        stripe_idx,
+                        NonAffineExpr::from(CName(k_idx_name.clone())) + k_offset,
+                        depth + 1,
+                    )?;
+                }
                 writeln!(w, "{}}}", indent(depth))?;
             }
-            if !k.is_multiple_of(2) {
-                self.emit_matmul_vdpbf16ps_step(
+            for (stripe_idx, lane_k) in (full_k..k).step_by(2).enumerate() {
+                emit_step(
+                    self,
                     w,
-                    arguments,
-                    &acc_name,
-                    m_expr,
-                    n_start_expr,
-                    NonAffineExpr::constant(i32::try_from(full_k).unwrap()),
-                    false,
+                    stripe_idx,
+                    NonAffineExpr::constant(i32::try_from(lane_k).unwrap()),
                     depth,
                 )?;
             }
         }
 
-        writeln!(
-            w,
-            "{}__builtin_memcpy({out_ptr}, &{acc_name}, sizeof({acc_name}));",
-            indent(depth),
-        )
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn emit_matmul_vdpbf16ps_step<W: Write>(
+    fn emit_avx512_bf16_broadcast_vec_mult_add<W: Write>(
         &mut self,
         w: &mut W,
-        arguments: &[ViewE<Tgt>],
-        acc_name: &str,
-        m_expr: NonAffineExpr<CName>,
-        n_start_expr: NonAffineExpr<CName>,
-        k_expr: NonAffineExpr<CName>,
-        has_high_k: bool,
+        output_expr: &str,
+        source_ptr: &str,
+        source_vec_expr: Option<&str>,
+        scalar_bits: &str,
+        vector_size_bf16: u32,
+        vector_type_name: &str,
         depth: usize,
     ) -> fmt::Result {
-        let lhs_vec_name = self.namer.fresh_name();
-        let lo_expr = self.avx512_bf16_scalar_load_expr(
-            &arguments[0],
-            &[
-                (0, NonAffineExpr::constant(0)),
-                (1, m_expr.clone()),
-                (2, k_expr.clone()),
-            ],
-        );
-        let lo_name = self.namer.fresh_name();
-        writeln!(w, "{}uint16_t {lo_name} = {lo_expr};", indent(depth))?;
-
-        let hi_expr = if has_high_k {
-            self.avx512_bf16_scalar_load_expr(
-                &arguments[0],
-                &[
-                    (0, NonAffineExpr::constant(0)),
-                    (1, m_expr),
-                    (2, k_expr.clone() + 1),
-                ],
-            )
-        } else {
-            "0".to_string()
-        };
-        let hi_name = self.namer.fresh_name();
-        writeln!(w, "{}uint16_t {hi_name} = {hi_expr};", indent(depth))?;
-
-        let pair_name = self.namer.fresh_name();
-        writeln!(
-            w,
-            "{}uint32_t {pair_name} = ((uint32_t){lo_name}) | ((uint32_t){hi_name} << 16);",
-            indent(depth),
-        )?;
-        writeln!(
-            w,
-            "{}__m512bh {lhs_vec_name} = (__m512bh)_mm512_set1_epi32((int){pair_name});",
-            indent(depth),
-        )?;
-
-        let rhs_vec_name = self.namer.fresh_name();
-        self.emit_avx512_bf16_n_pair_vector(
-            w,
-            &rhs_vec_name,
-            &arguments[1],
-            k_expr,
-            n_start_expr,
-            has_high_k,
-            depth,
-        )?;
-
-        writeln!(
-            w,
-            "{0}{1} = _mm512_dpbf16_ps({1}, {2}, {3});",
-            indent(depth),
-            acc_name,
-            lhs_vec_name,
-            rhs_vec_name,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn emit_avx512_bf16_n_pair_vector<W: Write>(
-        &mut self,
-        w: &mut W,
-        name: &str,
-        arg: &ViewE<Tgt>,
-        k_expr: NonAffineExpr<CName>,
-        n_start_expr: NonAffineExpr<CName>,
-        has_high_k: bool,
-        depth: usize,
-    ) -> fmt::Result {
-        if self.view_has_unit_stride_dim(arg, 2) {
-            let lo_ptr = self.c_index_ptr_with_point_exprs(
-                arg,
-                &[
-                    (0, NonAffineExpr::constant(0)),
-                    (1, k_expr.clone()),
-                    (2, n_start_expr.clone()),
-                ],
-            );
-            let lo_packed_name = self.namer.fresh_name();
-            let lo_expanded_name = self.namer.fresh_name();
-            writeln!(w, "{}__m512i {lo_packed_name} =", indent(depth))?;
-            writeln!(
-                w,
-                "{}_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i *)({lo_ptr})));",
-                indent(depth + 1),
-            )?;
-            writeln!(w, "{}__m512i {lo_expanded_name} =", indent(depth))?;
-            writeln!(
-                w,
-                "{}_mm512_maskz_expand_epi16((__mmask32)0x55555555u, {lo_packed_name});",
-                indent(depth + 1),
-            )?;
-
-            if has_high_k {
-                let hi_ptr = self.c_index_ptr_with_point_exprs(
-                    arg,
-                    &[
-                        (0, NonAffineExpr::constant(0)),
-                        (1, k_expr + 1),
-                        (2, n_start_expr),
-                    ],
-                );
-                let hi_packed_name = self.namer.fresh_name();
-                let hi_expanded_name = self.namer.fresh_name();
-                writeln!(w, "{}__m512i {hi_packed_name} =", indent(depth))?;
+        // Use the BF16 dot-product instruction directly for:
+        //   output[i] += scalar_bf16 * rhs_bf16[i]
+        //
+        // The RHS BF16 lanes are zero-extended into 32-bit slots, which reinterprets as BF16 pairs
+        // [rhs_i, 0]. The scalar is broadcast to all BF16 lanes, so each dpbf16 lane computes
+        // scalar * rhs_i + scalar * 0. This avoids separate BF16->F32 conversions and avoids the
+        // manual shift/blend unpack sequence that can crash Clang's x86 instruction selector.
+        match vector_size_bf16 {
+            8 => {
+                let rhs_raw_name = self.namer.fresh_name();
+                let rhs_pairs_name = self.namer.fresh_name();
+                let scalar_vec_name = self.namer.fresh_name();
+                if let Some(source_vec_expr) = source_vec_expr {
+                    writeln!(
+                        w,
+                        "{}__m128i {rhs_raw_name} = {source_vec_expr};",
+                        indent(depth),
+                    )?;
+                } else {
+                    writeln!(
+                        w,
+                        "{}__m128i {rhs_raw_name} = _mm_loadu_si128((const __m128i *)({source_ptr}));",
+                        indent(depth),
+                    )?;
+                }
                 writeln!(
                     w,
-                    "{}_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i *)({hi_ptr})));",
-                    indent(depth + 1),
-                )?;
-                writeln!(w, "{}__m512i {hi_expanded_name} =", indent(depth))?;
-                writeln!(
-                    w,
-                    "{}_mm512_maskz_expand_epi16((__mmask32)0xAAAAAAAAu, {hi_packed_name});",
-                    indent(depth + 1),
+                    "{}__m256i {rhs_pairs_name} = _mm256_cvtepu16_epi32({rhs_raw_name});",
+                    indent(depth),
                 )?;
                 writeln!(
                     w,
-                    "{}__m512bh {name} = (__m512bh)_mm512_or_si512({lo_expanded_name}, {hi_expanded_name});",
+                    "{}__m256bh {scalar_vec_name} = (__m256bh)_mm256_set1_epi16({scalar_bits});",
                     indent(depth),
-                )
-            } else {
+                )?;
+                // _mm256_dpbf16_ps requires -mavx512vl
                 writeln!(
                     w,
-                    "{}__m512bh {name} = (__m512bh){lo_expanded_name};",
+                    "{}{output_expr} = ({vector_type_name})_mm256_dpbf16_ps((__m256){output_expr}, {scalar_vec_name}, (__m256bh){rhs_pairs_name});",
                     indent(depth),
                 )
-            }?;
-            return Ok(());
-        }
-
-        let mut lane_exprs = Vec::with_capacity(32);
-        for lane in (0..16u32).rev() {
-            let n_expr = n_start_expr.clone() + i32::try_from(lane).expect("N lane should fit i32");
-            let hi_expr = if has_high_k {
-                self.avx512_bf16_scalar_load_expr(
-                    arg,
-                    &[
-                        (0, NonAffineExpr::constant(0)),
-                        (1, k_expr.clone() + 1),
-                        (2, n_expr.clone()),
-                    ],
+            }
+            16 => {
+                let rhs_raw_name = self.namer.fresh_name();
+                let rhs_pairs_name = self.namer.fresh_name();
+                let scalar_vec_name = self.namer.fresh_name();
+                if let Some(source_vec_expr) = source_vec_expr {
+                    writeln!(
+                        w,
+                        "{}__m256i {rhs_raw_name} = {source_vec_expr};",
+                        indent(depth),
+                    )?;
+                } else {
+                    writeln!(
+                        w,
+                        "{}__m256i {rhs_raw_name} = _mm256_loadu_si256((const __m256i *)({source_ptr}));",
+                        indent(depth),
+                    )?;
+                }
+                writeln!(
+                    w,
+                    "{}__m512i {rhs_pairs_name} = _mm512_cvtepu16_epi32({rhs_raw_name});",
+                    indent(depth),
+                )?;
+                writeln!(
+                    w,
+                    "{}__m512bh {scalar_vec_name} = (__m512bh)_mm512_set1_epi16({scalar_bits});",
+                    indent(depth),
+                )?;
+                writeln!(
+                    w,
+                    "{}{output_expr} = ({vector_type_name})_mm512_dpbf16_ps((__m512){output_expr}, {scalar_vec_name}, (__m512bh){rhs_pairs_name});",
+                    indent(depth),
                 )
-            } else {
-                "0".to_string()
-            };
-            let lo_expr = self.avx512_bf16_scalar_load_expr(
-                arg,
-                &[
-                    (0, NonAffineExpr::constant(0)),
-                    (1, k_expr.clone()),
-                    (2, n_expr),
-                ],
-            );
-            lane_exprs.push(hi_expr);
-            lane_exprs.push(lo_expr);
+            }
+            _ => unimplemented!(),
         }
-
-        writeln!(
-            w,
-            "{}__m512bh {name} = (__m512bh)_mm512_set_epi16(",
-            indent(depth)
-        )?;
-        for (idx, lane_expr) in lane_exprs.iter().enumerate() {
-            let suffix = if idx + 1 == lane_exprs.len() { "" } else { "," };
-            writeln!(w, "{}{}{}", indent(depth + 1), lane_expr, suffix)?;
-        }
-        writeln!(w, "{});", indent(depth))
-    }
-
-    fn avx512_bf16_scalar_load_expr(
-        &self,
-        arg: &ViewE<Tgt>,
-        point_exprs: &[(u8, NonAffineExpr<CName>)],
-    ) -> String {
-        let ptr = self.c_index_ptr_with_point_exprs(arg, point_exprs);
-        format!("*((const uint16_t *)({ptr}))")
     }
 
     fn c_buffer_for_view(&self, arg: &ViewE<Tgt>) -> &CBuffer {
         let backing_tensor = arg.backing_tensor().unwrap();
         self.name_env.get(&backing_tensor.identifier()).unwrap()
-    }
-
-    fn view_has_unit_stride_dim(&self, arg: &ViewE<Tgt>, logical_dim: u8) -> bool {
-        let layout = arg.spec().layout();
-        layout.contig() > 0
-            && matches!(
-                layout.dims.last(),
-                Some((dim, PhysDim::Dynamic | PhysDim::Packed(_))) if *dim == logical_dim
-            )
     }
 
     fn make_buffer(
@@ -1860,7 +1871,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let rhs0_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
                         let rhs1_iexpr =
                             zero_points(arguments[1].make_buffer_indexing_expr() + vector_size);
-
                         self.headers.emit_cvtbf16_fp32 = true;
                         writeln!(
                             w,
@@ -1995,102 +2005,163 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_count = volume / vector_size_bf16;
                         writeln!(w, "{}/* BroadcastVecMultAddBf16F32 */", indent(depth))?;
                         for vector_idx in 0..vector_count {
-                            let exprs =
-                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                                    0 => self.c_index_ptr(a, b, None),
-                                    1 | 2 => self.c_index_vec(
-                                        a,
-                                        &(b.clone()
-                                            + i32::try_from(vector_idx * vector_size_bf16)
-                                                .unwrap()),
-                                        None,
-                                    ),
-                                    _ => unreachable!(),
-                                });
-
-                            let even_name = self.namer.fresh_name();
-                            let odd_name = self.namer.fresh_name();
-                            let concat_name = self.namer.fresh_name();
-                            let broad_name = self.namer.fresh_name();
-
-                            let (shift_fn, _, _, _) = vec_func_names(vector_size_bf16);
-                            let (shift_fn_out, _, _, broadcast16_out) =
-                                vec_func_names(vector_size_bf16 * 2);
-
-                            let vf8 = get_vector(
-                                Tgt::vec_types(),
-                                Dtype::Float32,
-                                (vector_size_bf16 / 2).try_into().unwrap(),
-                            );
+                            let vector_offset =
+                                i32::try_from(vector_idx * vector_size_bf16).unwrap();
                             let vfc = get_vector(
                                 Tgt::vec_types(),
                                 Dtype::Float32,
                                 vector_size_bf16.try_into().unwrap(),
                             );
-                            writeln!(
-                                w,
-                                "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), {5});",
-                                indent(depth),
-                                vf8.name,
-                                odd_name,
-                                vf8.native_type_name,
-                                exprs[1],
-                                16
-                            )?;
-                            writeln!(
-                                w,
-                                "{}{} {} = {};",
-                                indent(depth),
-                                vf8.name,
-                                even_name,
-                                bf16_even_lanes_expr(
+
+                            if Tgt::target_id() == TargetId::Avx512 {
+                                let scalar_tensor = arguments[0].backing_tensor().unwrap();
+                                let scalar_buffer =
+                                    self.name_env.get(&scalar_tensor.identifier()).unwrap();
+                                let scalar_base_expr =
+                                    zero_points(arguments[0].make_buffer_indexing_expr());
+                                let scalar_ptr =
+                                    self.c_index_ptr(scalar_buffer, &scalar_base_expr, None);
+
+                                let broadcast_tensor = arguments[1].backing_tensor().unwrap();
+                                let broadcast_buffer =
+                                    self.name_env.get(&broadcast_tensor.identifier()).unwrap();
+                                let broadcast_base_expr =
+                                    zero_points(arguments[1].make_buffer_indexing_expr())
+                                        + vector_offset;
+                                let broadcast_ptr =
+                                    self.c_index_ptr(broadcast_buffer, &broadcast_base_expr, None);
+                                let broadcast_vec_expr =
+                                    if matches!(broadcast_buffer, CBuffer::RegVars { .. }) {
+                                        Some(self.c_index_vec(
+                                            broadcast_buffer,
+                                            &broadcast_base_expr,
+                                            None,
+                                        ))
+                                    } else {
+                                        None
+                                    };
+
+                                let output_tensor = arguments[2].backing_tensor().unwrap();
+                                let output_buffer =
+                                    self.name_env.get(&output_tensor.identifier()).unwrap();
+                                let output_base_expr =
+                                    zero_points(arguments[2].make_buffer_indexing_expr())
+                                        + vector_offset;
+                                let output_expr =
+                                    self.c_index_vec(output_buffer, &output_base_expr, None);
+
+                                // TODO: Don't inline `short` below.
+                                let scalar_name = self.namer.fresh_name();
+                                writeln!(w, "{0}short {scalar_name};", indent(depth),)?;
+                                writeln!(
+                                    w,
+                                    "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
+                                    indent(depth),
+                                    scalar_name,
+                                    scalar_ptr
+                                )?;
+                                self.emit_avx512_bf16_broadcast_vec_mult_add(
+                                    w,
+                                    &output_expr,
+                                    &broadcast_ptr,
+                                    broadcast_vec_expr.as_deref(),
+                                    &scalar_name,
                                     vector_size_bf16,
+                                    vfc.name,
+                                    depth,
+                                )?;
+
+                                self.headers.vector_type_defs.insert(vfc);
+                            } else {
+                                let exprs =
+                                    self.param_args_to_c_indices(arguments, |i, a, b| match i {
+                                        0 => self.c_index_ptr(a, b, None),
+                                        1 | 2 => {
+                                            self.c_index_vec(a, &(b.clone() + vector_offset), None)
+                                        }
+                                        _ => unreachable!(),
+                                    });
+
+                                let even_name = self.namer.fresh_name();
+                                let odd_name = self.namer.fresh_name();
+                                let concat_name = self.namer.fresh_name();
+                                let broad_name = self.namer.fresh_name();
+
+                                // TODO: Don't inline `short` below.
+                                let scalar_name = self.namer.fresh_name();
+                                writeln!(w, "{0}short {scalar_name};", indent(depth),)?;
+                                writeln!(
+                                    w,
+                                    "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
+                                    indent(depth),
+                                    scalar_name,
+                                    exprs[0]
+                                )?;
+
+                                let (shift_fn, _, _, _) = vec_func_names(vector_size_bf16);
+                                let (shift_fn_out, _, _, broadcast16_out) =
+                                    vec_func_names(vector_size_bf16 * 2);
+
+                                let vf8 = get_vector(
+                                    Tgt::vec_types(),
+                                    Dtype::Float32,
+                                    (vector_size_bf16 / 2).try_into().unwrap(),
+                                );
+                                writeln!(
+                                    w,
+                                    "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), {5});",
+                                    indent(depth),
                                     vf8.name,
+                                    odd_name,
                                     vf8.native_type_name,
-                                    &exprs[1],
-                                ),
-                            )?;
+                                    exprs[1],
+                                    16
+                                )?;
+                                writeln!(
+                                    w,
+                                    "{}{} {} = {};",
+                                    indent(depth),
+                                    vf8.name,
+                                    even_name,
+                                    bf16_even_lanes_expr(
+                                        vector_size_bf16,
+                                        vf8.name,
+                                        vf8.native_type_name,
+                                        &exprs[1],
+                                    ),
+                                )?;
 
-                            writeln!(
-                                w,
-                                "{}{} {} = __builtin_shufflevector({}, {}, {});",
-                                indent(depth),
-                                vfc.name,
-                                concat_name,
-                                odd_name,
-                                even_name,
-                                interleave_vector_halves_shuffle_indices(vector_size_bf16),
-                            )?;
+                                writeln!(
+                                    w,
+                                    "{}{} {} = __builtin_shufflevector({}, {}, {});",
+                                    indent(depth),
+                                    vfc.name,
+                                    concat_name,
+                                    odd_name,
+                                    even_name,
+                                    interleave_vector_halves_shuffle_indices(vector_size_bf16),
+                                )?;
 
-                            // TODO: Don't inline `short` below.
-                            let scalar_name = self.namer.fresh_name();
-                            writeln!(w, "{0}short {scalar_name};", indent(depth),)?;
-                            writeln!(
-                                w,
-                                "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
-                                indent(depth),
-                                scalar_name,
-                                exprs[0]
-                            )?;
-                            writeln!(
-                                w,
-                                "{0}{1} {broad_name} = {shift_fn_out}({broadcast16_out}({2}), 16);",
-                                indent(depth),
-                                vfc.name,
-                                scalar_name
-                            )?;
+                                writeln!(
+                                    w,
+                                    "{0}{1} {broad_name} = ({1}){shift_fn_out}({broadcast16_out}({2}), 16);",
+                                    indent(depth),
+                                    vfc.name,
+                                    scalar_name
+                                )?;
 
-                            writeln!(
-                                w,
-                                "{}{} += {} * {};",
-                                indent(depth),
-                                exprs[2],
-                                broad_name,
-                                concat_name
-                            )?;
+                                writeln!(
+                                    w,
+                                    "{}{} += {} * {};",
+                                    indent(depth),
+                                    exprs[2],
+                                    broad_name,
+                                    concat_name
+                                )?;
 
-                            self.headers.vector_type_defs.insert(vf8);
-                            self.headers.vector_type_defs.insert(vfc);
+                                self.headers.vector_type_defs.insert(vf8);
+                                self.headers.vector_type_defs.insert(vfc);
+                            }
                         }
                         Ok(())
                     }
@@ -3259,6 +3330,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
+    /// Returns a pointer expression for `arg` at a logical point.
+    ///
+    /// This covers the AVX512 BF16 matmul A/B accesses where the K point is a C loop
+    /// variable introduced inside the kernel emitter. That value is not represented as
+    /// a scheduled `BufferVar::TileIdx`, so the normal `c_index_ptr` path cannot name it
+    /// directly.
     fn c_index_ptr_with_point_exprs(
         &self,
         arg: &ViewE<Tgt>,
@@ -3411,22 +3488,6 @@ fn interleave_vector_halves_shuffle_indices(vector_size: u32) -> String {
 
 /// Returns a vector expression that keeps bf16 values from even logical lanes
 /// and zeros the odd lanes before the result is reinterpreted as f32.
-///
-/// For 32 bf16 lanes this uses the AVX512BW masked-blend intrinsic, whose mask
-/// argument comes first:
-///
-/// ```c
-/// (vf16)_mm512_mask_blend_epi16((__mmask32)0xAAAAAAAAu,
-///                               _mm512_setzero_si512(),
-///                               *(__m512i*)(&input))
-/// ```
-///
-/// For narrower x86 vector widths, the SSE/AVX2 blend intrinsics use an
-/// immediate mask argument at the end:
-///
-/// ```c
-/// (vf8)_mm256_blend_epi16(_mm256_setzero_si256(), *(__m256i*)(&input), 0xAA)
-/// ```
 fn bf16_even_lanes_expr(
     vector_size_bf16: u32,
     vector_type_name: &str,
