@@ -84,7 +84,7 @@ impl CBuffer {
                 )?;
                 writeln!(
                     w,
-                    "{}posix_memalign((void **)&{}, {}, {}*sizeof({}));",
+                    "{}if (posix_memalign((void **)&{}, {}, {}*sizeof({})) != 0) abort();",
                     indent(depth),
                     name,
                     HEAP_BUFFER_ALIGNMENT_BYTES,

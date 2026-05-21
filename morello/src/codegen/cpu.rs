@@ -1107,8 +1107,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             )?;
             writeln!(
                 w,
-                "{}posix_memalign((void **)&{workspace_name}, {alignment}, {bytes});",
-                indent(depth),
+                "{}if (posix_memalign((void **)&{workspace_name}, {alignment}, {bytes}) != 0) abort();",
+                indent(depth)
             )?;
 
             let old_name = self
