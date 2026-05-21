@@ -233,14 +233,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             writeln!(out, "{}close(fd);", indent(1))?;
 
             // Move into destination argument.
-            writeln!(out, "{}for (int i = 0; i < {value_cnt}; i++)", indent(1))?;
-            writeln!(
-                out,
-                "{}(({1} *)dest{idx})[i] = {2}((({1} *)mapped)[i]);",
-                indent(2),
-                c_type(input_tensor.spec().dtype()),
-                endian_convert_fn(input_tensor.spec().dtype())
-            )?;
+            let dtype = input_tensor.spec().dtype();
+            writeln!(out, "{}for (int i = 0; i < {value_cnt}; i++) {{", indent(1))?;
+            emit_load_input_value(out, idx, dtype)?;
+            writeln!(out, "{}}}", indent(1))?;
 
             // Un-map.
             writeln!(out, "{}if (munmap(mapped, {byte_cnt}) != 0)", indent(1))?;
@@ -3597,14 +3593,49 @@ fn zero_points(expr: NonAffineExpr<BufferVar>) -> NonAffineExpr<BufferVar> {
     })
 }
 
-/// Returns the function/macro name for converting a value of some type to processor byte order.
-///
-/// The functions/macros are included via `partials/cpu.c`.
-const fn endian_convert_fn(dtype: Dtype) -> &'static str {
+fn emit_load_input_value<W: Write>(out: &mut W, idx: usize, dtype: Dtype) -> fmt::Result {
     match dtype {
-        Dtype::Uint8 | Dtype::Sint8 => "",
-        Dtype::Uint16 | Dtype::Sint16 | Dtype::Bfloat16 => "LE_TO_CPU16",
-        Dtype::Uint32 | Dtype::Sint32 | Dtype::Float32 => "LE_TO_CPU32",
+        Dtype::Float32 => {
+            writeln!(
+                out,
+                "{}uint32_t converted = LE_TO_CPU32(((uint32_t *)mapped)[i]);",
+                indent(2)
+            )?;
+            writeln!(
+                out,
+                "{}__builtin_memcpy(&((float *)dest{idx})[i], &converted, sizeof(converted));",
+                indent(2)
+            )
+        }
+        Dtype::Bfloat16 => {
+            writeln!(
+                out,
+                "{}uint16_t converted = LE_TO_CPU16(((uint16_t *)mapped)[i]);",
+                indent(2)
+            )?;
+            writeln!(
+                out,
+                "{}__builtin_memcpy(&((__bf16 *)dest{idx})[i], &converted, sizeof(converted));",
+                indent(2)
+            )
+        }
+        Dtype::Uint8 | Dtype::Sint8 | Dtype::Uint16 | Dtype::Sint16 | Dtype::Uint32 | Dtype::Sint32 => {
+            let conv = match dtype {
+                Dtype::Uint8 | Dtype::Sint8 => "",
+                Dtype::Uint16 | Dtype::Sint16 => "LE_TO_CPU16",
+                Dtype::Uint32 | Dtype::Sint32 => "LE_TO_CPU32",
+                Dtype::Float32 | Dtype::Bfloat16 => unreachable!(
+                    "float-like dtypes must be loaded through their integer bit storage"
+                ),
+            };
+            writeln!(
+                out,
+                "{}(({1} *)dest{idx})[i] = {2}((({1} *)mapped)[i]);",
+                indent(2),
+                c_type(dtype),
+                conv
+            )
+        }
     }
 }
 
