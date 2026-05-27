@@ -19,6 +19,7 @@ use std::io;
 use std::panic;
 
 fn main() {
+    env_logger::init();
     let shape = shape![8, 512];
     let logical_spec = LogicalSpec::Primitive(
         PrimitiveBasics {

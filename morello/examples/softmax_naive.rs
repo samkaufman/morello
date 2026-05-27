@@ -21,6 +21,7 @@ use std::io;
 use std::panic;
 
 fn main() {
+    env_logger::init();
     const RANK: u8 = 2;
     const SIZE: DimSize = nz!(1024u32);
     let spec_shape = smallvec![SIZE; usize::from(RANK)];

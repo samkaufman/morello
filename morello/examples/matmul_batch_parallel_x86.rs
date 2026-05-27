@@ -22,6 +22,7 @@ const N_R: u32 = 16;
 const MOVE_TILE_SIZE: u32 = 32;
 
 fn main() {
+    env_logger::init();
     // Compute a batch=4 matrix multiplication. (Four independent matmuls!)
     let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
         [4, 2048, 2048, 2048],

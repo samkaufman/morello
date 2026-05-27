@@ -20,6 +20,7 @@ use std::io;
 use std::panic;
 
 fn main() {
+    env_logger::init();
     // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
     // multiplication with unsigned, 32-bit integer inputs and output.
     //

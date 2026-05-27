@@ -18,6 +18,7 @@ use nonzero::nonzero as nz;
 use std::io;
 
 fn main() {
+    env_logger::init();
     let mut spec: Spec<Avx512Target> = spec!(MatmulAccum(
         [1, 2048, 2048, 2048],
         (f32, GL, row_major),

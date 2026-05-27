@@ -22,6 +22,7 @@ use std::io;
 const BATCH: u32 = 1;
 
 fn main() {
+    env_logger::init();
     let basics0 = PrimitiveBasics {
         typ: PrimitiveSpecType::Matmul { accum: false },
         spec_shape: shape![BATCH, 2048, 2048, 2048],

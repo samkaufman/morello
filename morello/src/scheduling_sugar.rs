@@ -23,6 +23,7 @@ use crate::search::top_down_many_impls;
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
 use crate::views::{Param, ViewE};
+use log::debug;
 use nonzero::nonzero as nz;
 use std::convert::TryFrom;
 use std::iter;
@@ -421,6 +422,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         Tgt::Memory: CanonicalBimap,
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
+        debug!("Synthesizing: {}", self);
         top_down_many_impls(db, slice::from_ref(self))
             .into_iter()
             .flatten()

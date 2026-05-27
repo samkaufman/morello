@@ -18,6 +18,7 @@ use nonzero::nonzero as nz;
 use std::io;
 
 fn main() {
+    env_logger::init();
     const M: DimSize = nz!(1u32);
     const K: DimSize = nz!(2048u32);
     const N: DimSize = nz!(16384u32);
