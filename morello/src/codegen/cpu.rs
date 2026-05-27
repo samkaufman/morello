@@ -3619,7 +3619,12 @@ fn emit_load_input_value<W: Write>(out: &mut W, idx: usize, dtype: Dtype) -> fmt
                 indent(2)
             )
         }
-        Dtype::Uint8 | Dtype::Sint8 | Dtype::Uint16 | Dtype::Sint16 | Dtype::Uint32 | Dtype::Sint32 => {
+        Dtype::Uint8
+        | Dtype::Sint8
+        | Dtype::Uint16
+        | Dtype::Sint16
+        | Dtype::Uint32
+        | Dtype::Sint32 => {
             let conv = match dtype {
                 Dtype::Uint8 | Dtype::Sint8 => "",
                 Dtype::Uint16 | Dtype::Sint16 => "LE_TO_CPU16",
