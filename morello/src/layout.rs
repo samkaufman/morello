@@ -570,18 +570,25 @@ impl Layout {
         Ok(())
     }
 
-    /// Asserts that there are no consecutive packed or OddEven dimensions with the same logical
-    /// dimension.
+    /// Asserts that there are no consecutive dimensions with the same logical
+    /// dimension, unless merging would lose contiguousness precision.
     ///
     /// This does nothing on release builds.
     fn assert_no_consecutive_dimensions(&self) {
         #[cfg(debug_assertions)]
         {
+            let first_contig_idx = self.dims.len() - usize::from(self.contig);
             for idx in 1..self.dims.len() {
-                if self.dims[idx - 1].0 == self.dims[idx].0
-                    && matches!(self.dims[idx - 1].1, PhysDim::Dynamic | PhysDim::Packed(_))
-                    && matches!(self.dims[idx].1, PhysDim::Dynamic | PhysDim::Packed(_))
-                {
+                if self.dims[idx - 1].0 != self.dims[idx].0 {
+                    continue;
+                }
+                let is_mergeable = match (self.dims[idx - 1].1, self.dims[idx].1) {
+                    (PhysDim::Packed(_), PhysDim::Packed(_)) => idx != first_contig_idx,
+                    (PhysDim::Dynamic, PhysDim::Packed(_)) => idx > first_contig_idx,
+                    (PhysDim::Dynamic, PhysDim::Dynamic) => unreachable!(),
+                    _ => false,
+                };
+                if is_mergeable {
                     panic!(
                         "Consecutive matching dimensions for logical dimension {} in layout: {:?}",
                         self.dims[idx].0, self.dims
@@ -615,11 +622,23 @@ impl Layout {
             }
 
             match (last_phys_dim, phys_dim) {
+                (PhysDim::Packed(_), PhysDim::Packed(_)) if idx == first_contig_idx => {
+                    if write_idx != idx {
+                        self.dims[write_idx] = (dim, phys_dim);
+                    }
+                    write_idx += 1;
+                }
                 (PhysDim::Packed(l), PhysDim::Packed(n)) => {
                     self.dims[last_idx].1 = PhysDim::Packed(l.checked_mul(n).unwrap());
                     if idx >= first_contig_idx {
                         new_contig -= 1;
                     }
+                }
+                (PhysDim::Dynamic, PhysDim::Packed(_)) if idx <= first_contig_idx => {
+                    if write_idx != idx {
+                        self.dims[write_idx] = (dim, phys_dim);
+                    }
+                    write_idx += 1;
                 }
                 (PhysDim::Dynamic, PhysDim::Packed(_)) => {
                     if idx >= first_contig_idx {
@@ -790,6 +809,7 @@ impl Layout {
         Ok(physical_shape)
     }
 
+    /// Returns the expanded size of one physical dimension, matching `expand_physical_shape`.
     #[cfg(test)]
     fn physical_size(
         &self,
@@ -1740,6 +1760,141 @@ mod tests {
     }
 
     #[test]
+    fn test_update_for_tiling_keeps_pack_across_contiguousness_boundary_1() {
+        let layout = layout![0, 1, 0 p(2)];
+        let tiled_layout = layout
+            .update_for_tiling(&shape![6, 8], &shape![6, 1])
+            .unwrap();
+        let expected_layout = Layout {
+            dims: vec![(0, PhysDim::Dynamic), (0, PhysDim::Packed(nz!(2u32)))],
+            contig: 1,
+        };
+        assert_eq!(tiled_layout, expected_layout);
+    }
+
+    #[test]
+    fn test_update_for_tiling_keeps_pack_across_contiguousness_boundary_2() {
+        let mut layout = layout![0, 1, 0 p(2)];
+        layout.set_contiguous_none();
+        let tiled_layout = layout
+            .update_for_tiling(&shape![6, 8], &shape![6, 1])
+            .unwrap();
+        let expected_layout = Layout {
+            dims: vec![(0, PhysDim::Dynamic), (0, PhysDim::Packed(nz!(2u32)))],
+            contig: 0,
+        };
+        assert_eq!(tiled_layout, expected_layout);
+    }
+
+    #[test]
+    fn test_update_for_tiling_preserves_contiguous_suffix_after_pack_crosses_contiguousness_boundary(
+    ) {
+        let mut layout = layout![0, 1, 0 p(2), 2];
+        layout.set_contig(2);
+
+        let tiled_layout = layout
+            .update_for_tiling(&shape![6, 8, 5], &shape![6, 1, 5])
+            .unwrap();
+
+        assert_eq!(
+            tiled_layout,
+            Layout {
+                dims: vec![
+                    (0, PhysDim::Dynamic),
+                    (0, PhysDim::Packed(nz!(2u32))),
+                    (2, PhysDim::Dynamic),
+                ],
+                contig: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn test_update_for_tiling_rejects_tile_size_not_divisor_or_multiple_of_pack_after_other_dims_tile_to_one(
+    ) {
+        let layout = layout![1, 0, 2, 0 p(2)];
+        assert!(matches!(
+            layout.update_for_tiling(&shape![6, 8, 8], &shape![3, 1, 1]),
+            Err(LayoutError::InvalidShape(_)),
+        ));
+    }
+
+    #[test]
+    fn test_applies_to_shape_rejects_tile_size_not_divisor_or_multiple_of_pack_after_other_dims_tile_to_one(
+    ) {
+        let layout = layout![1, 0, 2, 0 p(2)];
+        assert!(!layout.applies_to_shape(&shape![3, 1, 1]));
+    }
+
+    #[test]
+    fn test_physical_size_rejects_tile_size_3_inside_pack_after_other_dims_tile_to_one() {
+        let layout = layout![1, 0, 2, 0 p(2)];
+        assert!(matches!(
+            layout.physical_size(3, &shape![3, 1, 1]),
+            Err(LayoutError::InvalidShape(_)),
+        ));
+    }
+
+    macro_rules! divisor_or_multiple_after_other_dims_tile_to_one_tests {
+        ($(
+            ($tile_dim:literal, $update_test:ident, $applies_test:ident)
+        ),+ $(,)?) => {
+            $(
+                divisor_or_multiple_after_other_dims_tile_to_one_tests!(@tests $tile_dim, $update_test, $applies_test);
+            )+
+        };
+        (@tests $tile_dim:literal, $update_test:ident, $applies_test:ident) => {
+            #[test]
+            fn $update_test() {
+                let layout = layout![1, 0, 2, 0 p(2)];
+                let tile_dim = $tile_dim;
+                let tile_shape = shape![tile_dim, 1, 1];
+
+                layout
+                    .update_for_tiling(&shape![6, 8, 8], &tile_shape)
+                    .unwrap_or_else(|err| {
+                        panic!("tile dim {tile_dim} should update successfully: {err:?}")
+                    });
+            }
+
+            #[test]
+            fn $applies_test() {
+                let layout = layout![1, 0, 2, 0 p(2)];
+                let tile_dim = $tile_dim;
+                let tile_shape = shape![tile_dim, 1, 1];
+
+                assert!(
+                    layout.applies_to_shape(&tile_shape),
+                    "tile dim {tile_dim} should divide or be a multiple of packed size 2"
+                );
+            }
+        };
+    }
+
+    divisor_or_multiple_after_other_dims_tile_to_one_tests!(
+        (
+            1,
+            test_update_for_tiling_accepts_tile_size_1_inside_pack_after_other_dims_tile_to_one,
+            test_applies_to_shape_accepts_tile_size_1_inside_pack_after_other_dims_tile_to_one
+        ),
+        (
+            2,
+            test_update_for_tiling_accepts_tile_size_2_equal_to_pack_after_other_dims_tile_to_one,
+            test_applies_to_shape_accepts_tile_size_2_equal_to_pack_after_other_dims_tile_to_one
+        ),
+        (
+            4,
+            test_update_for_tiling_accepts_tile_size_4_multiple_of_pack_after_other_dims_tile_to_one,
+            test_applies_to_shape_accepts_tile_size_4_multiple_of_pack_after_other_dims_tile_to_one
+        ),
+        (
+            6,
+            test_update_for_tiling_accepts_tile_size_6_multiple_of_pack_after_other_dims_tile_to_one,
+            test_applies_to_shape_accepts_tile_size_6_multiple_of_pack_after_other_dims_tile_to_one
+        ),
+    );
+
+    #[test]
     fn test_drop_unneeded_packings_oddeven_contributes_volume() {
         let mut layout = layout![1, 0 oe(4), 0 p(2)];
         let expected = layout![1, 0 oe(4), 0 p(2)];
@@ -1780,8 +1935,36 @@ mod tests {
             contig: 1,
         };
         layout.merge_consecutive_dimensions();
-        assert_eq!(layout.dims, [(0, PhysDim::Dynamic)]);
-        assert_eq!(layout.contig(), 0);
+        assert_eq!(
+            layout,
+            Layout {
+                dims: vec![(0, PhysDim::Dynamic), (0, PhysDim::Packed(nz!(2u32)))],
+                contig: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn test_merge_consecutive_dimensions_keeps_split_packings_when_crossing_contiguousness_boundary(
+    ) {
+        let mut layout = Layout {
+            dims: vec![
+                (0, PhysDim::Packed(nz!(2u32))),
+                (0, PhysDim::Packed(nz!(3u32))),
+            ],
+            contig: 1,
+        };
+        layout.merge_consecutive_dimensions();
+        assert_eq!(
+            layout,
+            Layout {
+                dims: vec![
+                    (0, PhysDim::Packed(nz!(2u32))),
+                    (0, PhysDim::Packed(nz!(3u32))),
+                ],
+                contig: 1,
+            }
+        );
     }
 
     #[test]
@@ -2002,7 +2185,7 @@ mod tests {
         }
 
         #[test]
-        fn test_update_for_tiling_returns_no_consecutive_dimensions(
+        fn test_update_for_tiling_returns_no_consecutive_mergeable_dimensions(
             (shape, layout) in arb_shape_and_valid_same_rank_layout()
         ) {
             let result = layout.update_for_tiling(&shape, &shape);
@@ -2010,13 +2193,38 @@ mod tests {
 
             let new_layout = result.unwrap();
             let Layout { dims, contig: _ } = &new_layout;
+            let first_contig_idx = dims.len() - usize::from(new_layout.contig());
 
             for idx in 1..dims.len() {
-                let has_consecutive_dims = dims[idx - 1].0 == dims[idx].0
-                    && matches!(dims[idx - 1].1, PhysDim::Dynamic | PhysDim::Packed(_))
-                    && matches!(dims[idx].1, PhysDim::Dynamic | PhysDim::Packed(_));
-                prop_assert!(!has_consecutive_dims,
-                    "update_for_tiling produced consecutive packed dimensions for logical dimension {} in layout: {:?}",
+                let logical_dims_match = dims[idx - 1].0 == dims[idx].0;
+                let is_mergeable = match (dims[idx - 1].1, dims[idx].1) {
+                    (PhysDim::Packed(_), PhysDim::Packed(_)) => {
+                        // Packed dims merge unless the contiguousness boundary is between them.
+                        first_contig_idx != idx
+                    },
+                    (PhysDim::Dynamic, PhysDim::Packed(_)) => {
+                        // Dynamic and Packed merge only when both are in the contiguous region.
+                        first_contig_idx < idx
+                    },
+                    (PhysDim::OddEven(_), _) | (_, PhysDim::OddEven(_)) => {
+                        // OddEven never merges. Typically can't represent it
+                        false
+                    },
+                    (PhysDim::Dynamic, PhysDim::Dynamic) => {
+                        // This should never happen, since you'd have two Dynamics for
+                        // the same logical dim. Just assign `false`.
+                        false
+                    },
+                    (PhysDim::Packed(_), PhysDim::Dynamic) => {
+                        // Dynamic should never be inside for a logical dim, so we
+                        // just assign `false` here
+                        false
+                    },
+                };
+                prop_assert!(
+                    !logical_dims_match || !is_mergeable,
+                    "update_for_tiling produced consecutive mergeable dimensions \
+                    for logical dimension {} in layout: {:?}",
                     dims[idx].0,
                     dims
                 );
