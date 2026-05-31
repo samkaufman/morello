@@ -80,6 +80,12 @@ pub enum PhysDim {
     OddEven(DimSize),
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum TryFromKindNumberError {
+    EmptyIterator,
+    InvalidKindNumber(BimapInt),
+}
+
 #[derive(Clone)]
 pub struct LayoutBimap {
     pub tensor_shape: Shape,
@@ -109,15 +115,28 @@ impl PhysDim {
         }
     }
 
-    /// Returns a [PhysDim] from a kind number. If this `PhysDim` takes a packing size, that will be
-    /// drawn from `pack_sizes`.
-    fn from_kind_number(kind: BimapInt, pack_sizes: &mut impl Iterator<Item = DimSize>) -> PhysDim {
-        match kind {
+    /// Decodes a [PhysDim] from a kind number. If this `PhysDim` takes a packing size,
+    /// that will be drawn from `pack_sizes`.
+    ///
+    /// Returns `Err` for invalid kind numbers or missing packing sizes.
+    fn try_from_kind_number(
+        kind: BimapInt,
+        pack_sizes: &mut impl Iterator<Item = DimSize>,
+    ) -> Result<PhysDim, TryFromKindNumberError> {
+        Ok(match kind {
             Self::DYNAMIC_KIND => PhysDim::Dynamic,
-            Self::PACKED_KIND => PhysDim::Packed(pack_sizes.next().unwrap()),
-            Self::ODD_EVEN_KIND => PhysDim::OddEven(pack_sizes.next().unwrap()),
-            _ => panic!("invalid kind number: {kind}"),
-        }
+            Self::PACKED_KIND => PhysDim::Packed(
+                pack_sizes
+                    .next()
+                    .ok_or(TryFromKindNumberError::EmptyIterator)?,
+            ),
+            Self::ODD_EVEN_KIND => PhysDim::OddEven(
+                pack_sizes
+                    .next()
+                    .ok_or(TryFromKindNumberError::EmptyIterator)?,
+            ),
+            _ => return Err(TryFromKindNumberError::InvalidKindNumber(kind)),
+        })
     }
 
     fn kind_has_pack_size(kind: BimapInt) -> bool {
@@ -1003,7 +1022,7 @@ impl LayoutBimap {
             .map(|digit| {
                 let logical_dim = (digit / PhysDim::KIND_COUNT).try_into().unwrap();
                 let kind = digit % PhysDim::KIND_COUNT;
-                let phys_dim = PhysDim::from_kind_number(kind, &mut pack_sizes);
+                let phys_dim = PhysDim::try_from_kind_number(kind, &mut pack_sizes).unwrap();
                 (logical_dim, phys_dim)
             })
             .collect();
@@ -1280,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_kind_number_consumes_iterator_only_is_kind_has_pack_size() {
+    fn test_try_from_kind_number_consumes_iterator_only_if_kind_has_pack_size() {
         struct CountingIter {
             next_calls: usize,
         }
@@ -1296,12 +1315,26 @@ mod tests {
 
         for kind in 0..PhysDim::KIND_COUNT {
             let mut pack_sizes = CountingIter { next_calls: 0 };
-            let _ = PhysDim::from_kind_number(kind, &mut pack_sizes);
+            let _ = PhysDim::try_from_kind_number(kind, &mut pack_sizes).unwrap();
             assert_eq!(
                 pack_sizes.next_calls,
                 usize::from(PhysDim::kind_has_pack_size(kind)),
             );
         }
+
+        let mut pack_sizes = CountingIter { next_calls: 0 };
+        assert_eq!(
+            PhysDim::try_from_kind_number(PhysDim::KIND_COUNT, &mut pack_sizes),
+            Err(TryFromKindNumberError::InvalidKindNumber(
+                PhysDim::KIND_COUNT
+            ))
+        );
+        assert_eq!(pack_sizes.next_calls, 0);
+
+        assert_eq!(
+            PhysDim::try_from_kind_number(PhysDim::PACKED_KIND, &mut std::iter::empty()),
+            Err(TryFromKindNumberError::EmptyIterator)
+        );
     }
 
     #[test]
