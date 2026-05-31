@@ -1026,6 +1026,7 @@ dependencies = [
  "divan",
  "divrem",
  "enum_dispatch",
+ "env_logger 0.11.8",
  "half",
  "iai-callgrind",
  "indexmap 2.11.4",

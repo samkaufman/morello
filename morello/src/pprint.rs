@@ -194,7 +194,10 @@ mod tests {
             lspec!(Move([4], (u8, GL, row_major), (u8, L1, row_major)));
         let spec_app: ImplNode<Avx2Target> =
             SpecApp::new_with_default_params(Spec(logical_spec, Avx2Target::max_mem())).into();
-        pprint(&spec_app, ImplPrintStyle::Full);
-        pprint(&spec_app, ImplPrintStyle::Compact);
+
+        let _ = pprint_string(&spec_app, ImplPrintStyle::Full);
+
+        let mut compact = String::new();
+        pprint_write(&mut compact, &spec_app, ImplPrintStyle::Compact).unwrap();
     }
 }
