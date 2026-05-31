@@ -204,9 +204,14 @@ pub const fn non_pow2_count(start: u32, end: u32) -> u32 {
 ///
 /// Panics if the paired value is greater than [u32::MAX].
 pub fn pair(a: u32, b: u32) -> u32 {
+    try_pair(a, b).expect("paired value exceeds u32::MAX")
+}
+
+/// Fallible version of [pair].
+pub fn try_pair(a: u32, b: u32) -> Result<u32, ()> {
     let sum = u64::from(a) + u64::from(b);
     let z = sum * (sum + 1) / 2 + u64::from(b);
-    z.try_into().expect("paired value exceeds u32::MAX")
+    z.try_into().map_err(|_| ())
 }
 
 /// Reverses [pair].
@@ -227,14 +232,44 @@ pub fn unpair(z: u32) -> (u32, u32) {
 /// Therefore every length-`n` vector has a greater coordinate than every
 /// shorter vector, and equal-length vectors follow ordinary base-`radix` order.
 ///
-/// Requires `radix >= 2`, every digit to be `< radix`, and `L(n) + V(d)` to be
-/// at most [u32::MAX]. Panics if the coordinate is not representable as `u32`.
+/// Requires `radix >= 2`, every digit to be `< radix`, and `L(n) + V(d)` to be at most
+/// [u32::MAX]. Panics if the coordinate is not representable as `u32`.
+///
+/// Coordinates are grouped by digit-vector length. With radix 2, the empty vector comes first,
+/// then all one-digit vectors, then all two-digit vectors:
+///
+/// ```
+/// # use morello::utils::radix_digits_to_length_grouped_coordinate;
+/// assert_eq!(radix_digits_to_length_grouped_coordinate([], 2), 0);
+/// assert_eq!(radix_digits_to_length_grouped_coordinate([0], 2), 1);
+/// assert_eq!(radix_digits_to_length_grouped_coordinate([1], 2), 2);
+/// assert_eq!(radix_digits_to_length_grouped_coordinate([0, 0], 2), 3);
+/// ```
+///
+/// Within a fixed length, vectors use ordinary base-`radix` order, after the offset for all
+/// shorter vectors:
+///
+/// ```
+/// # use morello::utils::radix_digits_to_length_grouped_coordinate;
+/// assert_eq!(radix_digits_to_length_grouped_coordinate([0, 0], 10), 11);
+/// assert_eq!(radix_digits_to_length_grouped_coordinate([0, 1], 10), 12);
+/// assert_eq!(radix_digits_to_length_grouped_coordinate([1, 0], 10), 21);
+/// ```
 pub fn radix_digits_to_length_grouped_coordinate(
     digits: impl IntoIterator<Item = u32>,
     radix: u32,
 ) -> u32 {
     assert!(radix >= 2, "radix must be at least 1");
+    try_radix_digits_to_length_grouped_coordinate(digits, radix)
+        .expect("length-grouped coordinate exceeds u32::MAX")
+}
 
+/// Fallible version of [radix_digits_to_length_grouped_coordinate].
+pub fn try_radix_digits_to_length_grouped_coordinate(
+    digits: impl IntoIterator<Item = u32>,
+    radix: u32,
+) -> Result<u32, ()> {
+    assert!(radix >= 2, "radix must be at least 1");
     let mut offset = 0u32;
     let mut group = 1u32;
     let mut coordinate = 0u32;
@@ -244,22 +279,16 @@ pub fn radix_digits_to_length_grouped_coordinate(
             digit < radix,
             "digit {digit} is not less than radix {radix}"
         );
-        offset = offset
-            .checked_add(group)
-            .expect("length-grouped coordinate exceeds u32::MAX");
+        offset = offset.checked_add(group).ok_or(())?;
         coordinate = coordinate
             .checked_mul(radix)
             .and_then(|coordinate| coordinate.checked_add(digit))
-            .expect("length-grouped coordinate exceeds u32::MAX");
+            .ok_or(())?;
         if digits.peek().is_some() {
-            group = group
-                .checked_mul(radix)
-                .expect("length-grouped coordinate exceeds u32::MAX");
+            group = group.checked_mul(radix).ok_or(())?;
         }
     }
-    offset
-        .checked_add(coordinate)
-        .expect("length-grouped coordinate exceeds u32::MAX")
+    offset.checked_add(coordinate).ok_or(())
 }
 
 /// Inverts [radix_digits_to_length_grouped_coordinate].
@@ -562,6 +591,13 @@ mod tests {
     }
 
     #[test]
+    fn test_try_pair_returns_err_on_overflow() {
+        assert_eq!(try_pair(92_681, 0), Ok(pair(92_681, 0)));
+        assert_eq!(try_pair(92_682, 0), Err(()));
+        assert_eq!(try_pair(0, 92_682), Err(()));
+    }
+
+    #[test]
     #[should_panic(expected = "paired value exceeds u32::MAX")]
     fn test_pair_panics_on_overflow_1() {
         pair(92_682, 0);
@@ -619,5 +655,25 @@ mod tests {
             prop_assert_eq!(length_grouped_coordinate_to_radix_digits(back, radix), digits);
         }
 
+        #[test]
+        fn test_try_radix_digits_length_grouped_coordinate_matches_infallible(
+            radix in 2u32..=1024,
+            coordinate in 0u32..4_000_000,
+        ) {
+            let digits = length_grouped_coordinate_to_radix_digits(coordinate, radix);
+            prop_assert_eq!(
+                try_radix_digits_to_length_grouped_coordinate(digits, radix),
+                Ok(coordinate)
+            );
+        }
+
+    }
+
+    #[test]
+    fn test_try_radix_digits_length_grouped_coordinate_returns_err_on_overflow() {
+        assert_eq!(
+            try_radix_digits_to_length_grouped_coordinate([65_535, 65_535], 65_536),
+            Err(())
+        );
     }
 }
