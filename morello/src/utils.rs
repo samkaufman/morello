@@ -18,6 +18,11 @@ pub struct Diagonals<T> {
     stage: T,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum CoordinateEncodingError {
+    Overflow,
+}
+
 impl<T: io::Write> fmt::Write for ToWriteFmt<T> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.0.write_all(s.as_bytes()).map_err(|_| fmt::Error)
@@ -78,6 +83,16 @@ impl<T: PrimInt + Send + 'static> Iterator for Diagonals<T> {
         Some(diagonal)
     }
 }
+
+impl fmt::Display for CoordinateEncodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CoordinateEncodingError::Overflow => write!(f, "encoded coordinate exceeds u32::MAX"),
+        }
+    }
+}
+
+impl std::error::Error for CoordinateEncodingError {}
 
 /// Generate a lowercase ASCII name from an index.
 ///
@@ -208,10 +223,10 @@ pub fn pair(a: u32, b: u32) -> u32 {
 }
 
 /// Fallible version of [pair].
-pub fn try_pair(a: u32, b: u32) -> Result<u32, ()> {
+pub fn try_pair(a: u32, b: u32) -> Result<u32, CoordinateEncodingError> {
     let sum = u64::from(a) + u64::from(b);
     let z = sum * (sum + 1) / 2 + u64::from(b);
-    z.try_into().map_err(|_| ())
+    z.try_into().map_err(|_| CoordinateEncodingError::Overflow)
 }
 
 /// Reverses [pair].
@@ -268,7 +283,7 @@ pub fn radix_digits_to_length_grouped_coordinate(
 pub fn try_radix_digits_to_length_grouped_coordinate(
     digits: impl IntoIterator<Item = u32>,
     radix: u32,
-) -> Result<u32, ()> {
+) -> Result<u32, CoordinateEncodingError> {
     assert!(radix >= 2, "radix must be at least 1");
     let mut offset = 0u32;
     let mut group = 1u32;
@@ -279,16 +294,22 @@ pub fn try_radix_digits_to_length_grouped_coordinate(
             digit < radix,
             "digit {digit} is not less than radix {radix}"
         );
-        offset = offset.checked_add(group).ok_or(())?;
+        offset = offset
+            .checked_add(group)
+            .ok_or(CoordinateEncodingError::Overflow)?;
         coordinate = coordinate
             .checked_mul(radix)
             .and_then(|coordinate| coordinate.checked_add(digit))
-            .ok_or(())?;
+            .ok_or(CoordinateEncodingError::Overflow)?;
         if digits.peek().is_some() {
-            group = group.checked_mul(radix).ok_or(())?;
+            group = group
+                .checked_mul(radix)
+                .ok_or(CoordinateEncodingError::Overflow)?;
         }
     }
-    offset.checked_add(coordinate).ok_or(())
+    offset
+        .checked_add(coordinate)
+        .ok_or(CoordinateEncodingError::Overflow)
 }
 
 /// Inverts [radix_digits_to_length_grouped_coordinate].
@@ -593,8 +614,8 @@ mod tests {
     #[test]
     fn test_try_pair_returns_err_on_overflow() {
         assert_eq!(try_pair(92_681, 0), Ok(pair(92_681, 0)));
-        assert_eq!(try_pair(92_682, 0), Err(()));
-        assert_eq!(try_pair(0, 92_682), Err(()));
+        assert_eq!(try_pair(92_682, 0), Err(CoordinateEncodingError::Overflow));
+        assert_eq!(try_pair(0, 92_682), Err(CoordinateEncodingError::Overflow));
     }
 
     #[test]
@@ -673,7 +694,7 @@ mod tests {
     fn test_try_radix_digits_length_grouped_coordinate_returns_err_on_overflow() {
         assert_eq!(
             try_radix_digits_to_length_grouped_coordinate([65_535, 65_535], 65_536),
-            Err(())
+            Err(CoordinateEncodingError::Overflow)
         );
     }
 }
