@@ -35,7 +35,7 @@ impl Dtype {
         }
     }
 
-    pub fn higher_precision_types(&self) -> &[Dtype] {
+    pub fn higher_precision_types(&self) -> &'static [Dtype] {
         match self {
             // TODO: Enable the following once we have a more principled way of
             //        pruning useless casts.

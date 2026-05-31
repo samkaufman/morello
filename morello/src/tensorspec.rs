@@ -537,9 +537,7 @@ where
     fn apply_inverse(&self, v: &Self::Codomain) -> Self::Domain {
         let ((), [level_val, physdim_val, pack_size_val, contig, vector_size_idx]) = *v;
 
-        // `unwrap_or_else` rather than `unwrap` to avoid needing a Debug bound
         let memory = BiMap::apply_inverse(&Tgt::Memory::bimap(), &level_val.try_into().unwrap());
-
         let tgt_vector_bytes = Tgt::Memory::vector_bytes(&memory);
         let vector_size = if tgt_vector_bytes.is_empty() {
             assert_eq!(vector_size_idx, 0);
@@ -689,7 +687,7 @@ fn arb_tensorspecaux<Tgt: Target>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Dtype;
+    use crate::common::{Dtype, Shape};
     use crate::layout::{row_major, Layout};
     use crate::target::{ArmTarget, Avx2Target, CpuMemory, Memory, Target};
     use crate::tensorspec::{arb_noncanon_tensorspec, TensorSpec, TensorSpecArbMaxShape};
@@ -769,15 +767,23 @@ mod tests {
 
         #[test]
         fn test_tensorspecauxnondepbimap_inverts(
-            (dtype, aux) in any::<Dtype>()
-                .prop_flat_map(|d| {
-                    (Just(d), any_with::<TensorSpecAux<Avx2Target>>((Default::default(), Some(d))))
+            (shape, dtype, aux) in [1..=8u32, 1..=8u32]
+                .prop_map(|shape| shape.map(|d| d.try_into().unwrap()))
+                .prop_flat_map(|shape| {
+                    any::<Dtype>().prop_flat_map(move |dtype| {
+                        let shape = Shape::from(shape.as_slice());
+                        (
+                            Just(shape.clone()),
+                            Just(dtype),
+                            any_with::<TensorSpecAux<Avx2Target>>((
+                                TensorSpecArbMaxShape(shape),
+                                Some(dtype),
+                            )),
+                        )
+                    })
                 })
         ) {
-            let bimap = TensorSpecAuxNonDepBimap::<Avx2Target>::new(
-                &TensorSpecArbMaxShape::default().0,
-                dtype,
-            );
+            let bimap = TensorSpecAuxNonDepBimap::<Avx2Target>::new(&shape, dtype);
             prop_assume!(BiMap::defined_for(&bimap, &aux));
             let output = BiMap::apply(&bimap, &aux);
             assert_eq!(aux, BiMap::apply_inverse(&bimap, &output));

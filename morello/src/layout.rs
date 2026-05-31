@@ -926,7 +926,14 @@ impl LayoutBimap {
         max_size.ilog2() - MIN_PACKING_SIZE.ilog2() + 1
     }
 
-    fn pack_size_value_from_coordinate(&self, logical_dim: u8, coordinate: BimapInt) -> DimSize {
+    /// Decodes one logical dimension's pack-size coordinate.
+    ///
+    /// This is the inverse of [Self::pack_size_coordinate_for_dim].
+    pub(crate) fn pack_size_value_from_coordinate(
+        &self,
+        logical_dim: u8,
+        coordinate: BimapInt,
+    ) -> DimSize {
         let max_size = self.tensor_shape[usize::from(logical_dim)].get();
         let power_count = self.power_of_two_pack_size_coordinate_count(logical_dim);
         let size = if coordinate < power_count {
@@ -944,13 +951,33 @@ impl LayoutBimap {
         DimSize::new(size).unwrap()
     }
 
+    /// Encodes one logical dimension's pack size.
+    ///
+    /// This is the inverse of [Self::pack_size_value_from_coordinate].
+    pub(crate) fn pack_size_coordinate_for_dim(&self, logical_dim: u8, size: DimSize) -> BimapInt {
+        let size = size.get();
+        debug_assert!(size >= MIN_PACKING_SIZE);
+        debug_assert!(
+            size <= self.tensor_shape[usize::from(logical_dim)].get(),
+            "pack size {size} exceeds logical dimension {logical_dim} of tensor shape {:?}",
+            self.tensor_shape,
+        );
+        let power_count = self.power_of_two_pack_size_coordinate_count(logical_dim);
+        if size.is_power_of_two() {
+            size.trailing_zeros() - MIN_PACKING_SIZE.trailing_zeros()
+        } else {
+            let power_count_before = (u32::BITS - (size - 1).leading_zeros()) - 1;
+            power_count + size - MIN_PACKING_SIZE - power_count_before
+        }
+    }
+
     /// Computes the coordinate for the layout's `PhysDim` order and kinds.
     ///
     /// The actual sizes of Packed/OddEven dimensions are omitted; they are
     /// encoded separately by [Self::pack_size_coordinate].
-    fn physdim_coordinate(&self, layout: &Layout) -> BimapInt {
+    pub(crate) fn physdim_coordinate_for_dims(&self, dims: &[(u8, PhysDim)]) -> BimapInt {
         let tensor_rank = self.tensor_rank();
-        let digits = layout.dims.iter().map(|&(logical_dim, phys_dim)| {
+        let digits = dims.iter().map(|&(logical_dim, phys_dim)| {
             debug_assert!(logical_dim < tensor_rank);
             u32::from(logical_dim) * PhysDim::KIND_COUNT + phys_dim.kind_number()
         });
@@ -988,30 +1015,12 @@ impl LayoutBimap {
     /// `layout`. This does not carry information whether those dimensions are
     /// Packed or OddEven.
     fn pack_size_coordinate(&self, layout: &Layout) -> BimapInt {
-        fn code_pack_size(bimap: &LayoutBimap, logical_dim: u8, size: u32) -> BimapInt {
-            let power_count = bimap.power_of_two_pack_size_coordinate_count(logical_dim);
-            if size.is_power_of_two() {
-                size.trailing_zeros() - MIN_PACKING_SIZE.trailing_zeros()
-            } else {
-                let power_count_before = (u32::BITS - (size - 1).leading_zeros()) - 1;
-                power_count + size - MIN_PACKING_SIZE - power_count_before
-            }
-        }
-
         let (_, coordinate) = layout.dims.iter().rev().fold(
             (false, 0),
             |(has_pack_size, rest), &(logical_dim, phys_dim)| match phys_dim {
                 PhysDim::Dynamic => (has_pack_size, rest),
                 PhysDim::Packed(size) | PhysDim::OddEven(size) => {
-                    let size = size.get();
-                    debug_assert!(size >= MIN_PACKING_SIZE);
-                    debug_assert!(
-                        size <= self.tensor_shape[usize::from(logical_dim)].get(),
-                        "{phys_dim:?} of {layout} exceeds size {:?} in tensor shape {:?}",
-                        self.tensor_shape[usize::from(logical_dim)],
-                        self.tensor_shape,
-                    );
-                    let mut coordinate = code_pack_size(self, logical_dim, size);
+                    let mut coordinate = self.pack_size_coordinate_for_dim(logical_dim, size);
                     if has_pack_size {
                         coordinate = pair(coordinate, rest);
                     }
@@ -1060,7 +1069,7 @@ impl BiMap for LayoutBimap {
 
     fn apply(&self, layout: &Layout) -> [BimapInt; 2] {
         [
-            self.physdim_coordinate(layout),
+            self.physdim_coordinate_for_dims(&layout.dims),
             self.pack_size_coordinate(layout),
         ]
     }

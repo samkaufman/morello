@@ -2,6 +2,7 @@
 
 use crate::rtree::aabb::AABB;
 use enum_dispatch::enum_dispatch;
+use num_traits::PrimInt;
 use rstar::Envelope as _;
 use rstar::{Point, PointDistance, RTree, RTreeObject};
 use serde::{Deserialize, Serialize};
@@ -1423,12 +1424,12 @@ fn rect_subtract_fixed_for_each<const D: usize, F>(
 /// Subtract the subtrahend rectangle from the minuend rectangle (both defined by inclusive points),
 /// returning replacement rectangles which cover the same space as the minuend but exclude the
 /// subtrahend.
-fn rect_subtract(
-    rect_bottom: &[RTreeInt],
-    rect_top: &[RTreeInt],
-    subtrahend_bottom: &[RTreeInt],
-    subtrahend_top: &[RTreeInt],
-) -> Vec<(Vec<RTreeInt>, Vec<RTreeInt>)> {
+pub(crate) fn rect_subtract<T: PrimInt>(
+    rect_bottom: &[T],
+    rect_top: &[T],
+    subtrahend_bottom: &[T],
+    subtrahend_top: &[T],
+) -> Vec<(Vec<T>, Vec<T>)> {
     assert_eq!(rect_bottom.len(), rect_top.len());
     assert_eq!(rect_bottom.len(), subtrahend_bottom.len());
     assert_eq!(rect_bottom.len(), subtrahend_top.len());
@@ -1445,13 +1446,13 @@ fn rect_subtract(
     for dim in 0..rect_bottom.len() {
         if working_bottom[dim] < subtrahend_bottom[dim] {
             let orig = working_top[dim];
-            working_top[dim] = subtrahend_bottom[dim] - 1;
+            working_top[dim] = subtrahend_bottom[dim] - T::one();
             result.push((working_bottom.clone(), working_top.clone()));
             working_top[dim] = orig;
         }
         if working_top[dim] > subtrahend_top[dim] {
             let orig = working_bottom[dim];
-            working_bottom[dim] = subtrahend_top[dim] + 1;
+            working_bottom[dim] = subtrahend_top[dim] + T::one();
             result.push((working_bottom.clone(), working_top.clone()));
             working_bottom[dim] = orig;
         }
