@@ -716,6 +716,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         } else {
             1
         };
+        let row_pair_count = m_row_count / 2;
         let acc_name_groups = m_exprs
             .iter()
             .map(|m_expr| {
@@ -746,9 +747,28 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
+        let row_pair_acc_count = row_pair_count * n_vector_count * stripe_count;
+        let row_pair_acc_names = (0..row_pair_acc_count)
+            .map(|_| (self.namer.fresh_name(), self.namer.fresh_name()))
+            .collect::<Vec<_>>();
+        let row_pair_acc_idx = |row_pair_idx: usize, n_idx: usize, stripe_idx: usize| {
+            ((row_pair_idx * n_vector_count) + n_idx) * stripe_count + stripe_idx
+        };
 
         // The first accumulator in each group is the scheduled output VRF value;
         // extra stripe accumulators start at zero and are reduced into it later.
+        for (acc_even_name, acc_odd_name) in &row_pair_acc_names {
+            writeln!(
+                w,
+                "{}__m512 {acc_even_name} = _mm512_setzero_ps();",
+                indent(depth)
+            )?;
+            writeln!(
+                w,
+                "{}__m512 {acc_odd_name} = _mm512_setzero_ps();",
+                indent(depth)
+            )?;
+        }
         for row_acc_groups in &acc_name_groups {
             for acc_names in row_acc_groups {
                 for acc_name in &acc_names[1..] {
@@ -769,8 +789,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             depth,
             |this, w, stripe_idx, k_expr, depth| {
                 let mut rhs_vec_names = Vec::with_capacity(n_vector_count);
+                let mut rhs_pair_vec_names = Vec::with_capacity(n_vector_count);
                 for n_expr in &n_start_exprs {
-                    let rhs_vec_name = this.namer.fresh_name();
                     let rhs_pair_ptr = this.c_index_ptr_with_point_exprs(
                         &arguments[1],
                         &[
@@ -779,15 +799,83 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             (2, n_expr.clone()),
                         ],
                     );
-                    writeln!(
-                        w,
-                        "{}__m512bh {rhs_vec_name} = (__m512bh)_mm512_loadu_si512((const void *)({rhs_pair_ptr}));",
-                        indent(depth),
-                    )?;
-                    rhs_vec_names.push(rhs_vec_name);
+                    if row_pair_count == 0 {
+                        let rhs_vec_name = this.namer.fresh_name();
+                        writeln!(
+                            w,
+                            "{}__m512bh {rhs_vec_name} = (__m512bh)_mm512_loadu_si512((const void *)({rhs_pair_ptr}));",
+                            indent(depth),
+                        )?;
+                        rhs_vec_names.push(rhs_vec_name);
+                    } else {
+                        let rhs_raw_name = this.namer.fresh_name();
+                        let rhs_even_name = this.namer.fresh_name();
+                        let rhs_odd_name = this.namer.fresh_name();
+                        writeln!(
+                            w,
+                            "{}__m512 {rhs_raw_name} = _mm512_loadu_ps((const void *)({rhs_pair_ptr}));",
+                            indent(depth),
+                        )?;
+                        writeln!(
+                            w,
+                            "{}__m512bh {rhs_even_name} = (__m512bh)_mm512_moveldup_ps({rhs_raw_name});",
+                            indent(depth),
+                        )?;
+                        writeln!(
+                            w,
+                            "{}__m512bh {rhs_odd_name} = (__m512bh)_mm512_movehdup_ps({rhs_raw_name});",
+                            indent(depth),
+                        )?;
+                        rhs_vec_names.push(format!("(__m512bh){rhs_raw_name}"));
+                        rhs_pair_vec_names.push((rhs_even_name, rhs_odd_name));
+                    }
                 }
 
-                for (row_idx, m_expr) in m_exprs.iter().enumerate() {
+                let emit_dpbf16 =
+                    |w: &mut W, acc_name: &str, lhs_vec_name: &str, rhs_vec_name: &str| {
+                        writeln!(
+                            w,
+                            "{0}{1} = _mm512_dpbf16_ps({1}, {2}, {3});",
+                            indent(depth),
+                            acc_name,
+                            lhs_vec_name,
+                            rhs_vec_name,
+                        )
+                    };
+
+                for row_pair_idx in 0..row_pair_count {
+                    let lhs_vec_name = this.namer.fresh_name();
+                    let lhs_pair_ptr = this.c_index_ptr_with_point_exprs(
+                        &arguments[0],
+                        &[
+                            (0, NonAffineExpr::zero()),
+                            (1, m_exprs[row_pair_idx * 2].clone()),
+                            (2, k_expr.clone()),
+                        ],
+                    );
+                    let lhs_pair_name = this.namer.fresh_name();
+                    writeln!(w, "{}double {lhs_pair_name};", indent(depth))?;
+                    writeln!(
+                        w,
+                        "{}__builtin_memcpy(&{lhs_pair_name}, {lhs_pair_ptr}, sizeof({lhs_pair_name}));",
+                        indent(depth),
+                    )?;
+                    writeln!(
+                        w,
+                        "{}__m512bh {lhs_vec_name} = (__m512bh)_mm512_set1_pd({lhs_pair_name});",
+                        indent(depth),
+                    )?;
+                    for (n_idx, (rhs_even_name, rhs_odd_name)) in
+                        rhs_pair_vec_names.iter().enumerate()
+                    {
+                        let (acc_even_name, acc_odd_name) =
+                            &row_pair_acc_names[row_pair_acc_idx(row_pair_idx, n_idx, stripe_idx)];
+                        emit_dpbf16(w, acc_even_name, &lhs_vec_name, rhs_even_name)?;
+                        emit_dpbf16(w, acc_odd_name, &lhs_vec_name, rhs_odd_name)?;
+                    }
+                }
+
+                for (row_idx, m_expr) in m_exprs.iter().enumerate().skip(row_pair_count * 2) {
                     let lhs_vec_name = this.namer.fresh_name();
                     let lhs_pair_ptr = this.c_index_ptr_with_point_exprs(
                         &arguments[0],
@@ -811,20 +899,66 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     )?;
                     for (n_idx, rhs_vec_name) in rhs_vec_names.iter().enumerate() {
                         let acc_name = acc_name_groups[row_idx][n_idx][stripe_idx].as_str();
-                        writeln!(
-                            w,
-                            "{0}{1} = _mm512_dpbf16_ps({1}, {2}, {3});",
-                            indent(depth),
-                            acc_name,
-                            lhs_vec_name,
-                            rhs_vec_name,
-                        )?;
+                        emit_dpbf16(w, acc_name, &lhs_vec_name, rhs_vec_name)?;
                     }
                 }
 
                 Ok(())
             },
         )?;
+
+        for row_pair_idx in 0..row_pair_count {
+            let row0_idx = row_pair_idx * 2;
+            let row1_idx = row0_idx + 1;
+            for n_idx in 0..n_vector_count {
+                for stripe_idx in 0..stripe_count {
+                    let (acc_even_name, acc_odd_name) =
+                        &row_pair_acc_names[row_pair_acc_idx(row_pair_idx, n_idx, stripe_idx)];
+                    let row0_mix_name = self.namer.fresh_name();
+                    let row0_name = self.namer.fresh_name();
+                    let row1_mix_name = self.namer.fresh_name();
+                    let row1_name = self.namer.fresh_name();
+                    writeln!(
+                        w,
+                        "{}__m512 {row0_mix_name} = _mm512_shuffle_ps({acc_even_name}, {acc_odd_name}, 0x88);",
+                        indent(depth),
+                    )?;
+                    writeln!(
+                        w,
+                        "{}__m512 {row0_name} = _mm512_shuffle_ps({row0_mix_name}, {row0_mix_name}, 0xd8);",
+                        indent(depth),
+                    )?;
+                    writeln!(
+                        w,
+                        "{}__m512 {row1_mix_name} = _mm512_shuffle_ps({acc_even_name}, {acc_odd_name}, 0xdd);",
+                        indent(depth),
+                    )?;
+                    writeln!(
+                        w,
+                        "{}__m512 {row1_name} = _mm512_shuffle_ps({row1_mix_name}, {row1_mix_name}, 0xd8);",
+                        indent(depth),
+                    )?;
+                    let row0_acc_name = acc_name_groups[row0_idx][n_idx][stripe_idx].as_str();
+                    let row1_acc_name = acc_name_groups[row1_idx][n_idx][stripe_idx].as_str();
+                    writeln!(
+                        w,
+                        "{}{} = _mm512_add_ps({}, {});",
+                        indent(depth),
+                        row0_acc_name,
+                        row0_acc_name,
+                        row0_name,
+                    )?;
+                    writeln!(
+                        w,
+                        "{}{} = _mm512_add_ps({}, {});",
+                        indent(depth),
+                        row1_acc_name,
+                        row1_acc_name,
+                        row1_name,
+                    )?;
+                }
+            }
+        }
 
         // Emit accumulator group reductions.
         for row_acc_groups in &acc_name_groups {

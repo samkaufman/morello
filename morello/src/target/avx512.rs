@@ -167,13 +167,32 @@ impl Kernel for Avx512Kernel {
                 let n_vector_count = usize::try_from(n.get() / 16).unwrap();
                 let stripe_count = if m == 1 && n_vector_count == 2 { 5 } else { 1 };
                 let extra_accumulators = m * n_vector_count * (stripe_count - 1);
+                let row_pair_count = m / 2;
+                let odd_row_count = m % 2;
+                let row_pair_accumulators = 2 * row_pair_count * n_vector_count * stripe_count;
+                let rhs_vector_count = if row_pair_count == 0 {
+                    n_vector_count
+                } else if n_vector_count == 1 || odd_row_count == 1 {
+                    // The raw RHS vectors must remain live when there is an odd-row tail. For a
+                    // single N vector, clang also keeps another RHS vector live after unrolling.
+                    3 * n_vector_count
+                } else {
+                    // Without an odd-row tail, clang overwrites each raw RHS vector with the odd
+                    // duplicate after creating the even duplicate.
+                    2 * n_vector_count
+                };
+                let lhs_scalar_count = 0;
+                let lhs_broadcast_count = 1;
 
-                // For RF: 3 scalar intermediates before broadcast.
-                // For VRF: stripe accumulators plus one A-pair broadcast and the current B vectors.
+                // For RF: clang folds the scalar LHS pair load into the broadcast instruction.
+                // For VRF: row-pair/stripe accumulators plus one LHS-pair broadcast and the current RHS vectors.
                 // The primary accumulators are the output VRF registers.
                 MemoryAllocation::Simple([
-                    3,
-                    (extra_accumulators + n_vector_count + 1)
+                    lhs_scalar_count,
+                    (extra_accumulators
+                        + row_pair_accumulators
+                        + rhs_vector_count
+                        + lhs_broadcast_count)
                         .try_into()
                         .unwrap(),
                     0,
@@ -212,7 +231,11 @@ impl Kernel for Avx512Kernel {
                 };
                 let n_vectors = n.get() / 16;
                 let full_k_pairs = k.get() / 2;
-                let cost_per_k_pair = n_vectors + m.get() * (2 + n_vectors);
+                let row_pairs = m.get() / 2;
+                let odd_rows = m.get() % 2;
+                let dpbf16ps_per_k_pair = n_vectors * (2 * row_pairs + odd_rows);
+                const VDPBF16PS_COST: MainCost = 6;
+                let cost_per_k_pair = VDPBF16PS_COST * dpbf16ps_per_k_pair;
                 full_k_pairs * cost_per_k_pair
             }
         }
