@@ -4,6 +4,7 @@ use crate::common::Dtype;
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
+use crate::imp::allocs::move_cost;
 use crate::layout;
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
@@ -166,31 +167,14 @@ impl Kernel for Avx512Kernel {
 
                 let n_vector_count = usize::try_from(n.get() / 16).unwrap();
                 let stripe_count = if m == 1 && n_vector_count == 2 { 5 } else { 1 };
+                let result_accumulators = m * n_vector_count;
                 let extra_accumulators = m * n_vector_count * (stripe_count - 1);
-                let row_pair_count = m / 2;
-                let odd_row_count = m % 2;
-                let row_pair_accumulators = 2 * row_pair_count * n_vector_count * stripe_count;
-                let rhs_vector_count = if row_pair_count == 0 {
-                    n_vector_count
-                } else if n_vector_count == 1 || odd_row_count == 1 {
-                    // The raw RHS vectors must remain live when there is an odd-row tail. For a
-                    // single N vector, clang also keeps another RHS vector live after unrolling.
-                    3 * n_vector_count
-                } else {
-                    // Without an odd-row tail, clang overwrites each raw RHS vector with the odd
-                    // duplicate after creating the even duplicate.
-                    2 * n_vector_count
-                };
-                let lhs_scalar_count = 0;
+                let rhs_vector_count = n_vector_count;
                 let lhs_broadcast_count = 1;
-
-                // For RF: clang folds the scalar LHS pair load into the broadcast instruction.
-                // For VRF: row-pair/stripe accumulators plus one LHS-pair broadcast and the current RHS vectors.
-                // The primary accumulators are the output VRF registers.
                 MemoryAllocation::Simple([
-                    lhs_scalar_count,
-                    (extra_accumulators
-                        + row_pair_accumulators
+                    1,
+                    (result_accumulators
+                        + extra_accumulators
                         + rhs_vector_count
                         + lhs_broadcast_count)
                         .try_into()
@@ -220,7 +204,7 @@ impl Kernel for Avx512Kernel {
                 instr_count + REDUCTION_COST * accum_count
             }
             Avx512Kernel::MatmulLoopVdpbf16ps => {
-                let [lhs_spec, rhs_spec, _] = parameters else {
+                let [lhs_spec, rhs_spec, out_spec] = parameters else {
                     unreachable!();
                 };
                 let [_, m, k] = lhs_spec.spec().shape() else {
@@ -236,7 +220,7 @@ impl Kernel for Avx512Kernel {
                 let dpbf16ps_per_k_pair = n_vectors * (2 * row_pairs + odd_rows);
                 const VDPBF16PS_COST: MainCost = 6;
                 let cost_per_k_pair = VDPBF16PS_COST * dpbf16ps_per_k_pair;
-                full_k_pairs * cost_per_k_pair
+                full_k_pairs * cost_per_k_pair + move_cost(out_spec.spec())
             }
         }
     }
@@ -372,8 +356,7 @@ fn matmul_vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Tar
 
     if lhs.memory() != CpuMemory::L1
         || rhs.memory() != CpuMemory::L1
-        || out.memory() != CpuMemory::VRF
-        || out.vector_size() != Some(nz!(16u32))
+        || out.memory() != CpuMemory::L1
     {
         return false;
     }
@@ -496,7 +479,7 @@ mod tests {
     use crate::layout::row_major;
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::spec::{LogicalSpec, Spec};
-    use crate::target::CpuMemory::{GL, L1, RF, VRF};
+    use crate::target::CpuMemory::{GL, L1, RF};
     use crate::target::{Kernel, Target};
     use crate::{layout, lspec};
 
@@ -550,7 +533,7 @@ mod tests {
             [1, 3, 128, 16],
             (bf16, L1, layout![0, 1, 2, 1 p(3), 2 p(2)]),
             (bf16, L1, layout![0, 2, 1, 2 p(16), 1 p(2)]),
-            (f32, VRF, row_major, 16),
+            (f32, L1, row_major),
             serial
         ));
         logical_spec.canonicalize().unwrap();
@@ -563,7 +546,7 @@ mod tests {
             [1, 3, 128, 16],
             (bf16, L1, layout![0, 1, 2, 1 p(3), 2 p(2)]),
             (bf16, L1, row_major),
-            (f32, VRF, row_major, 16),
+            (f32, L1, row_major),
             serial
         ));
         logical_spec.canonicalize().unwrap();
@@ -576,7 +559,7 @@ mod tests {
             [1, 3, 128, 16],
             (bf16, GL, layout![0, 1, 2, 1 p(3), 2 p(2)]),
             (bf16, L1, layout![0, 2, 1, 2 p(16), 1 p(2)]),
-            (f32, VRF, row_major, 16),
+            (f32, L1, row_major),
             serial
         ));
         gl_lhs_spec.canonicalize().unwrap();
@@ -586,7 +569,7 @@ mod tests {
             [1, 3, 128, 16],
             (bf16, L1, layout![0, 1, 2, 1 p(3), 2 p(2)]),
             (bf16, GL, layout![0, 2, 1, 2 p(16), 1 p(2)]),
-            (f32, VRF, row_major, 16),
+            (f32, L1, row_major),
             serial
         ));
         gl_rhs_spec.canonicalize().unwrap();
@@ -599,7 +582,7 @@ mod tests {
             [1, 3, 128, 48],
             (bf16, L1, layout![0, 1, 2, 1 p(3), 2 p(2)]),
             (bf16, L1, layout![0, 2, 1, 2 p(16), 1 p(2)]),
-            (f32, VRF, row_major, 16),
+            (f32, L1, row_major),
             serial
         ));
         logical_spec.canonicalize().unwrap();
@@ -612,7 +595,7 @@ mod tests {
             [1, 7, 128, 16],
             (bf16, L1, layout![0, 1, 2, 1 p(7), 2 p(2)]),
             (bf16, L1, layout![0, 2, 1, 2 p(16), 1 p(2)]),
-            (f32, VRF, row_major, 16),
+            (f32, L1, row_major),
             serial
         ));
         logical_spec.canonicalize().unwrap();
@@ -625,7 +608,7 @@ mod tests {
             [1, 3, 1, 16],
             (bf16, L1, layout![0, 1, 2, 1 p(3), 2 p(2)]),
             (bf16, L1, layout![0, 2, 1, 2 p(16), 1 p(2)]),
-            (f32, VRF, row_major, 16),
+            (f32, L1, row_major),
             serial
         ));
         logical_spec.canonicalize().unwrap();
