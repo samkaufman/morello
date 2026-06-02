@@ -856,6 +856,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         for (out_acc_name, out_ptr) in &l1_output_acc_names_and_ptrs {
             writeln!(
                 w,
+                "{}__asm__ __volatile__(\"\" ::: \"memory\");  // prevent hoisting of load",
+                indent(depth),
+            )?;
+            writeln!(
+                w,
                 "{}{out_acc_name} = _mm512_add_ps({out_acc_name}, _mm512_loadu_ps((const void *)({out_ptr})));",
                 indent(depth),
             )?;
@@ -3642,7 +3647,12 @@ fn emit_load_input_value<W: Write>(out: &mut W, idx: usize, dtype: Dtype) -> fmt
                 indent(2)
             )
         }
-        Dtype::Uint8 | Dtype::Sint8 | Dtype::Uint16 | Dtype::Sint16 | Dtype::Uint32 | Dtype::Sint32 => {
+        Dtype::Uint8
+        | Dtype::Sint8
+        | Dtype::Uint16
+        | Dtype::Sint16
+        | Dtype::Uint32
+        | Dtype::Sint32 => {
             let conv = match dtype {
                 Dtype::Uint8 | Dtype::Sint8 => "",
                 Dtype::Uint16 | Dtype::Sint16 => "LE_TO_CPU16",
