@@ -354,17 +354,14 @@ fn matmul_vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Tar
         return false;
     }
 
-    if lhs.memory() != CpuMemory::L1
-        || rhs.memory() != CpuMemory::L1
-        || out.memory() != CpuMemory::L1
-    {
+    if lhs.memory() != CpuMemory::L1 || rhs.memory() != CpuMemory::L1 {
+        return false;
+    }
+    if !matches!(out.memory().0, CpuMemory::GL | CpuMemory::L1) {
         return false;
     }
 
     let Ok(expected_lhs_layout) = layout![2, 1, 2 p(2)].canonicalize(lhs.shape()) else {
-        return false;
-    };
-    let Ok(expected_out_layout) = layout![0, 1, 2].canonicalize(out.shape()) else {
         return false;
     };
     let mut lhs_layout = lhs.layout().clone();
@@ -383,7 +380,7 @@ fn matmul_vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Tar
     lhs.contiguous_abs() >= 1
         && lhs_layout == expected_lhs_layout
         && rhs_layout_ok
-        && out.layout() == &expected_out_layout
+        && out.layout().is_row_major()
 }
 
 impl Memory for Avx512Memory {
