@@ -19,6 +19,9 @@ use nonzero::nonzero as nz;
 use std::io;
 use std::panic;
 
+#[cfg(not(feature = "drop-rf"))]
+use morello::target::CpuMemory::RF;
+
 fn main() {
     env_logger::init();
     const RANK: u8 = 2;
@@ -60,22 +63,27 @@ fn main() {
         .subschedule(&[0, 0, 0], |subspec| subspec.synthesize(&db))
         // This [0, 1] corresponds to the SoftmaxDenominator
         .subschedule(&[0, 1], |subspec| {
-            subspec
+            let imp = subspec
                 .to_accum()
                 .split(32)
                 .move_param(0, CpuMemory::L1)
                 .move_param(1, CpuMemory::L1)
                 .move_param(2, CpuMemory::L1)
-                .move_vrf(0, CpuMemory::VRF, 8)
-                .move_param(1, CpuMemory::RF)
-                .move_param(2, CpuMemory::RF)
-                .select(CpuKernel::VectorSoftmaxDenominator)
+                .move_vrf(0, CpuMemory::VRF, 8);
+            #[cfg(not(feature = "drop-rf"))]
+            let imp = imp.move_param(1, RF).move_param(2, RF);
+            imp.select(CpuKernel::VectorSoftmaxDenominator)
         })
         .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db))
-        .subschedule(&[0, 1, 1, 0], |subspec| subspec.synthesize(&db))
+        .subschedule(&[0, 1, 1, 0], |subspec| subspec.synthesize(&db));
+
+    #[cfg(not(feature = "drop-rf"))]
+    let implementation = implementation
         .subschedule(&[0, 1, 1, 1, 0], |subspec| subspec.synthesize(&db))
         .subschedule(&[0, 1, 1, 1, 1, 0], |subspec| subspec.synthesize(&db))
-        .subschedule(&[0, 1, 1, 1, 1, 2], |subspec| subspec.synthesize(&db))
+        .subschedule(&[0, 1, 1, 1, 1, 2], |subspec| subspec.synthesize(&db));
+
+    let implementation = implementation
         // This [1] corresponds to SoftmaxComplete
         .subschedule(&[1], |softmax_complete| {
             softmax_complete

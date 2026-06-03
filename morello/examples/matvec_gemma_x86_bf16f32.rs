@@ -9,13 +9,16 @@ use morello::spec;
 use morello::spec::Spec;
 use morello::target::{
     Avx2Target, CpuKernel,
-    CpuMemory::{GL, L1, RF, VRF},
+    CpuMemory::{GL, L1, VRF},
 };
 use morello::utils::ToWriteFmt;
 
 use nonzero::nonzero as nz;
 
 use std::io;
+
+#[cfg(not(feature = "drop-rf"))]
+use morello::target::CpuMemory::RF;
 
 fn main() {
     env_logger::init();
@@ -51,14 +54,21 @@ fn main() {
                 })
         })
         .tile_out_parallel(&[1, 1, 128])
-        .tile_out(&[1, 1, 1])
-        .move_param(2, L1)
-        .move_param(2, RF)
-        .to_accum()
-        .subschedule(&[1, 0, 0], |z| z.select(CpuKernel::ValueZero))
+        .tile_out(&[1, 1, 1]);
+
+    let implementation = implementation.move_param(2, L1);
+    #[cfg(not(feature = "drop-rf"))]
+    let implementation = implementation.move_param(2, RF);
+    let implementation = implementation.to_accum();
+    #[cfg(not(feature = "drop-rf"))]
+    let implementation = implementation.subschedule(&[1, 0, 0], |z| z.select(CpuKernel::ValueZero));
+    #[cfg(feature = "drop-rf")]
+    let implementation = implementation.subschedule(&[1, 0], |z| z.select(CpuKernel::ValueZero));
+    let implementation = implementation
         .move_param(1, L1)
-        .select(CpuKernel::DotProductLoopF32InterleavedBf16F32)
-        .subschedule(&[1, 1], |body| body.select(CpuKernel::Assign));
+        .select(CpuKernel::DotProductLoopF32InterleavedBf16F32);
+    #[cfg(not(feature = "drop-rf"))]
+    let implementation = implementation.subschedule(&[1, 1], |body| body.select(CpuKernel::Assign));
 
     implementation
         .emit(

@@ -38,7 +38,13 @@ use std::iter::{self, once};
 
 const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
-const CPU_MEMORIES: [CpuMemory; 4] = [CpuMemory::RF, CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
+
+#[cfg(feature = "drop-rf")]
+const CPU_MEMORIES: [CpuMemory; MEMORY_COUNT] = [CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
+#[cfg(not(feature = "drop-rf"))]
+const CPU_MEMORIES: [CpuMemory; MEMORY_COUNT] =
+    [CpuMemory::RF, CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
+
 pub(crate) const DOT_PRODUCT_STRIP_SIZE: DimSize = nz!(8u32);
 pub(crate) const VECTOR_ACCUM_COUNT: u32 = 4;
 /// Peak VRF register pressure budget for the emitted `exp256_ps` / `exp512_ps` C helpers.
@@ -151,6 +157,7 @@ pub enum CpuKernel {
 #[derive(Eq, PartialEq, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
 #[cfg_attr(test, derive(proptest_derive::Arbitrary))]
 pub enum CpuMemory {
+    #[cfg(not(feature = "drop-rf"))]
     RF,
     VRF,
     L1,
@@ -269,7 +276,12 @@ impl<T: CpuTarget> Target for T {
 
     fn possible_destination_memories(slower: Self::Memory) -> Vec<Self::Memory> {
         match slower.into() {
-            CpuMemory::RF | CpuMemory::VRF => vec![slower],
+            #[cfg(not(feature = "drop-rf"))]
+            CpuMemory::RF => vec![slower],
+            CpuMemory::VRF => vec![slower],
+            #[cfg(feature = "drop-rf")]
+            CpuMemory::L1 => vec![slower, CpuMemory::VRF.into()],
+            #[cfg(not(feature = "drop-rf"))]
             CpuMemory::L1 => vec![slower, CpuMemory::RF.into(), CpuMemory::VRF.into()],
             CpuMemory::GL => vec![slower, CpuMemory::L1.into()],
         }
@@ -722,7 +734,9 @@ impl<Tgt: CpuTarget> PlanMemoryTarget for Tgt {
             CpuMemory::L1 | CpuMemory::GL if spec.bytes_used() > u64::from(STACK_CUTOFF) => {
                 Some(spec.bytes_used())
             }
-            CpuMemory::RF | CpuMemory::VRF | CpuMemory::L1 | CpuMemory::GL => None,
+            CpuMemory::VRF | CpuMemory::L1 | CpuMemory::GL => None,
+            #[cfg(not(feature = "drop-rf"))]
+            CpuMemory::RF => None,
         }
     }
 }
@@ -790,7 +804,7 @@ impl CpuKernel {
             CpuKernel::MultAdd => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
                     && operands.iter().all(|o| {
-                        o.memory() == CpuMemory::RF && o.shape().iter().all(|&d| d == nz!(1u32))
+                        is_rf_or_l1_memory(o.memory()) && o.shape().iter().all(|&d| d == nz!(1u32))
                     })
                     && operands.iter().map(|o| o.dtype()).all_equal()
             }
@@ -901,7 +915,7 @@ impl CpuKernel {
                               || (lhs.memory() == CpuMemory::VRF
                                   && lhs.vector_size() == Some(DOT_PRODUCT_STRIP_SIZE)))
                           && rhs.memory() == CpuMemory::L1
-                          && *out_level == CpuMemory::RF
+                          && is_rf_or_l1_memory(*out_level)
                     )
             }
             CpuKernel::DotProductLoopF32Bf16F32 => {
@@ -999,7 +1013,7 @@ impl CpuKernel {
                     if o.dtype() != Dtype::Float32 {
                         return false;
                     }
-                    if o.memory() != CpuMemory::RF {
+                    if !is_rf_or_l1_memory(o.memory()) {
                         return false;
                     }
                 }
@@ -1014,10 +1028,10 @@ impl CpuKernel {
                 if operands[0].memory() != CpuMemory::L1 {
                     return false;
                 }
-                if operands[1].memory() != CpuMemory::RF {
+                if !is_rf_or_l1_memory(operands[1].memory()) {
                     return false;
                 }
-                if operands[2].memory() != CpuMemory::RF {
+                if !is_rf_or_l1_memory(operands[2].memory()) {
                     return false;
                 }
                 if operands[3].memory() != CpuMemory::L1 {
@@ -1062,7 +1076,7 @@ impl CpuKernel {
                     if o.dtype() != Dtype::Float32 {
                         return false;
                     }
-                    if o.memory() != CpuMemory::RF {
+                    if !is_rf_or_l1_memory(o.memory()) {
                         return false;
                     }
                 }
@@ -1109,7 +1123,7 @@ impl CpuKernel {
                     if operands[i].shape().iter().any(|d| d.get() != 1) {
                         return false;
                     }
-                    if operands[i].memory() != CpuMemory::RF {
+                    if !is_rf_or_l1_memory(operands[i].memory()) {
                         return false;
                     }
                 }
@@ -1147,8 +1161,8 @@ impl CpuKernel {
                     }
                 }
                 if operands[0].memory() != CpuMemory::VRF
-                    || operands[1].memory() != CpuMemory::RF
-                    || operands[2].memory() != CpuMemory::RF
+                    || !is_rf_or_l1_memory(operands[1].memory())
+                    || !is_rf_or_l1_memory(operands[2].memory())
                 {
                     return false;
                 }
@@ -1182,7 +1196,7 @@ impl CpuKernel {
                     if o.dtype() != Dtype::Float32 {
                         return false;
                     }
-                    if o.memory() != CpuMemory::RF {
+                    if !is_rf_or_l1_memory(o.memory()) {
                         return false;
                     }
                 }
@@ -1196,7 +1210,7 @@ impl CpuKernel {
                 if operands[0].memory() != CpuMemory::VRF {
                     return false;
                 }
-                if operands[1].memory() != CpuMemory::RF {
+                if !is_rf_or_l1_memory(operands[1].memory()) {
                     return false;
                 }
                 if operands[0].dtype() != Dtype::Float32 {
@@ -1233,7 +1247,7 @@ impl CpuKernel {
                 if operands[0].memory() != CpuMemory::L1 && operands[0].memory() != CpuMemory::GL {
                     return false;
                 }
-                if operands[1].memory() != CpuMemory::RF {
+                if !is_rf_or_l1_memory(operands[1].memory()) {
                     return false;
                 }
                 if operands[0].dtype() != Dtype::Float32 || operands[1].dtype() != Dtype::Float32 {
@@ -1259,7 +1273,7 @@ impl CpuKernel {
                     return false;
                 }
 
-                if operands[0].memory() != CpuMemory::RF {
+                if !is_rf_or_l1_memory(operands[0].memory()) {
                     return false;
                 }
                 if operands[1].memory() != CpuMemory::VRF {
@@ -1357,8 +1371,7 @@ impl CpuKernel {
                     && operands[0].memory() != CpuMemory::L1
                     && operands[0].memory() != CpuMemory::VRF)
                     || (operands[1].memory() != CpuMemory::GL
-                        && operands[1].memory() != CpuMemory::L1
-                        && operands[1].memory() != CpuMemory::RF)
+                        && !is_rf_or_l1_memory(operands[1].memory()))
                     || (operands[2].memory() != CpuMemory::GL
                         && operands[2].memory() != CpuMemory::L1
                         && operands[2].memory() != CpuMemory::VRF)
@@ -1422,10 +1435,7 @@ impl CpuKernel {
                         return false;
                     }
 
-                    return operands.iter().any(|o| o.memory() == CpuMemory::RF)
-                        && operands
-                            .iter()
-                            .all(|o| o.memory() == CpuMemory::RF || o.memory() == CpuMemory::L1);
+                    return operands.iter().all(|o| is_rf_or_l1_memory(o.memory()));
                 }
 
                 if operands.iter().any(|o| !o.is_contiguous()) {
@@ -1484,8 +1494,8 @@ impl CpuKernel {
                             }
                         ] if lhs_shape.iter().all(|d| d.get() == 1)
                           && rhs_shape.iter().all(|d| d.get() == 1)
-                          && *lhs_level == CpuMemory::RF
-                          && *rhs_level == CpuMemory::RF
+                          && is_rf_or_l1_memory(*lhs_level)
+                          && is_rf_or_l1_memory(*rhs_level)
                     )
             }
             CpuKernel::VectorCastBf16F32 => {
@@ -1529,7 +1539,7 @@ impl CpuKernel {
                     PrimitiveSpecType::Fill {
                         value: FillValue::Zero
                     }
-                ) && operands[0].memory() != CpuMemory::RF
+                ) && !is_rf_memory(operands[0].memory())
                     && operands[0].memory() != CpuMemory::VRF
                     && operands[0].is_contiguous()
             }
@@ -1541,7 +1551,7 @@ impl CpuKernel {
                         value: FillValue::Zero
                     }
                 ) && operands[0].volume().get() == 1
-                    && operands[0].memory() == CpuMemory::RF
+                    && is_rf_or_l1_memory(operands[0].memory())
             }
             CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
                 let expected_fill_value = match self {
@@ -1574,7 +1584,7 @@ impl CpuKernel {
                         value: FillValue::NegInf
                     }
                 ) && operands[0].volume().get() == 1
-                    && operands[0].memory() == CpuMemory::RF
+                    && is_rf_or_l1_memory(operands[0].memory())
                     && operands[0].is_contiguous()
                     && operands[0].dtype() == Dtype::Float32
             }
@@ -1586,7 +1596,7 @@ impl CpuKernel {
                         value: FillValue::Min
                     }
                 ) && operands[0].volume().get() == 1
-                    && operands[0].memory() == CpuMemory::RF
+                    && is_rf_or_l1_memory(operands[0].memory())
                     && operands[0].is_contiguous()
             }
         }
@@ -1731,26 +1741,26 @@ impl CpuKernel {
             }
             CpuKernel::DotProductLoop => {
                 // TODO: Measure throughput! This is a rough estimate.
-                let value_cnt = parameters[0].spec().shape()[1].get();
+                let value_cnt = parameters[0].spec().shape()[2].get();
                 let d = DOT_PRODUCT_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
-                8 * INST_COST * value_cnt / d
+                8 * INST_COST * value_cnt / d + move_cost(parameters[2].spec())
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 // TODO: Measure throughput! This is a rough estimate.
-                let value_cnt = parameters[0].spec().shape()[1].get();
+                let value_cnt = parameters[0].spec().shape()[2].get();
                 let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
-                (12 * INST_COST * value_cnt) / d
+                (12 * INST_COST * value_cnt) / d + move_cost(parameters[2].spec())
             }
             CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
                 // RThroughput = 8 or 16
-                let value_cnt = parameters[0].spec().shape()[1].get();
+                let value_cnt = parameters[0].spec().shape()[2].get();
                 let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
                 let mut cost = 16 * INST_COST * value_cnt;
                 if self == &CpuKernel::DotProductLoopF32Bf16F32 {
                     cost *= 2;
                 }
-                cost / d
+                cost / d + move_cost(parameters[2].spec())
             }
             CpuKernel::VectorInterleaveBf16F32
             | CpuKernel::VectorDeinterleaveF32Bf16
@@ -1759,7 +1769,11 @@ impl CpuKernel {
             | CpuKernel::ValueNegInf
             | CpuKernel::ValueMin => {
                 // TODO: Measure throughput!
-                INST_COST
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
+                INST_COST + io_cost
             }
             CpuKernel::VectorMax | CpuKernel::VecScalarAssign | CpuKernel::DivideVec => {
                 // TODO: Measure throughput!
@@ -1770,7 +1784,11 @@ impl CpuKernel {
                 };
                 let value_cnt = parameters[vidx].spec().volume().get();
                 let vector_cnt = value_cnt / parameters[vidx].spec().vector_size().unwrap().get();
-                INST_COST * (vector_cnt + 1)
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
+                INST_COST * (vector_cnt + 1) + io_cost
             }
             CpuKernel::VectorMaxLoop => {
                 // TODO: Measure throughput! This is a rough estimate.
@@ -1778,7 +1796,7 @@ impl CpuKernel {
                 let vector_cnt = value_cnt / DOT_PRODUCT_STRIP_SIZE.get();
                 let accum_count =
                     vector_accum_count(value_cnt, DOT_PRODUCT_STRIP_SIZE.get()).unwrap();
-                INST_COST * (2 * vector_cnt + accum_count + 2)
+                INST_COST * (2 * vector_cnt + accum_count + 2) + move_cost(parameters[1].spec())
             }
             CpuKernel::DivideVecScalarReciprocal => {
                 // Setup once:
@@ -1810,15 +1828,27 @@ impl CpuKernel {
                     .get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
-                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
+                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + io_cost
             }
             CpuKernel::ValueSoftmaxDenominator | CpuKernel::VectorSoftmaxDenominator => {
                 // TODO: Measure throughput!
                 INST_COST * 3
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
             }
             CpuKernel::ValueSoftmaxComplete => {
                 // TODO: Measure throughput!
                 INST_COST * 4
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
             }
             CpuKernel::VectorSoftmaxComplete => {
                 // Setup once:
@@ -1834,11 +1864,14 @@ impl CpuKernel {
                     .get();
                 debug_assert!(value_cnt.is_multiple_of(vector_size));
                 let vector_cnt = value_cnt / vector_size;
-                let io_cost = move_cost(parameters[0].spec()) + move_cost(parameters[3].spec());
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
                 RECIPROCAL_SETUP_COST + PER_VECTOR_COST * vector_cnt + io_cost
             }
             CpuKernel::MultAdd => {
-                match parameters[0].spec().dtype() {
+                let compute_cost = match parameters[0].spec().dtype() {
                     Dtype::Bfloat16 => 6 * INST_COST,
                     Dtype::Float32 => INST_COST, // RThroughput = .5
                     Dtype::Uint8
@@ -1847,9 +1880,21 @@ impl CpuKernel {
                     | Dtype::Sint16
                     | Dtype::Uint32
                     | Dtype::Sint32 => 2 * INST_COST, // RThroughput = 1
-                }
+                };
+                compute_cost
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
             }
-            CpuKernel::CastBf16F32 => 4 * INST_COST, // RThroughput = 2
+            CpuKernel::CastBf16F32 => {
+                // RThroughput = 2
+                4 * INST_COST
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
+            }
             CpuKernel::VectorCastBf16F32 => 6 * INST_COST, // RThroughput = 3
             CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
             CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
@@ -1860,6 +1905,10 @@ impl CpuKernel {
                     .all(|d| d.get() == 1);
                 if is_scalar {
                     ASSIGN_INST_COST
+                        + parameters
+                            .iter()
+                            .map(|p| move_cost(p.spec()))
+                            .sum::<MainCost>()
                 } else {
                     let vector_value_count = parameters[0]
                         .spec()
@@ -1966,13 +2015,14 @@ fn dotproductloop_bf16_applies<const N: usize, Tgt: CpuTarget>(
           && rhs.layout() == &expected_rhs_layout
           && lhs.memory() == CpuMemory::L1
           && rhs.memory() == CpuMemory::L1
-          && out.memory() == CpuMemory::RF
+          && is_rf_or_l1_memory(out.memory())
     )
 }
 
 impl Memory for CpuMemory {
     fn is_addressed(&self) -> bool {
         match &self {
+            #[cfg(not(feature = "drop-rf"))]
             CpuMemory::RF => true,
             CpuMemory::VRF => true,
             CpuMemory::L1 => false,
@@ -1982,13 +2032,16 @@ impl Memory for CpuMemory {
 
     fn can_parallel_tile(&self) -> bool {
         match self {
-            CpuMemory::RF | CpuMemory::VRF => false,
+            #[cfg(not(feature = "drop-rf"))]
+            CpuMemory::RF => false,
+            CpuMemory::VRF => false,
             CpuMemory::GL | CpuMemory::L1 => true,
         }
     }
 
     fn cache_hit_cost(&self) -> MainCost {
         match &self {
+            #[cfg(not(feature = "drop-rf"))]
             CpuMemory::RF => 0,
             CpuMemory::VRF => 0,
             CpuMemory::L1 => 2,
@@ -2008,13 +2061,22 @@ impl Memory for CpuMemory {
 
     fn counts_registers(&self) -> bool {
         match self {
-            CpuMemory::RF | CpuMemory::VRF => true,
+            #[cfg(not(feature = "drop-rf"))]
+            CpuMemory::RF => true,
+            CpuMemory::VRF => true,
             CpuMemory::L1 | CpuMemory::GL => false,
         }
     }
 
     fn has_layout(&self) -> bool {
-        !matches!(self, CpuMemory::RF)
+        #[cfg(not(feature = "drop-rf"))]
+        {
+            !matches!(self, CpuMemory::RF)
+        }
+        #[cfg(feature = "drop-rf")]
+        {
+            true
+        }
     }
 }
 
@@ -2025,10 +2087,14 @@ impl PartialOrd for CpuMemory {
         }
 
         match (self, other) {
+            #[cfg(not(feature = "drop-rf"))]
             (CpuMemory::RF, CpuMemory::VRF) => None,
+            #[cfg(not(feature = "drop-rf"))]
             (CpuMemory::VRF, CpuMemory::RF) => None,
+            #[cfg(not(feature = "drop-rf"))]
             (CpuMemory::RF, _) => Some(Ordering::Less),
             (CpuMemory::VRF, _) => Some(Ordering::Less),
+            #[cfg(not(feature = "drop-rf"))]
             (_, CpuMemory::RF) => Some(Ordering::Greater),
             (_, CpuMemory::VRF) => Some(Ordering::Greater),
             (CpuMemory::L1, CpuMemory::GL) => Some(Ordering::Less),
@@ -2045,6 +2111,7 @@ impl Display for CpuMemory {
             f,
             "{}",
             match &self {
+                #[cfg(not(feature = "drop-rf"))]
                 CpuMemory::RF => "RF",
                 CpuMemory::VRF => "VRF",
                 CpuMemory::L1 => "L1",
@@ -2060,20 +2127,27 @@ impl BiMap for CpuMemoryBimap {
 
     fn apply(&self, memory: &CpuMemory) -> u8 {
         match memory {
-            CpuMemory::RF => 0,
-            CpuMemory::VRF => 1,
-            CpuMemory::L1 => 2,
-            CpuMemory::GL => 3,
+            #[cfg(not(feature = "drop-rf"))]
+            CpuMemory::RF => (MEMORY_COUNT - 4) as u8,
+            CpuMemory::VRF => (MEMORY_COUNT - 3) as u8,
+            CpuMemory::L1 => (MEMORY_COUNT - 2) as u8,
+            CpuMemory::GL => (MEMORY_COUNT - 1) as u8,
         }
     }
 
     fn apply_inverse(&self, i: &u8) -> CpuMemory {
-        match *i {
-            0 => CpuMemory::RF,
-            1 => CpuMemory::VRF,
-            2 => CpuMemory::L1,
-            3 => CpuMemory::GL,
-            _ => panic!("Invalid index: {i}"),
+        if *i == (MEMORY_COUNT - 1) as u8 {
+            CpuMemory::GL
+        } else if *i == (MEMORY_COUNT - 2) as u8 {
+            CpuMemory::L1
+        } else if *i == (MEMORY_COUNT - 3) as u8 {
+            CpuMemory::VRF
+        } else {
+            #[cfg(not(feature = "drop-rf"))]
+            if *i == (MEMORY_COUNT - 4) as u8 {
+                return CpuMemory::RF;
+            }
+            panic!("Invalid index: {i}");
         }
     }
 }
@@ -2235,7 +2309,7 @@ where
         let scalar = &operands[scalar_idx];
         let broadcast = &operands[broadcast_idx];
 
-        if !(scalar.memory() == CpuMemory::RF || scalar.memory() == CpuMemory::L1)
+        if !is_rf_or_l1_memory(scalar.memory())
             || !scalar.is_contiguous()
             || broadcast.memory() != CpuMemory::VRF
             || !broadcast.is_contiguous()
@@ -2291,7 +2365,7 @@ where
     debug_assert_eq!(operands.len(), 3);
 
     let scalar_level = operands[0].memory();
-    if scalar_level != CpuMemory::RF && scalar_level != CpuMemory::L1 {
+    if !is_rf_or_l1_memory(scalar_level) {
         return false;
     }
 
@@ -2487,6 +2561,23 @@ where
     })
 }
 
+fn is_rf_memory<M: Copy + PartialEq<CpuMemory>>(memory: M) -> bool {
+    #[cfg(not(feature = "drop-rf"))]
+    {
+        memory == CpuMemory::RF
+    }
+
+    #[cfg(feature = "drop-rf")]
+    {
+        let _ = memory;
+        false
+    }
+}
+
+fn is_rf_or_l1_memory<M: Copy + PartialEq<CpuMemory>>(memory: M) -> bool {
+    memory == CpuMemory::L1 || is_rf_memory(memory)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2645,7 +2736,7 @@ mod tests {
             [1, 1, 8, 1],
             (f32, CpuMemory::VRF, row_major, 8),
             (f32, CpuMemory::L1, col_major),
-            (f32, CpuMemory::RF, row_major),
+            (f32, CpuMemory::L1, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2658,7 +2749,7 @@ mod tests {
             [1, 1, 32, 1],
             (f32, CpuMemory::VRF, row_major, 8),
             (f32, CpuMemory::L1, col_major),
-            (f32, CpuMemory::RF, row_major),
+            (f32, CpuMemory::L1, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2671,7 +2762,7 @@ mod tests {
             [1, 1, 8, 1],
             (f32, CpuMemory::VRF, row_major, 4),
             (f32, CpuMemory::L1, col_major),
-            (f32, CpuMemory::RF, row_major),
+            (f32, CpuMemory::L1, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -2711,6 +2802,11 @@ mod tests {
 
     #[test]
     fn test_softmax_denominator_and_unscaled_f32_applies_to_l1_tiles() {
+        #[cfg(not(feature = "drop-rf"))]
+        let scalar_memory = CpuMemory::RF;
+        #[cfg(feature = "drop-rf")]
+        let scalar_memory = CpuMemory::L1;
+
         let logical_spec = LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
@@ -2727,12 +2823,12 @@ mod tests {
                     vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
-                    memory: CpuMemory::RF,
+                    memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
                     vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
-                    memory: CpuMemory::RF,
+                    memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
                     vector_size: None,
                 },
@@ -2751,6 +2847,12 @@ mod tests {
 
     #[test]
     fn test_softmax_denominator_and_unscaled_f32_rejects_l1_tiles_with_tail() {
+        #[cfg(not(feature = "drop-rf"))]
+        let scalar_memory = CpuMemory::RF;
+        #[cfg(feature = "drop-rf")]
+        let scalar_memory = CpuMemory::L1;
+        let scalar_vector_size = None;
+
         let logical_spec = LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
@@ -2767,14 +2869,14 @@ mod tests {
                     vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
-                    memory: CpuMemory::RF,
+                    memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: None,
+                    vector_size: scalar_vector_size,
                 },
                 TensorSpecAux::<Avx2Target> {
-                    memory: CpuMemory::RF,
+                    memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: None,
+                    vector_size: scalar_vector_size,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::L1,
@@ -2818,10 +2920,15 @@ mod tests {
 
     #[test]
     fn test_kernel_memory_constrains_placement() {
+        #[cfg(not(feature = "drop-rf"))]
+        let lhs_memory = CpuMemory::RF;
+        #[cfg(feature = "drop-rf")]
+        let lhs_memory = CpuMemory::L1;
+
         let spec: Spec<Avx2Target> = spec!(
             MatmulAccum(
                 [1, 1, 1, 16],
-                (u8, CpuMemory::RF, row_major),
+                (u8, lhs_memory, row_major),
                 (u8, CpuMemory::VRF, row_major, 16),
                 (u8, CpuMemory::VRF, row_major, 16),
                 serial

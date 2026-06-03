@@ -169,7 +169,7 @@ mod tests {
     use crate::common::Dtype;
     use crate::layout::row_major;
     use crate::shape;
-    use crate::target::{Avx2Target, Target};
+    use crate::target::{Avx2Target, CpuMemory};
     use crate::tensorspec::TensorSpec;
     use crate::views::Param;
     use itertools::Itertools;
@@ -317,7 +317,7 @@ mod tests {
             let spec = TensorSpec::<Avx2Target>::new_canon(
                 origin_shape.clone(),
                 Dtype::Uint32,
-                Avx2Target::memories()[0],
+                CpuMemory::L1,
                 row_major,
                 None,
             );
@@ -366,7 +366,7 @@ mod tests {
         let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![5, 7, 6],
             Dtype::Uint32,
-            Avx2Target::memories()[0],
+            CpuMemory::L1,
             row_major,
             None,
         );
@@ -414,7 +414,7 @@ mod tests {
         let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![4, 6],
             Dtype::Uint32,
-            Avx2Target::memories()[0],
+            CpuMemory::L1,
             row_major,
             None,
         );
@@ -432,7 +432,7 @@ mod tests {
         let spec = TensorSpec::<Avx2Target>::new_canon(
             shape![6, 7, 9],
             Dtype::Uint32,
-            Avx2Target::memories()[0],
+            CpuMemory::L1,
             row_major,
             None,
         );

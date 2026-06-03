@@ -10,13 +10,16 @@ use morello::shape;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::{
     Avx2Target,
-    CpuMemory::{GL, L1, RF, VRF},
+    CpuMemory::{GL, L1, VRF},
 };
 use morello::target::{CpuKernel, CpuTarget};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
 use std::io;
+
+#[cfg(not(feature = "drop-rf"))]
+use morello::target::CpuMemory::RF;
 
 const BATCH: u32 = 1;
 
@@ -127,13 +130,20 @@ fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .select(CpuKernel::BroadcastVecMultAdd)
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
-            pack_b
+            let imp = pack_b
                 .tile_out(&[1, 1, 1])
                 .move_param(0, L1)
-                .move_param(1, L1)
-                .move_param(0, RF)
-                .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
-                .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
+                .move_param(1, L1);
+            #[cfg(not(feature = "drop-rf"))]
+            {
+                imp.move_param(0, RF)
+                    .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
+                    .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
+            }
+            #[cfg(feature = "drop-rf")]
+            {
+                imp.select(CpuKernel::Assign)
+            }
         })
         .subschedule(&[1, 0], |m| {
             m.tile_out(&[1, 1, 8]).select(CpuKernel::Assign)
@@ -148,7 +158,7 @@ fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
 
 fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     use morello::db::FilesDatabase;
-    use morello::target::CpuMemory::{GL, L1, RF, VRF};
+    use morello::target::CpuMemory::{GL, L1, VRF};
 
     let db = FilesDatabase::new::<Avx2Target>(None, Avx2Target::TILE_SCALE, 1, 10_000, 1);
 
@@ -165,26 +175,39 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .subschedule(&[0, 1, 0], |subspec| subspec.synthesize(&db))
         // SoftmaxDenominatorAndUnscaledFromMaxAccum
         .subschedule(&[0, 1, 1], |subspec| {
-            subspec
+            let imp = subspec
                 .tile_out(&[1, 1, 16])
                 .move_param(0, L1)
                 .move_param(1, L1)
                 .move_param(2, L1)
-                .move_param(3, L1)
-                .move_param(1, RF)
-                .move_param(2, RF)
-                .subschedule(&[1, 1], |s| {
-                    s.move_relayout(0, VRF, row_major, Some(8))
-                        .move_relayout(3, VRF, row_major, Some(8))
-                        .subschedule(&[0], |m| m.synthesize(&db))
-                        .subschedule(&[1, 1], |m| m.synthesize(&db))
-                        .subschedule(&[1, 0], |m| {
-                            m.select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
-                        })
-                })
-                .subschedule(&[0], |m| m.synthesize(&db))
-                .subschedule(&[1, 0], |m| m.synthesize(&db))
-                .subschedule(&[1, 2], |m| m.synthesize(&db))
+                .move_param(3, L1);
+            #[cfg(not(feature = "drop-rf"))]
+            {
+                imp.move_param(1, RF)
+                    .move_param(2, RF)
+                    .subschedule(&[1, 1], |s| {
+                        s.move_relayout(0, VRF, row_major, Some(8))
+                            .move_relayout(3, VRF, row_major, Some(8))
+                            .subschedule(&[0], |m| m.synthesize(&db))
+                            .subschedule(&[1, 1], |m| m.synthesize(&db))
+                            .subschedule(&[1, 0], |m| {
+                                m.select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
+                            })
+                    })
+                    .subschedule(&[0], |m| m.synthesize(&db))
+                    .subschedule(&[1, 0], |m| m.synthesize(&db))
+                    .subschedule(&[1, 2], |m| m.synthesize(&db))
+            }
+            #[cfg(feature = "drop-rf")]
+            {
+                imp.move_relayout(0, VRF, row_major, Some(8))
+                    .move_relayout(3, VRF, row_major, Some(8))
+                    .subschedule(&[0], |m| m.synthesize(&db))
+                    .subschedule(&[1, 1], |m| m.synthesize(&db))
+                    .subschedule(&[1, 0], |m| {
+                        m.select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
+                    })
+            }
         })
         // DivideVec
         .subschedule(&[1], |subspec| {
@@ -192,25 +215,37 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
                 .tile_out(&[1, 1, 8])
                 .broadcast_first(VRF, row_major, Some(8))
                 .subschedule(&[0], |broadcast| {
-                    broadcast
-                        .move_relayout(0, L1, row_major, None)
-                        .move_relayout(0, RF, row_major, None)
-                        .synthesize(&db)
-                        .subschedule(&[0], |s| s.synthesize(&db))
+                    let imp = broadcast.move_relayout(0, L1, row_major, None);
+                    #[cfg(not(feature = "drop-rf"))]
+                    let imp = imp.move_relayout(0, RF, row_major, None);
+                    let imp = imp.synthesize(&db);
+                    #[cfg(not(feature = "drop-rf"))]
+                    let imp = imp.subschedule(&[0], |s| s.synthesize(&db));
+                    imp
                 })
                 .subschedule(&[1], |d| d.synthesize(&db))
         })
 }
 
 fn schedule_zero(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
-    spec.tile_out(&[1, 32, 1])
+    let imp = spec
+        .tile_out(&[1, 32, 1])
         .move_param(0, L1)
-        .tile_out(&[1, 16, 1])
-        .move_param(0, RF)
-        .subschedule(&[0], |s| {
-            s.tile_out(&[1, 1, 1]).select(CpuKernel::ValueZero)
-        })
-        .subschedule(&[1], |s| s.tile_out(&[1, 1, 1]).select(CpuKernel::Assign))
+        .tile_out(&[1, 16, 1]);
+
+    #[cfg(feature = "drop-rf")]
+    {
+        return imp.tile_out(&[1, 1, 1]).select(CpuKernel::ValueZero);
+    }
+
+    #[cfg(not(feature = "drop-rf"))]
+    {
+        imp.move_param(0, RF)
+            .subschedule(&[0], |s| {
+                s.tile_out(&[1, 1, 1]).select(CpuKernel::ValueZero)
+            })
+            .subschedule(&[1], |s| s.tile_out(&[1, 1, 1]).select(CpuKernel::Assign))
+    }
 }
 
 fn layout_b() -> Layout {

@@ -118,10 +118,21 @@ impl CpuTarget for Avx512Target {
     }
 
     fn max_mem() -> MemoryLimits {
-        MemoryLimits::Standard(MemVec::new_mixed(
-            [16, 32, 1_024, 33_554_432],
-            [true, true, false, false],
-        ))
+        #[cfg(feature = "drop-rf")]
+        {
+            MemoryLimits::Standard(MemVec::new_mixed(
+                [32, 1_024, 33_554_432],
+                [true, false, false],
+            ))
+        }
+
+        #[cfg(not(feature = "drop-rf"))]
+        {
+            MemoryLimits::Standard(MemVec::new_mixed(
+                [16, 32, 1_024, 33_554_432],
+                [true, true, false, false],
+            ))
+        }
     }
 }
 
@@ -157,7 +168,7 @@ impl Kernel for Avx512Kernel {
                     .and_then(|parameter| parameter.spec().shape().get(2).copied())
                     .and_then(|k| vector_accum_count(k.get(), strip))
                     .unwrap_or(VECTOR_ACCUM_COUNT);
-                MemoryAllocation::Simple([0, u64::from(accum_count) + 2, 0, 0])
+                MemoryAllocation::simple_for_cpu([0, u64::from(accum_count) + 2, 0, 0])
             }
             Avx512Kernel::MatmulLoopVdpbf16ps => {
                 let [_, m, n] = parameters[2].spec().shape() else {
@@ -171,7 +182,7 @@ impl Kernel for Avx512Kernel {
                 let extra_accumulators = m * n_vector_count * (stripe_count - 1);
                 let rhs_vector_count = n_vector_count;
                 let lhs_broadcast_count = 1;
-                MemoryAllocation::Simple([
+                MemoryAllocation::simple_for_cpu([
                     1,
                     (result_accumulators
                         + extra_accumulators
@@ -190,10 +201,10 @@ impl Kernel for Avx512Kernel {
         match self {
             Avx512Kernel::Cpu(cpu_kernel) => cpu_kernel.main_cost(parameters),
             Avx512Kernel::DotProductLoopVdpbf16ps => {
-                let Some(lhs_spec) = parameters.first().map(|parameter| parameter.spec()) else {
+                let [lhs_parameter, _, out_parameter] = parameters else {
                     return 0;
                 };
-                let Some(k) = lhs_spec.shape().get(2).map(|d| d.get()) else {
+                let Some(k) = lhs_parameter.spec().shape().get(2).map(|d| d.get()) else {
                     return 0;
                 };
                 let instr_count = k / 32;
@@ -201,7 +212,7 @@ impl Kernel for Avx512Kernel {
 
                 // VDPBF16PS ZMM,..,M512 has RThroughput of 0.5 cycles (1 unit) on Zen 5
                 const REDUCTION_COST: MainCost = 4;
-                instr_count + REDUCTION_COST * accum_count
+                instr_count + REDUCTION_COST * accum_count + move_cost(out_parameter.spec())
             }
             Avx512Kernel::MatmulLoopVdpbf16ps => {
                 let [lhs_spec, rhs_spec, out_spec] = parameters else {
@@ -298,13 +309,24 @@ fn vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Target>) -
     let Ok(expected_rhs_layout) = layout![0, 2, 1].canonicalize(rhs_shape) else {
         return false;
     };
+
+    let out_is_rf = {
+        #[cfg(not(feature = "drop-rf"))]
+        {
+            out.memory() == CpuMemory::RF
+        }
+        #[cfg(feature = "drop-rf")]
+        {
+            false
+        }
+    };
     lhs.layout().is_row_major()
         && rhs.layout() == &expected_rhs_layout
         && lhs.is_contiguous()
         && rhs.is_contiguous()
         && lhs.memory() == CpuMemory::L1
         && rhs.memory() == CpuMemory::L1
-        && out.memory() == CpuMemory::RF
+        && (out.memory() == CpuMemory::L1 || out_is_rf)
 }
 
 fn matmul_vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Target>) -> bool {
@@ -476,12 +498,16 @@ mod tests {
     use crate::layout::row_major;
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::spec::{LogicalSpec, Spec};
-    use crate::target::CpuMemory::{GL, L1, RF};
+    use crate::target::CpuMemory::{GL, L1};
     use crate::target::{Kernel, Target};
     use crate::{layout, lspec};
 
+    #[cfg(not(feature = "drop-rf"))]
+    use crate::target::CpuMemory::RF;
+
     #[test]
-    fn test_vdpbf16ps_kernel_applies_to_bf16_dot_product_tile() {
+    #[cfg(not(feature = "drop-rf"))]
+    fn test_vdpbf16ps_kernel_applies_to_bf16_dot_product_rf_tile() {
         let mut logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
             [1, 1, 128, 1],
             (bf16, L1, row_major),
@@ -494,12 +520,25 @@ mod tests {
     }
 
     #[test]
+    fn test_vdpbf16ps_kernel_applies_to_bf16_dot_product_l1_tile() {
+        let mut logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 1, 128, 1],
+            (bf16, L1, row_major),
+            (bf16, L1, layout![0, 2, 1]),
+            (f32, L1, row_major),
+            serial
+        ));
+        logical_spec.canonicalize().unwrap();
+        assert!(Avx512Kernel::DotProductLoopVdpbf16ps.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
     fn test_vdpbf16ps_kernel_rejects_short_k() {
         let mut logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
             [1, 1, 16, 1],
             (bf16, L1, row_major),
             (bf16, L1, layout![0, 2, 1]),
-            (f32, RF, row_major),
+            (f32, L1, row_major),
             serial
         ));
         logical_spec.canonicalize().unwrap();
@@ -512,7 +551,7 @@ mod tests {
             [1, 1, 128, 1],
             (bf16, L1, row_major),
             (bf16, L1, layout![0, 2, 1]),
-            (f32, RF, row_major),
+            (f32, L1, row_major),
             serial
         ));
         logical_spec.canonicalize().unwrap();

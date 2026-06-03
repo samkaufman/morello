@@ -9,7 +9,7 @@ use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
-    CpuMemory::{self, GL, L1, RF},
+    CpuMemory::{self, GL, L1},
     Target,
 };
 use morello::tensorspec::TensorSpecAux;
@@ -17,6 +17,9 @@ use morello::utils::ToWriteFmt;
 
 use std::io;
 use std::panic;
+
+#[cfg(not(feature = "drop-rf"))]
+use morello::target::CpuMemory::RF;
 
 fn main() {
     env_logger::init();
@@ -49,41 +52,61 @@ fn main() {
         })
         .subschedule(&[0, 0], |subspec| subspec.to_accum())
         .subschedule(&[0, 0, 0], |subspec| {
-            subspec
-                .move_param(0, L1)
-                .move_param(0, RF)
-                .subschedule(&[0], |s| s.select(CpuKernel::ValueNegInf))
-                .subschedule(&[1], |s| s.select(CpuKernel::Assign))
+            let imp = subspec.move_param(0, L1);
+            #[cfg(not(feature = "drop-rf"))]
+            {
+                imp.move_param(0, RF)
+                    .subschedule(&[0], |s| s.select(CpuKernel::ValueNegInf))
+                    .subschedule(&[1], |s| s.select(CpuKernel::Assign))
+            }
+            #[cfg(feature = "drop-rf")]
+            {
+                imp.select(CpuKernel::ValueNegInf)
+            }
         })
         .subschedule(&[0, 0, 1], |maxaccum| {
-            maxaccum
-                .move_param(0, L1)
-                .move_param(1, L1)
-                .move_param(1, RF)
-                .select(CpuKernel::VectorMaxLoop)
+            let imp = maxaccum.move_param(0, L1).move_param(1, L1);
+            #[cfg(not(feature = "drop-rf"))]
+            let imp = imp.move_param(1, RF);
+            let imp = imp.select(CpuKernel::VectorMaxLoop);
+            #[cfg(not(feature = "drop-rf"))]
+            let imp = imp
                 .subschedule(&[0], |s| s.select(CpuKernel::Assign))
-                .subschedule(&[2], |s| s.select(CpuKernel::Assign))
+                .subschedule(&[2], |s| s.select(CpuKernel::Assign));
+            imp
         })
         .subschedule(&[0, 1], |subspec| {
             subspec
                 .to_accum()
                 .subschedule(&[0], |s| {
-                    s.move_param(0, L1)
-                        .move_param(0, RF)
-                        .subschedule(&[0], |s| s.select(CpuKernel::ValueZero))
-                        .subschedule(&[1], |s| s.select(CpuKernel::Assign))
+                    let imp = s.move_param(0, L1);
+                    #[cfg(not(feature = "drop-rf"))]
+                    {
+                        imp.move_param(0, RF)
+                            .subschedule(&[0], |s| s.select(CpuKernel::ValueZero))
+                            .subschedule(&[1], |s| s.select(CpuKernel::Assign))
+                    }
+                    #[cfg(feature = "drop-rf")]
+                    {
+                        imp.select(CpuKernel::ValueZero)
+                    }
                 })
                 .subschedule(&[1], |s| {
-                    s.move_param(0, CpuMemory::L1)
+                    let imp = s
+                        .move_param(0, CpuMemory::L1)
                         .move_param(1, CpuMemory::L1)
                         .move_param(2, CpuMemory::L1)
-                        .move_param(3, CpuMemory::L1)
-                        .move_param(1, CpuMemory::RF)
+                        .move_param(3, CpuMemory::L1);
+                    #[cfg(not(feature = "drop-rf"))]
+                    let imp = imp
+                        .move_param(1, RF)
                         .subschedule(&[0], |m| m.select(CpuKernel::Assign))
-                        .move_param(2, CpuMemory::RF)
-                        .subschedule(&[1, 0], |m| m.select(CpuKernel::Assign))
-                        .select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32)
-                        .subschedule(&[1, 2], |m| m.select(CpuKernel::Assign))
+                        .move_param(2, RF)
+                        .subschedule(&[1, 0], |m| m.select(CpuKernel::Assign));
+                    let imp = imp.select(CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32);
+                    #[cfg(not(feature = "drop-rf"))]
+                    let imp = imp.subschedule(&[1, 2], |m| m.select(CpuKernel::Assign));
+                    imp
                 })
         })
         .subschedule(&[1], |dvs| dvs.select(CpuKernel::DivideVecScalarReciprocal));

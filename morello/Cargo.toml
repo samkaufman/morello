@@ -9,6 +9,7 @@ clap = ["dep:clap"]
 db-stats = ["dep:csv"]
 verification = ["dep:ndarray", "dep:ndarray-conv"]
 l2-speed-gl = []
+drop-rf = []
 
 [dependencies]
 atty = "0.2"

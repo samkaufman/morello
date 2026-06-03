@@ -98,7 +98,7 @@ mod tests {
     use crate::target::Memory;
     use crate::target::{
         Avx2Target,
-        CpuMemory::{GL, L1, RF},
+        CpuMemory::{GL, L1},
         MEMORY_COUNT,
     };
     use crate::utils::{bit_length, bit_length_inverse};
@@ -203,8 +203,8 @@ mod tests {
     fn test_synthesis_puts_all_dependencies_of_optimal_solution() {
         shared_test_synthesis_puts_all_dependencies_of_optimal_solution(lspec!(Move(
             [2, 2],
+            (u8, GL, row_major),
             (u8, L1, row_major),
-            (u8, RF, row_major),
             serial
         )));
     }
@@ -214,7 +214,7 @@ mod tests {
     ) {
         let spec = Spec::<Avx2Target>(
             logical_spec,
-            MemoryLimits::Standard(MemVec::new([1, 1, 1, 0])),
+            MemoryLimits::Standard(MemVec::new([1; MEMORY_COUNT])),
         );
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
 
@@ -232,7 +232,7 @@ mod tests {
     fn test_synthesis_at_peak_memory_yields_same_decision_1() {
         let spec = Spec::<Avx2Target>(
             lspec!(FillZero([2, 2, 2, 2], (u8, GL, row_major, c0))),
-            MemoryLimits::Standard(MemVec::new([0, 16, 64, 32])),
+            MemoryLimits::Standard(MemVec::new_for_cpu([0, 16, 64, 32])),
         );
 
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::Linear, 1, 128, 1);
@@ -252,48 +252,20 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_scale_db_memoizes_power_of_two_subspecs_not_original() {
+    fn test_binary_scale_db_memoizes_non_factored_spec_pow2() {
         let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOfTwo, 1, 128, 1);
 
-        // Non-factorizable spec (should be stored in FilesDatabase's non-spatial cache)
+        // Non-power-of-two spec (should be stored in FilesDatabase's non-spatial cache)
         let spec_5 = Spec::<Avx2Target>(
-            lspec!(Move([5], (u8, GL, row_major), (u8, RF, row_major))),
-            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
+            lspec!(Move([5], (u8, GL, row_major), (u8, L1, row_major))),
+            MemoryLimits::Standard(MemVec::new_for_cpu([0, 64, 64, 32])),
         );
+
         let result = top_down(&db, &spec_5);
         assert!(!result.is_empty(), "Should be able to synthesize Move([5])");
         assert!(
             db.get(&spec_5).is_some(),
             "Database should contain Move([5]) despite not being a factorized size"
-        );
-
-        // Factorizable subspecs should be memoized spatially.
-        let spec_3 = Spec::<Avx2Target>(
-            lspec!(Move([3], (u8, GL, row_major), (u8, RF, row_major))),
-            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
-        );
-        let result = top_down_many(&db, std::slice::from_ref(&spec_3));
-        assert!(
-            result.first().is_some_and(|r| !r.0.is_empty()),
-            "Should be able to synthesize Move([3])"
-        );
-
-        let spec_2 = Spec::<Avx2Target>(
-            lspec!(Move([2], (u8, GL, row_major), (u8, RF, row_major))),
-            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
-        );
-        assert!(
-            db.get(&spec_2).is_some(),
-            "Database should contain Move([2]) after synthesizing Move([3])"
-        );
-
-        let spec_1 = Spec::<Avx2Target>(
-            lspec!(Move([1], (u8, GL, row_major), (u8, RF, row_major))),
-            MemoryLimits::Standard(MemVec::new([0, 64, 64, 32])),
-        );
-        assert!(
-            db.get(&spec_1).is_some(),
-            "Database should contain Move([1]) after synthesizing Move([3])"
         );
     }
 

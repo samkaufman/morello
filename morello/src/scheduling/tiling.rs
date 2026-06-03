@@ -1389,6 +1389,7 @@ mod tests {
     }
 
     /// Test that tiling a Conv inside a Compose is disallowed when the tile is smaller than the filter.
+    #[cfg(not(feature = "drop-rf"))] // TODO: Make drop-rf variant
     #[test]
     fn test_conv_in_compose_tile_out_disallowed_when_filter_larger_than_tile() {
         let softmax_denominator = PrimitiveBasics {
@@ -1558,6 +1559,7 @@ mod tests {
 
     /// Test that attempting a parallel TileOut on a Spec with RF memory (which cannot
     /// be parallel tiled) returns NotApplicableReason::LevelPreventedParallel.
+    #[cfg(not(feature = "drop-rf"))]
     #[test]
     fn test_parallel_tile_out_with_rf_returns_level_prevented_parallel() {
         let mut spec: Spec<Avx2Target> = spec!(MatmulAccum(
@@ -2223,11 +2225,11 @@ mod tests {
         let conv_spec: Spec<Avx2Target> = spec!(
             Conv(
                 [4, 7, 5, 8, 6, 4, 8],
-                (f32, CpuMemory::RF, row_major),
+                (f32, CpuMemory::L1, row_major),
                 (u8, CpuMemory::L1, row_major),
-                (u8, CpuMemory::RF, row_major)
+                (u8, CpuMemory::L1, row_major)
             ),
-            [16, 16, 32768, 0]
+            Avx2Target::max_mem()
         );
         assert!(conv_spec.is_canonical());
 

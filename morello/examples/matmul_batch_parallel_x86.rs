@@ -8,11 +8,14 @@ use morello::spec;
 use morello::spec::Spec;
 use morello::target::{
     Avx2Target,
-    CpuMemory::{GL, L1, RF, VRF},
+    CpuMemory::{GL, L1, VRF},
 };
 use morello::target::{CpuKernel, Memory};
 use morello::utils::ToWriteFmt;
 use std::io;
+
+#[cfg(not(feature = "drop-rf"))]
+use morello::target::CpuMemory::RF;
 
 const M_C: u32 = 1020;
 const K_C: u32 = 1024;
@@ -149,13 +152,20 @@ fn main() {
 }
 
 fn naive_scalar_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
-    move_spec
+    let imp = move_spec
         .tile_out(&[1, 1, 1])
         .move_relayout(0, L1, row_major, None)
-        .move_relayout(1, L1, row_major, None)
-        .move_relayout(0, RF, row_major, None)
-        .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
-        .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
+        .move_relayout(1, L1, row_major, None);
+    #[cfg(not(feature = "drop-rf"))]
+    {
+        imp.move_relayout(0, RF, row_major, None)
+            .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
+            .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
+    }
+    #[cfg(feature = "drop-rf")]
+    {
+        imp.select(CpuKernel::Assign)
+    }
 }
 
 fn naive_vector_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {

@@ -1,5 +1,7 @@
 //! This example shows how to manually schedule a simple matrix multiplication for X86.
 
+#![cfg_attr(feature = "drop-rf", allow(unused_imports, dead_code))]
+
 use morello::codegen::CodeGen;
 use morello::cost::Cost;
 use morello::imp::ImplNode;
@@ -19,6 +21,12 @@ use morello::utils::ToWriteFmt;
 use std::io;
 use std::panic;
 
+#[cfg(feature = "drop-rf")]
+fn main() {
+    eprintln!("simple_matmul_x86 requires RF and is not available with drop-rf");
+}
+
+#[cfg(not(feature = "drop-rf"))]
 fn main() {
     env_logger::init();
     // First, we'll define the Spec for the program we will implement: a 64x64x64 matrix
@@ -214,6 +222,7 @@ fn main() {
 //  memset((void *)(&v), 0, 4);
 //  l1_tile[index] = v;
 /// ```
+#[cfg(not(feature = "drop-rf"))]
 fn zero_schedule(zero: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let output = zero.0.unique_output().unwrap();
     let mut zero = zero.move_param(0, CpuMemory::RF);
@@ -229,6 +238,7 @@ fn zero_schedule(zero: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
 /// Specifically, this checks if the Move's tensor is a single value. If it is, it directly assigns
 /// the value using the `Assign` kernel. If not, it tiles the tensor and then assigns the values
 /// using the `Assign` kernel.
+#[cfg(not(feature = "drop-rf"))]
 fn move_schedule(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let is_single_value = move_spec.0.parameter_shapes()[0]
         .iter()

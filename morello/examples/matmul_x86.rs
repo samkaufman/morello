@@ -9,13 +9,16 @@ use morello::spec::Spec;
 use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
-    CpuMemory::{GL, L1, RF, VRF},
+    CpuMemory::{GL, L1, VRF},
 };
 use morello::utils::ToWriteFmt;
 
 use nonzero::nonzero as nz;
 
 use std::io;
+
+#[cfg(not(feature = "drop-rf"))]
+use morello::target::CpuMemory::RF;
 
 fn main() {
     env_logger::init();
@@ -36,13 +39,20 @@ fn main() {
         .move_relayout(1, GL, layout_b.clone(), None)
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
-            pack_b
+            let imp = pack_b
                 .tile_out(&[1, 1, 1])
                 .move_param(0, L1)
-                .move_param(1, L1)
-                .move_param(0, RF)
-                .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
-                .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
+                .move_param(1, L1);
+            #[cfg(not(feature = "drop-rf"))]
+            {
+                imp.move_param(0, RF)
+                    .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
+                    .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
+            }
+            #[cfg(feature = "drop-rf")]
+            {
+                imp.select(CpuKernel::Assign)
+            }
         })
         .tile_out(&[1, 128, 1024])
         .tile_out(&[1, 6, 16])

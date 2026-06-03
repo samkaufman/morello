@@ -127,10 +127,21 @@ impl CpuTarget for ArmTarget {
     }
 
     fn max_mem() -> MemoryLimits {
-        MemoryLimits::Standard(MemVec::new_mixed(
-            [16, 16, 1_024, 33_554_432],
-            [true, true, false, false],
-        ))
+        #[cfg(feature = "drop-rf")]
+        {
+            MemoryLimits::Standard(MemVec::new_mixed(
+                [16, 1_024, 33_554_432],
+                [true, false, false],
+            ))
+        }
+
+        #[cfg(not(feature = "drop-rf"))]
+        {
+            MemoryLimits::Standard(MemVec::new_mixed(
+                [16, 16, 1_024, 33_554_432],
+                [true, true, false, false],
+            ))
+        }
     }
 }
 

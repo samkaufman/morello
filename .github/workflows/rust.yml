@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CLANG: clang
+  CI_FEATURES: clap,db-stats,verification,l2-speed-gl
 
 jobs:
   build:
@@ -33,9 +34,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - name: Run test suite
-        run: cargo nextest run --all-features --run-ignored=all --profile ci
+        run: cargo nextest run --features ${{ env.CI_FEATURES }} --run-ignored=all --profile ci
       - name: Run documentation tests
-        run: cargo test --doc --all-features
+        run: cargo test --doc --features ${{ env.CI_FEATURES }}
 
   smoke-test-example:
     strategy:
@@ -232,7 +233,7 @@ jobs:
       - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile default --no-self-update
       - name: Check that code has no Clippy warnings
-        run: cargo clippy --all-targets --all-features -- --deny warnings
+        run: cargo clippy --all-targets --features ${{ env.CI_FEATURES }} -- --deny warnings
       - name: Check that code is formatted
         run: cargo fmt --all -- --check
 

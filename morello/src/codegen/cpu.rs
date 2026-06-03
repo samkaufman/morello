@@ -1076,6 +1076,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         .collect(),
                 }
             }
+            #[cfg(not(feature = "drop-rf"))]
             CpuMemory::RF => CBuffer::RegVars {
                 inner_vecs: (0..size)
                     .map(|_| (self.namer.fresh_name(), Either::Left(dtype)))

@@ -3447,7 +3447,7 @@ mod tests {
     use crate::scheduling::tiling::TileOut;
     use crate::scheduling::{Action, ActionT as _, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
-    use crate::target::CpuMemory::{GL, L1, RF};
+    use crate::target::CpuMemory::{GL, L1, VRF};
     use crate::target::{ArmTarget, Avx2Target, CpuMemory, Memory, Target, MEMORY_COUNT};
     use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
@@ -3498,8 +3498,9 @@ mod tests {
         assert_eq!(spec, expected);
     }
 
+    #[cfg(not(feature = "drop-rf"))]
     #[test]
-    fn test_spec_macro_shorthand() {
+    fn test_spec_macro_shorthand_without_drop_rf() {
         let s: Spec<Avx2Target> = spec!(
             Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)),
             [8, 8, 256, 128]
@@ -3510,6 +3511,22 @@ mod tests {
         assert_eq!(
             s.1,
             MemoryLimits::Standard(MemVec::new_mixed([8, 8, 8, 4], [true, true, false, false]))
+        );
+    }
+
+    #[cfg(feature = "drop-rf")]
+    #[test]
+    fn test_spec_macro_shorthand_with_drop_rf() {
+        let s: Spec<Avx2Target> = spec!(
+            Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)),
+            [16, 256, 128]
+        );
+        let expected_ls: LogicalSpec<Avx2Target> =
+            lspec!(Move([2, 3], (u32, GL, row_major), (u32, GL, row_major)));
+        assert_eq!(s.0, expected_ls);
+        assert_eq!(
+            s.1,
+            MemoryLimits::Standard(MemVec::new_mixed([16, 8, 4], [true, false, false]))
         );
     }
 
@@ -3795,9 +3812,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn test_parameter_shapes_and_every_parameter_shape_matches(
-            spec in any::<LogicalSpec<Avx2Target>>()
-        ) {
+        fn test_parameter_shapes_and_every_parameter_shape_matches(spec in any::<LogicalSpec<Avx2Target>>()) {
             let shapes_left = spec.parameter_shapes();
             let shapes_right = (0..spec.operand_count())
                 .map(|i| spec.parameter_shape(i))
@@ -4140,7 +4155,7 @@ mod tests {
 
         #[test]
         fn test_bufferized_compose_parameters_match_pipeline_parameters(
-            tinp in arb_compose_spec::<Avx2Target>(None)
+            tinp in arb_compose_spec::<Avx2Target>(Some(nz!(16u32)))
                 .prop_filter_map("Spec was not canonical", |logical_spec| {
                     let mut s = Spec(logical_spec, Avx2Target::max_mem());
                     if s.canonicalize().is_err() {
@@ -4155,7 +4170,7 @@ mod tests {
                     let components_len = components.len();
                     (Just(s), 0..(components_len - 1))
                 })
-                .prop_filter("Spec intermediate didn't fit in RF", |(s, index)| {
+                .prop_filter("Spec intermediate wouldn't fit in L1", |(s, index)| {
                     let LogicalSpec::Compose { components, .. } = &s.0 else {
                         unreachable!();
                     };
@@ -4163,12 +4178,12 @@ mod tests {
                         components[*index].input_shapes()[0].iter().map(|d| d.get()).product();
                     let value_size = u32::from(components[*index].dtypes[0].size());
                     let bytes_needed = buf_volume * value_size;
-                    let rf_idx =
-                        Avx2Target::memories().iter().position(|l| l == &CpuMemory::RF).unwrap();
-                    let remaining_in_rf = match s.1.clone().into_standard() {
-                        MemoryLimits::Standard(standard) => standard.get_unscaled(rf_idx),
+                    let l1_idx =
+                        Avx2Target::memories().iter().position(|l| l == &CpuMemory::L1).unwrap();
+                    let remaining_in_l1 = match s.1.clone().into_standard() {
+                        MemoryLimits::Standard(standard) => standard.get_unscaled(l1_idx),
                     };
-                    u64::from(bytes_needed) <= remaining_in_rf
+                    u64::from(bytes_needed) <= remaining_in_l1
                 })
         ) {
             let (compose_spec, index) = tinp;
@@ -4178,7 +4193,7 @@ mod tests {
 
             let pipeline = compose_spec.bufferize(
                 index,
-                CpuMemory::RF,
+                CpuMemory::L1,
                 row_major,
                 None
             );
@@ -4266,7 +4281,7 @@ mod tests {
                 operand_auxes,
                 serial_only: true,
             },
-            MemoryLimits::Standard(MemVec::new_for_target::<Avx2Target>([0, 16, 1024, 524288])),
+            MemoryLimits::Standard(MemVec::new_for_cpu([0, 16, 1024, 524288])),
         );
         assert!(
             spec.is_canonical(),
@@ -4462,9 +4477,9 @@ mod tests {
             vector_size: None,
         };
         let aux0_out = TensorSpecAux {
-            memory: RF,
+            memory: VRF,
             layout: row_major(&basic0.parameter_shape(2)),
-            vector_size: None,
+            vector_size: Some(nz!(8u32)),
         };
 
         LogicalSpec::Compose {

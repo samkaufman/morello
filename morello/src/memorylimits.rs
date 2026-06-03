@@ -141,6 +141,20 @@ impl MemoryAllocation {
         MemoryAllocation::Simple([0; MEMORY_COUNT])
     }
 
+    /// Creates a simple CPU memory allocation from legacy `[RF, VRF, L1, GL]`
+    /// units. When `drop-rf` is enabled, RF is added to VRF.
+    pub(crate) fn simple_for_cpu(contents: [u64; 4]) -> Self {
+        #[cfg(feature = "drop-rf")]
+        {
+            MemoryAllocation::Simple([contents[0] + contents[1], contents[2], contents[3]])
+        }
+
+        #[cfg(not(feature = "drop-rf"))]
+        {
+            MemoryAllocation::Simple(contents)
+        }
+    }
+
     // TODO: Document.
     pub fn peak_memory_from_child_peaks<Tgt: Target>(&self, child_peaks: &[MemVec]) -> MemVec {
         let memories = Tgt::memories();
@@ -217,6 +231,24 @@ impl MemVec {
             result.set(i, value);
         }
         result
+    }
+
+    /// Creates a CPU memory vector from legacy `[RF, VRF, L1, GL]` limits.  When
+    /// `drop-rf` is enabled, RF is added to VRF instead.
+    #[cfg(test)]
+    pub(crate) fn new_for_cpu(contents: [u64; 4]) -> Self {
+        #[cfg(feature = "drop-rf")]
+        {
+            Self::new_mixed(
+                [contents[0] + contents[1], contents[2], contents[3]],
+                [true, false, false],
+            )
+        }
+
+        #[cfg(not(feature = "drop-rf"))]
+        {
+            Self::new_mixed(contents, [true, true, false, false])
+        }
     }
 
     pub fn new_for_target<Tgt: Target>(limits_arr: [u64; MEMORY_COUNT]) -> Self {
@@ -742,15 +774,19 @@ impl proptest::prelude::Arbitrary for MemoryAllocation {
     type Strategy = proptest::prelude::BoxedStrategy<Self>;
 
     fn arbitrary_with(params: Self::Parameters) -> Self::Strategy {
-        use proptest::{array::uniform4, collection, prelude::*, prop_oneof};
+        use proptest::{collection, prelude::*, prop_oneof};
 
-        let simple = uniform4(0u64..=64).prop_map(MemoryAllocation::Simple);
+        let simple = collection::vec(0u64..=64, MEMORY_COUNT)
+            .prop_map(|v| MemoryAllocation::Simple(v.try_into().unwrap()));
         let empty_inner = Just(MemoryAllocation::Inner(vec![]));
         if params.0 {
             prop_oneof![simple, empty_inner].boxed()
         } else {
-            let inner =
-                collection::vec(uniform4(0u64..=64), 1..=3).prop_map(MemoryAllocation::Inner);
+            let inner = collection::vec(
+                collection::vec(0u64..=64, MEMORY_COUNT).prop_map(|v| v.try_into().unwrap()),
+                1..=3,
+            )
+            .prop_map(MemoryAllocation::Inner);
             prop_oneof![simple, inner, empty_inner].boxed()
         }
     }
@@ -760,26 +796,33 @@ impl proptest::prelude::Arbitrary for MemoryAllocation {
 mod tests {
     use super::*;
     use crate::target::Avx2Target;
-    use proptest::{array::uniform4, prelude::*};
+    use proptest::{collection, prelude::*};
+    use std::array;
 
     #[test]
     fn test_memorylimits_standard_partialord() {
-        let a = MemoryLimits::Standard(MemVec::new([1, 2, 3, 4]));
-        let b = MemoryLimits::Standard(MemVec::new([1, 2, 3, 4]));
+        let a = MemoryLimits::Standard(MemVec::new(array::from_fn(|i| (i + 1) as u64)));
+        let b = MemoryLimits::Standard(MemVec::new(array::from_fn(|i| (i + 1) as u64)));
         assert!(a >= b);
         assert!(a <= b);
         assert!(!a.lt(&b));
         assert!(!a.gt(&b));
         assert!(matches!(a.partial_cmp(&b), Some(Ordering::Equal)));
 
+        #[cfg(not(feature = "drop-rf"))]
         let b = MemoryLimits::Standard(MemVec::new([1, 2, 3, 5]));
+        #[cfg(feature = "drop-rf")]
+        let b = MemoryLimits::Standard(MemVec::new([2, 3, 5]));
         assert!(a < b);
         assert!(a <= b);
         assert!(!a.gt(&b));
         assert!(!a.ge(&b));
         assert!(matches!(a.partial_cmp(&b), Some(Ordering::Less)));
 
+        #[cfg(not(feature = "drop-rf"))]
         let b = MemoryLimits::Standard(MemVec::new([1, 2, 1, 5]));
+        #[cfg(feature = "drop-rf")]
+        let b = MemoryLimits::Standard(MemVec::new([2, 1, 5]));
         assert!(!a.lt(&b));
         assert!(!a.le(&b));
         assert!(!a.gt(&b));
@@ -789,15 +832,15 @@ mod tests {
 
     #[test]
     fn test_memvec_equality_compares_decoded_values() {
-        let memvec1 = MemVec::new([1, 2, 3, 4]);
-        let memvec2 = MemVec::new([1, 2, 3, 4]);
+        let memvec1 = MemVec::new(array::from_fn(|i| (i + 1) as u64));
+        let memvec2 = MemVec::new(array::from_fn(|i| (i + 1) as u64));
         assert_eq!(memvec1, memvec2);
 
         // Test with different encodings that decode to same value
         // 129 (128+1) has MSB set and decodes to 1
         // 1 has MSB not set and bit_length_inverse(1) = 2^(1-1) = 1
-        let mut test_memvec1 = MemVec::new([1, 1, 1, 1]);
-        let mut test_memvec2 = MemVec::new([1, 1, 1, 1]);
+        let mut test_memvec1 = MemVec::new([1; MEMORY_COUNT]);
+        let mut test_memvec2 = MemVec::new([1; MEMORY_COUNT]);
         test_memvec1.0[0] = 129; // MSB set, decodes to 1
         test_memvec2.0[0] = 1; // MSB not set, also decodes to 1
         assert_eq!(test_memvec1, test_memvec2);
@@ -808,30 +851,31 @@ mod tests {
     }
 
     #[test]
-    fn test_memvec_map() {
+    fn test_memvec_map_1() {
         // Test with basic values using default encoding
-        let original = MemVec::new([1, 2, 4, 8]);
+        let original = MemVec::new(array::from_fn(|i| 2u64.pow(i as u32)));
         let doubled = original.clone().map(|x| x * 2);
 
-        assert_eq!(doubled.get_unscaled(0), 2);
-        assert_eq!(doubled.get_unscaled(1), 4);
-        assert_eq!(doubled.get_unscaled(2), 8);
-        assert_eq!(doubled.get_unscaled(3), 16);
+        for i in 0..MEMORY_COUNT {
+            assert_eq!(doubled.get_unscaled(i), original.get_unscaled(i) * 2);
+        }
+    }
 
+    #[test]
+    fn test_memvec_map_2() {
         // Check that values are transformed correctly
-        let mixed = MemVec::new([1, 2, 3, 4]);
-        let mapped = mixed.map(|x| x + 10);
-        assert_eq!(mapped.get_unscaled(0), 11);
-        assert_eq!(mapped.get_unscaled(1), 12);
-        assert_eq!(mapped.get_unscaled(2), 13);
-        assert_eq!(mapped.get_unscaled(3), 14);
+        let mixed = MemVec::new(array::from_fn(|i| 2u64.pow(i as u32)));
+        let mapped = mixed.clone().map(|x| x + 10);
+        for i in 0..MEMORY_COUNT {
+            assert_eq!(mapped.get_unscaled(i), mixed.get_unscaled(i) + 10);
+        }
     }
 
     #[test]
     #[should_panic(expected = "Value 129 too large for raw encoding and not bit-length-encoding")]
     fn test_memvec_map_panics_when_mapping_to_non_power_of_two_above_128() {
-        let memvec = MemVec::new([1, 2, 4, 8]);
-        memvec.map(|x| if x == 1 { 129 } else { x });
+        let memvec = MemVec::new([0; MEMORY_COUNT]);
+        memvec.map(|x| if x == 0 { 129 } else { x });
     }
 
     #[test]
@@ -860,36 +904,46 @@ mod tests {
 
     #[test]
     fn test_checked_sub_snap_down_respects_counts_registers() {
-        let memvec = MemVec::new_for_target::<Avx2Target>([16, 16, 64, 64]);
+        let memvec = MemVec::new_for_cpu([16, 16, 64, 64]);
+
+        #[cfg(not(feature = "drop-rf"))]
         let lowered = memvec
             .checked_sub_snap_down::<Avx2Target>(&[3, 5, 3, 0])
             .unwrap();
+        #[cfg(feature = "drop-rf")]
+        let lowered = memvec
+            .checked_sub_snap_down::<Avx2Target>(&[8, 3, 0])
+            .unwrap();
 
         // RF and VRF count registers, so they subtract exactly.
-        assert_eq!(lowered.get_unscaled(0), 13);
-        assert_eq!(lowered.get_unscaled(1), 11);
+        #[cfg(not(feature = "drop-rf"))]
+        {
+            assert_eq!(lowered.get_unscaled(0), 13);
+            assert_eq!(lowered.get_unscaled(1), 11);
+        }
+        #[cfg(feature = "drop-rf")]
+        {
+            assert_eq!(lowered.get_unscaled(0), 24);
+        }
 
         // L1 and GL are binary-scaled, so they snap down to powers of two.
-        assert_eq!(lowered.get_unscaled(2), 32); // 64 - 3 = 61 -> 32
-        assert_eq!(lowered.get_unscaled(3), 64); // 64 - 0 = 64
+        assert_eq!(lowered.get_unscaled(MEMORY_COUNT - 2), 32); // 64 - 3 = 61 -> 32
+        assert_eq!(lowered.get_unscaled(MEMORY_COUNT - 1), 64); // 64 - 0 = 64
     }
 
     proptest! {
         // TODO: Add test of larger powers of two
         #[test]
         fn test_memvec_new_returns_initial_non_bit_length_scaled_values(
-            initials in uniform4(0..=16u64)
+            initials in collection::vec(0..=16u64, MEMORY_COUNT)
+                .prop_map(|v| -> [u64; MEMORY_COUNT] { v.try_into().unwrap() })
         ) {
             let memvec = MemVec::new(initials);
-            prop_assert_eq!(memvec.get_unscaled(0), initials[0]);
-            prop_assert_eq!(memvec.get_unscaled(1), initials[1]);
-            prop_assert_eq!(memvec.get_unscaled(2), initials[2]);
-            prop_assert_eq!(memvec.get_unscaled(3), initials[3]);
+            for (i, &initial) in initials.iter().enumerate() {
+                prop_assert_eq!(memvec.get_unscaled(i), initial);
+            }
         }
 
-    }
-
-    proptest! {
         #[test]
         fn test_peak_memory_preserves_self_allocation_when_no_children(
             allocation in any_with::<MemoryAllocation>(MemoryAllocationArbConfig(true)),

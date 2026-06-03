@@ -27,8 +27,11 @@ use serde::Serialize;
 use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
-// TODO: This should be generic per Target. Right now, all targets must have 4 memories!
+// TODO: This should be generic per Target. Right now, all targets must have 4 (or 3) memories!
+#[cfg(not(feature = "drop-rf"))]
 pub const MEMORY_COUNT: usize = 4;
+#[cfg(feature = "drop-rf")]
+pub const MEMORY_COUNT: usize = 3;
 
 // TODO: Do we need so many trait bounds, here or in [CpuTarget]?
 pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
