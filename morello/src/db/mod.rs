@@ -60,7 +60,7 @@ const CHANNEL_SIZE: usize = 2;
 /// Compress pages when writing to disk.
 const COMPRESS_PAGES: bool = true;
 const NONSPATIAL_CACHE_FILE: &str = "NONSPATIAL_CACHE";
-const DEFAULT_PROACTIVE_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_PROACTIVE_SAVE_INTERVAL: Duration = Duration::from_secs(600);
 const BACKGROUND_SAVE_SHARDS_PER_PUT: usize = THREAD_SHARDS;
 const BACKGROUND_SAVE_PAGES_PER_SHARD: usize = CHANNEL_SIZE;
 const TARGET_FILE: &str = "TARGET";
