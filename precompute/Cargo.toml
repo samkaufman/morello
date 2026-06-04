@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 db-stats = ["morello/db-stats"]
+drop-rf = ["morello/drop-rf"]
 
 [dependencies]
 morello = { path = "../morello", features = [ "clap" ] }

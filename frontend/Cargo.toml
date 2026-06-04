@@ -6,6 +6,7 @@ default-run = "morello"
 
 [features]
 default = ["verification"]
+drop-rf = ["morello/drop-rf"]
 verification = ["morello/verification"]
 
 [[bin]]
