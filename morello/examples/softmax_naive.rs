@@ -7,12 +7,11 @@ use morello::pprint::{pprint, ImplPrintStyle};
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule as _};
 use morello::smallvec::smallvec;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
     CpuMemory::{self, GL},
-    Target,
 };
+use morello::target::{CpuKernel, CpuTarget};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
@@ -42,11 +41,10 @@ fn main() {
             .collect(),
         true,
     );
-    let spec = Spec::<Avx2Target>(logical_spec, Avx2Target::max_mem());
+    let spec = Spec::<Avx2Target>(logical_spec, <Avx2Target as CpuTarget>::max_mem());
     println!("Logical Spec: {}", spec.0);
 
-    let db =
-        FilesDatabase::new::<Avx2Target>(None, morello::db::TileScale::PowerOfTwo, 1, 10_000, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, Avx2Target::TILE_SCALE, 1, 10_000, 1);
 
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)

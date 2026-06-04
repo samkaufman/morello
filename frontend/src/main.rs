@@ -10,7 +10,7 @@ use std::{io, path};
 use morello::codegen::{BuildError, CodeGen};
 use morello::color::{self, ColorMode};
 use morello::common::{DimSize, Dtype};
-use morello::db::{FilesDatabase, TileScale};
+use morello::db::FilesDatabase;
 use morello::grid::canon::CanonicalBimap;
 use morello::grid::general::BiMap;
 use morello::layout::{col_major, row_major};
@@ -169,7 +169,7 @@ where
     let threads = rayon::current_num_threads();
     let db = FilesDatabase::new::<Tgt>(
         args.db.as_deref(),
-        TileScale::PowerOfTwo,
+        Tgt::TILE_SCALE,
         K,
         args.cache_size,
         threads,

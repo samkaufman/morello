@@ -3,6 +3,7 @@
 use super::{Memory, Target};
 use crate::{
     common::{DimSize, Shape},
+    db::TileScale,
     scheduling::{
         bufferize::Bufferize,
         moves::Move,
@@ -35,6 +36,7 @@ enum MultiDimTilingPolicy {
 
 pub fn tile_out_actions<Tgt: Target>(
     spec: &LogicalSpec<Tgt>,
+    tile_scale: TileScale,
 ) -> impl Iterator<Item = Action<Tgt>> + '_ {
     let serial_only = spec.serial_only();
     if let Some(output_idx) = spec.unique_output_index() {
@@ -43,6 +45,7 @@ pub fn tile_out_actions<Tgt: Target>(
             &output_shape,
             serial_only,
             MULTI_DIM_TILING_POLICY,
+            tile_scale,
         ))
     } else {
         Either::Right(iter::empty())
@@ -53,12 +56,14 @@ fn tile_out_actions_for_shape<Tgt: Target>(
     output_shape: &[DimSize],
     serial_only: bool,
     multi_dim_tiling: MultiDimTilingPolicy,
+    tile_scale: TileScale,
 ) -> impl Iterator<Item = Action<Tgt>> + 'static {
     let serial_iter = tile_out_actions_for_mode::<Tgt>(
         output_shape,
         false,
         multi_dim_tiling == MultiDimTilingPolicy::Always,
         multi_dim_tiling,
+        tile_scale,
     );
 
     if serial_only {
@@ -69,6 +74,7 @@ fn tile_out_actions_for_shape<Tgt: Target>(
             true,
             multi_dim_tiling != MultiDimTilingPolicy::Never,
             multi_dim_tiling,
+            tile_scale,
         );
 
         Either::Right(serial_iter.chain(parallel_iter))
@@ -80,6 +86,7 @@ fn tile_out_actions_for_mode<Tgt: Target>(
     parallel: bool,
     multi_dim: bool,
     multi_dim_tiling: MultiDimTilingPolicy,
+    tile_scale: TileScale,
 ) -> impl Iterator<Item = Action<Tgt>> + 'static {
     let output_shape = Shape::from(output_shape);
     if multi_dim {
@@ -87,7 +94,7 @@ fn tile_out_actions_for_mode<Tgt: Target>(
             (true, MultiDimTilingPolicy::ParallelOnly(max_dims)) => max_dims,
             _ => output_shape.len(),
         };
-        let tile_iter = gen_tile_sizes(&output_shape, max_tiled_dims);
+        let tile_iter = gen_tile_sizes(&output_shape, max_tiled_dims, tile_scale);
         Either::Left(tile_iter.map(move |tile_shape| {
             Action::TileOut(TileOut::MultiLoop {
                 output_shape: tile_shape,
@@ -99,20 +106,23 @@ fn tile_out_actions_for_mode<Tgt: Target>(
         // relatively stable order between Specs.
         let max_dim_size =
             DimSize::try_from(output_shape.iter().map(|d| d.get()).max().unwrap()).unwrap();
-        Either::Right(dim_range(max_dim_size, true).flat_map(move |size| {
-            (0..output_shape.len()).map(move |dim| {
-                Action::TileOut(TileOut::SingleLoop {
-                    dim: u8::try_from(dim).unwrap(),
-                    size,
-                    parallel,
+        Either::Right(
+            dim_range(max_dim_size, true, tile_scale).flat_map(move |size| {
+                (0..output_shape.len()).map(move |dim| {
+                    Action::TileOut(TileOut::SingleLoop {
+                        dim: u8::try_from(dim).unwrap(),
+                        size,
+                        parallel,
+                    })
                 })
-            })
-        }))
+            }),
+        )
     }
 }
 
 pub fn split_actions<Tgt: Target>(
     spec: &LogicalSpec<Tgt>,
+    tile_scale: TileScale,
 ) -> impl Iterator<Item = Action<Tgt>> + '_ {
     let LogicalSpec::Primitive(
         PrimitiveBasics {
@@ -132,7 +142,7 @@ pub fn split_actions<Tgt: Target>(
                 unreachable!();
             };
             Either::Left(
-                dim_range(orig_k, false)
+                dim_range(orig_k, false, tile_scale)
                     .filter(move |&new_k| {
                         // TODO: Shouldn't this be rejected during application instead?
                         operands[0].is_valid_tile_shape(&[b, m, new_k], false)
@@ -156,7 +166,7 @@ pub fn split_actions<Tgt: Target>(
             }
             let orig_dim_size = spec_shape[scan_dim_idx];
             Either::Right(
-                dim_range(orig_dim_size, false)
+                dim_range(orig_dim_size, false, tile_scale)
                     .filter(move |&new_k| {
                         // TODO: Shouldn't this be rejected during application instead?
                         operands.first().is_some_and(|input_spec| {
@@ -305,6 +315,7 @@ pub fn move_actions<Tgt: Target>(
 fn gen_tile_sizes(
     tensor_shape: &[DimSize],
     max_tiled_dims: usize,
+    tile_scale: TileScale,
 ) -> impl Iterator<Item = Shape> + 'static {
     let tensor_shape = Shape::from_slice(tensor_shape);
     let effective_max = max_tiled_dims.min(tensor_shape.len());
@@ -315,7 +326,7 @@ fn gen_tile_sizes(
         .flat_map(move |dims_to_tile| {
             let per_dim_sizes: Vec<Vec<DimSize>> = dims_to_tile
                 .iter()
-                .map(|&d| dim_range(tensor_shape[d], false).collect())
+                .map(|&d| dim_range(tensor_shape[d], false, tile_scale).collect())
                 .collect();
             let tensor_shape = tensor_shape.clone();
             per_dim_sizes
@@ -337,7 +348,7 @@ mod tests {
     use crate::scheduling::{moves::Move, Action};
     use crate::shape;
     use crate::spec::arb_canonical_logical_spec;
-    use crate::target::Avx2Target;
+    use crate::target::{Avx2Target, CpuTarget};
     use itertools::Itertools;
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
@@ -347,30 +358,21 @@ mod tests {
 
     #[test]
     fn test_gen_tile_sizes_empty() {
-        assert_eq!(gen_tile_sizes(&[], 0).count(), 0);
-        assert_eq!(gen_tile_sizes(&[], 1).count(), 0);
+        assert_eq!(gen_tile_sizes(&[], 0, TileScale::PowerOfTwo).count(), 0);
+        assert_eq!(gen_tile_sizes(&[], 1, TileScale::PowerOfTwo).count(), 0);
     }
 
     #[test]
     fn test_gen_tile_sizes_zero_max() {
-        assert_eq!(gen_tile_sizes(&shape![2, 2], 0).count(), 0);
+        assert_eq!(
+            gen_tile_sizes(&shape![2, 2], 0, TileScale::PowerOfTwo).count(),
+            0
+        );
     }
 
     #[test]
     fn test_gen_tile_sizes_dim_1() {
-        assert_gen_tile_sizes(
-            shape![16],
-            [
-                shape![1],
-                shape![2],
-                shape![3],
-                shape![4],
-                shape![6],
-                shape![8],
-                shape![12],
-            ],
-            1,
-        );
+        assert_gen_tile_sizes(shape![16], [shape![1], shape![2], shape![4], shape![8]], 1);
     }
 
     #[test]
@@ -427,9 +429,10 @@ mod tests {
         max_tiled_dims: usize,
     ) {
         let expected: Vec<Shape> = expected.into_iter().sorted().collect();
-        let actual: Vec<Shape> = gen_tile_sizes(&tensor_shape, max_tiled_dims)
-            .sorted()
-            .collect::<Vec<_>>();
+        let actual: Vec<Shape> =
+            gen_tile_sizes(&tensor_shape, max_tiled_dims, TileScale::PowerOfTwo)
+                .sorted()
+                .collect::<Vec<_>>();
         assert_eq!(
             actual, expected,
             "gen_tile_sizes({tensor_shape:?}, {max_tiled_dims}) returned {actual:?}, expected {expected:?}"
@@ -443,6 +446,7 @@ mod tests {
             &output_shape,
             false,
             MultiDimTilingPolicy::ParallelOnly(2),
+            <Avx2Target as CpuTarget>::TILE_SCALE,
         )
         .collect();
 
@@ -487,6 +491,7 @@ mod tests {
             &output_shape,
             false,
             MultiDimTilingPolicy::Never,
+            Avx2Target::TILE_SCALE,
         )
         .collect();
 
@@ -520,6 +525,7 @@ mod tests {
             &output_shape,
             false,
             MultiDimTilingPolicy::Always,
+            Avx2Target::TILE_SCALE,
         )
         .collect();
 
@@ -568,6 +574,7 @@ mod tests {
                     &output_shape,
                     spec.serial_only(),
                     MultiDimTilingPolicy::Never,
+                    Avx2Target::TILE_SCALE,
                 )
                 .all(|action| matches!(action, Action::TileOut(TileOut::SingleLoop { .. }))),
                 "expected only single-loop tile actions in Never mode"
@@ -586,6 +593,7 @@ mod tests {
                     &output_shape,
                     spec.serial_only(),
                     MultiDimTilingPolicy::ParallelOnly(MAX_SYNTHESIS_PARALLEL_TILE_DIMS_FOR_TEST),
+                    Avx2Target::TILE_SCALE,
                 )
                 .all(|action| {
                     if let Action::TileOut(TileOut::MultiLoop {
@@ -616,6 +624,7 @@ mod tests {
                 &output_shape,
                 spec.serial_only(),
                 MultiDimTilingPolicy::ParallelOnly(MAX_SYNTHESIS_PARALLEL_TILE_DIMS_FOR_TEST),
+                Avx2Target::TILE_SCALE,
             );
             for action in actions {
                 if let Action::TileOut(TileOut::MultiLoop {

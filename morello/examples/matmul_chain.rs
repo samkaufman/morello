@@ -8,12 +8,11 @@ use morello::pprint::ImplPrintStyle;
 use morello::scheduling_sugar::{SchedulingSugar, Subschedule};
 use morello::shape;
 use morello::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
-use morello::target::CpuKernel;
 use morello::target::{
     Avx2Target,
     CpuMemory::{GL, L1, RF, VRF},
-    Target,
 };
+use morello::target::{CpuKernel, CpuTarget};
 use morello::tensorspec::TensorSpecAux;
 use morello::utils::ToWriteFmt;
 
@@ -51,7 +50,7 @@ fn main() {
             operand_auxes: vec![aux.clone(), aux.clone(), aux.clone(), aux],
             serial_only: true,
         },
-        Avx2Target::max_mem(),
+        <Avx2Target as CpuTarget>::max_mem(),
     );
     spec.canonicalize().unwrap();
 
@@ -148,10 +147,10 @@ fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
 }
 
 fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
-    use morello::db::{FilesDatabase, TileScale};
+    use morello::db::FilesDatabase;
     use morello::target::CpuMemory::{GL, L1, RF, VRF};
 
-    let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOfTwo, 1, 10_000, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, Avx2Target::TILE_SCALE, 1, 10_000, 1);
 
     spec.tile_out(&[1, 1, 2048])
         .to_softmax_parts(GL, row_major, None, GL, row_major, None)

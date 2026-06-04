@@ -160,7 +160,7 @@ where
     let threads = rayon::current_num_threads();
     let mut db = FilesDatabase::new::<Tgt>(
         args.db.as_deref(),
-        TileScale::PowerOfTwo,
+        Tgt::TILE_SCALE,
         K,
         args.cache_size,
         threads,

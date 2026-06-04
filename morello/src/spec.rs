@@ -3040,12 +3040,26 @@ pub fn arb_canonical_compose_logical_spec<Tgt: Target>(
     )
 }
 
-pub fn dim_range(dim_size: DimSize, include_end: bool) -> impl Iterator<Item = DimSize> {
-    (0..)
-        .map(ordered_power_or_three_power)
-        .take_while(move |x| *x < dim_size.get())
-        .map(|x| DimSize::new(x).unwrap())
-        .chain(once(if include_end { Some(dim_size) } else { None }).flatten())
+pub fn dim_range(
+    dim_size: DimSize,
+    include_end: bool,
+    tile_scale: TileScale,
+) -> impl Iterator<Item = DimSize> {
+    let mut dims: Vec<u32> = match tile_scale {
+        TileScale::Linear => (1..dim_size.get()).collect(),
+        TileScale::PowerOfTwo => (0..)
+            .map(|power| 2u32.pow(power))
+            .take_while(|&x| x < dim_size.get())
+            .collect(),
+        TileScale::PowerOrThreePower => (0..)
+            .map(ordered_power_or_three_power)
+            .take_while(|&x| x < dim_size.get())
+            .collect(),
+    };
+    if include_end {
+        dims.push(dim_size.get());
+    }
+    dims.into_iter().map(|x| DimSize::new(x).unwrap())
 }
 
 fn ordered_power_or_three_power(index: u32) -> u32 {
@@ -3714,20 +3728,20 @@ mod tests {
     #[test]
     fn test_dim_range_with_odd_max() {
         assert_eq!(
-            dim_range(nz!(3u32), false).collect::<Vec<_>>(),
+            dim_range(nz!(3u32), false, TileScale::PowerOfTwo).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32)]
         );
         assert_eq!(
-            dim_range(nz!(3u32), true).collect::<Vec<_>>(),
+            dim_range(nz!(3u32), true, TileScale::PowerOfTwo).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32), nz!(3u32)]
         );
 
         assert_eq!(
-            dim_range(nz!(7u32), false).collect::<Vec<_>>(),
+            dim_range(nz!(7u32), false, TileScale::PowerOrThreePower).collect::<Vec<_>>(),
             vec![nz!(1u32), nz!(2u32), nz!(3u32), nz!(4u32), nz!(6u32)]
         );
         assert_eq!(
-            dim_range(nz!(7u32), true).collect::<Vec<_>>(),
+            dim_range(nz!(7u32), true, TileScale::PowerOrThreePower).collect::<Vec<_>>(),
             vec![
                 nz!(1u32),
                 nz!(2u32),
@@ -3738,7 +3752,31 @@ mod tests {
             ]
         );
         assert_eq!(
-            dim_range(nz!(64u32), false).collect::<Vec<_>>(),
+            dim_range(nz!(64u32), false, TileScale::PowerOrThreePower).collect::<Vec<_>>(),
+            vec![
+                nz!(1u32),
+                nz!(2u32),
+                nz!(3u32),
+                nz!(4u32),
+                nz!(6u32),
+                nz!(8u32),
+                nz!(12u32),
+                nz!(16u32),
+                nz!(24u32),
+                nz!(32u32),
+                nz!(48u32),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_dim_range_can_follow_power_or_three_power_tile_scale() {
+        assert_eq!(
+            dim_range(nz!(7u32), false, TileScale::PowerOrThreePower).collect::<Vec<_>>(),
+            vec![nz!(1u32), nz!(2u32), nz!(3u32), nz!(4u32), nz!(6u32)]
+        );
+        assert_eq!(
+            dim_range(nz!(64u32), false, TileScale::PowerOrThreePower).collect::<Vec<_>>(),
             vec![
                 nz!(1u32),
                 nz!(2u32),

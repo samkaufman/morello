@@ -1,8 +1,8 @@
 use divan::counter::ItemsCount;
-use morello::db::{FilesDatabase, TileScale};
+use morello::db::FilesDatabase;
 use morello::layout::row_major;
 use morello::spec::Spec;
-use morello::target::{Avx2Target, Target};
+use morello::target::{Avx2Target, CpuTarget, Target};
 use morello::{cost::Cost, memorylimits::MemVec};
 use std::hint::black_box;
 
@@ -31,7 +31,7 @@ fn mk_specs_set() -> Vec<Spec<Avx2Target>> {
 
 #[divan::bench]
 fn db_puts_overlap(bencher: divan::Bencher) {
-    let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOfTwo, 1, 4096, 1);
+    let db = FilesDatabase::new::<Avx2Target>(None, Avx2Target::TILE_SCALE, 1, 4096, 1);
     let specs = mk_specs_set();
     let decisions: Vec<_> = (0..specs.len())
         .map(|i| {

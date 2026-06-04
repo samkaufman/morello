@@ -3,6 +3,7 @@ use crate::codegen::c_utils::VecType;
 use crate::codegen::{PlanMemoryTarget, STACK_CUTOFF};
 use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
+use crate::db::TileScale;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
 use crate::imp::allocs::move_cost;
@@ -47,6 +48,7 @@ pub(crate) const DOT_PRODUCT_BF16_STRIP_SIZE: DimSize = nz!(16u32);
 pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'static {
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
     type Memory: Memory + From<CpuMemory> + Into<CpuMemory> + PartialEq<CpuMemory>;
+    const TILE_SCALE: TileScale = TileScale::PowerOfTwo;
     fn max_mem() -> MemoryLimits;
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType];
@@ -413,7 +415,7 @@ impl<T: CpuTarget> Target for T {
 
     fn actions(spec: &LogicalSpec<Self>) -> Self::ActionsIter<'_> {
         let iter = move_actions(spec);
-        let iter = iter.chain(tile_out_actions(spec));
+        let iter = iter.chain(tile_out_actions(spec, Self::TILE_SCALE));
 
         // OnePrefix is an unfortunate special case. The only viable action is applying
         // its no-op kernel.
@@ -573,7 +575,7 @@ impl<T: CpuTarget> Target for T {
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
                     if *accum =>
                 {
-                    Box::new(iter.chain(split_actions(spec)))
+                    Box::new(iter.chain(split_actions(spec, Self::TILE_SCALE)))
                 }
                 PrimitiveSpecType::Conv { accum } => {
                     if *accum {
