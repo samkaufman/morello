@@ -1518,7 +1518,7 @@ fn block_size_dim(dim: usize, dim_count: usize) -> u32 {
     if dim >= dim_count - MEMORY_COUNT {
         31
     } else {
-        8
+        4
     }
 }
 
