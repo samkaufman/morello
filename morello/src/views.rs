@@ -1240,8 +1240,13 @@ impl<T: View> View for BoundaryTile<T> {
         })
     }
 
-    fn pdisplay(&self, _names: &NameEnv) -> String {
-        "?b".to_string()
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        format!(
+            "{}.boundary({}, offsets={})",
+            names.get_name_or_display(&self.view),
+            display_list(self.shape()),
+            display_list(self.offsets())
+        )
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
