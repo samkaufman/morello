@@ -2,6 +2,7 @@ use crate::{
     common::{DimSize, Shape},
     expr::{AffineForm, NonAffine, NonAffineExpr, Substitute, Term},
     layout::{row_major, BufferVar, Layout, LayoutError},
+    nameenv::NameEnv,
     opaque_symbol::OpaqueSymbol,
     target::{Memory, Target},
     tensorspec::TensorSpec,
@@ -46,9 +47,12 @@ pub trait View: Clone {
         None
     }
 
-    // TODO: Drop this. Temporary hack for pprint'ing BoundaryTiles, which don't have syntax.
-    fn is_boundary_tile(&self) -> bool {
-        false
+    fn pdisplay(&self, _names: &NameEnv) -> String {
+        if let Some(param) = self.to_param() {
+            param.to_string()
+        } else {
+            panic!("No name for non-Param view");
+        }
     }
 
     /// Visit parameters from this View using the provided visitor function.
@@ -89,6 +93,10 @@ where
 
     fn to_param(&self) -> Option<&Param<Self::Tgt>> {
         (**self).to_param()
+    }
+
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        (**self).pdisplay(names)
     }
 
     fn shape(&self) -> &[DimSize] {
@@ -140,8 +148,8 @@ where
         (**self).to_param()
     }
 
-    fn is_boundary_tile(&self) -> bool {
-        (**self).is_boundary_tile()
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        (**self).pdisplay(names)
     }
 
     fn shape(&self) -> &[DimSize] {
@@ -193,8 +201,8 @@ where
         (**self).to_param()
     }
 
-    fn is_boundary_tile(&self) -> bool {
-        (**self).is_boundary_tile()
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        (**self).pdisplay(names)
     }
 
     fn shape(&self) -> &[DimSize] {
@@ -407,8 +415,17 @@ impl<Tgt: Target> View for ViewE<Tgt> {
         }
     }
 
-    fn is_boundary_tile(&self) -> bool {
-        matches!(self, ViewE::BoundaryTile(_))
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        match self {
+            ViewE::Tensor(tensor) => tensor.pdisplay(names),
+            ViewE::Param(param) => param.pdisplay(names),
+            ViewE::CacheView(cache_view) => cache_view.pdisplay(names),
+            ViewE::Tile(tile) => tile.pdisplay(names),
+            ViewE::BoundaryTile(boundary_tile) => boundary_tile.pdisplay(names),
+            ViewE::SqueezeDimsView(squeeze_dims_view) => squeeze_dims_view.pdisplay(names),
+            ViewE::OnePrefixView(one_prefix_view) => one_prefix_view.pdisplay(names),
+            ViewE::TransposeView(transpose_view) => transpose_view.pdisplay(names),
+        }
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
@@ -589,6 +606,13 @@ where
         }
     }
 
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        match self {
+            ParamOr::Param(p) => p.borrow().pdisplay(names),
+            ParamOr::Other(v) => v.pdisplay(names),
+        }
+    }
+
     fn visit_params<F>(&self, visitor: &mut F)
     where
         F: FnMut(u8, &TensorSpec<Self::Tgt>),
@@ -708,6 +732,10 @@ impl<Tgt: Target> View for Param<Tgt> {
 
     fn to_param(&self) -> Option<&Param<Tgt>> {
         Some(self)
+    }
+
+    fn pdisplay(&self, _names: &NameEnv) -> String {
+        self.to_string()
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
@@ -935,6 +963,19 @@ impl<T: View> View for Tile<T> {
         })
     }
 
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        let source = names.get_name_or_display(&self.view);
+        let shape = display_list(self.shape());
+        if self.shape() == self.step_sizes() {
+            format!("{source}.tile({shape})")
+        } else {
+            format!(
+                "{source}.tile({shape}, steps={})",
+                display_list(self.step_sizes())
+            )
+        }
+    }
+
     fn visit_params<F>(&self, visitor: &mut F)
     where
         F: FnMut(u8, &TensorSpec<Self::Tgt>),
@@ -1004,6 +1045,14 @@ impl<T: View> View for SqueezeDimsView<T> {
         })
     }
 
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        format!(
+            "{}.squeeze_dims({})",
+            names.get_name_or_display(&self.inner),
+            display_list(&self.dims)
+        )
+    }
+
     fn visit_params<F>(&self, visitor: &mut F)
     where
         F: FnMut(u8, &TensorSpec<Self::Tgt>),
@@ -1047,6 +1096,10 @@ impl<T: View> View for OnePrefixView<T> {
             spec: self.spec,
             unique_id: self.unique_id,
         })
+    }
+
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        format!("{}.one_prefix()", names.get_name_or_display(&self.inner))
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
@@ -1093,6 +1146,10 @@ impl<T: View> View for TransposeView<T> {
             spec: self.spec,
             unique_id: self.unique_id,
         })
+    }
+
+    fn pdisplay(&self, names: &NameEnv) -> String {
+        format!("{}.transpose()", names.get_name_or_display(&self.inner))
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
@@ -1183,8 +1240,8 @@ impl<T: View> View for BoundaryTile<T> {
         })
     }
 
-    fn is_boundary_tile(&self) -> bool {
-        true
+    fn pdisplay(&self, _names: &NameEnv) -> String {
+        "?b".to_string()
     }
 
     fn visit_params<F>(&self, visitor: &mut F)
@@ -1193,6 +1250,17 @@ impl<T: View> View for BoundaryTile<T> {
     {
         self.view.visit_params(visitor);
     }
+}
+
+fn display_list<T: Display>(values: &[T]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 #[cfg(test)]

@@ -29,13 +29,8 @@ impl NameEnv {
     pub fn get_name_or_display<V: View>(&self, view: &V) -> String {
         if let Some(present_name) = self.get_name(view) {
             present_name.to_owned()
-        } else if let Some(param) = view.to_param() {
-            param.to_string()
-        } else if view.is_boundary_tile() {
-            // TODO: Define a real syntax for BoundaryTiles in Impl.
-            "?b".to_string()
         } else {
-            panic!("No name for non-Param view");
+            view.pdisplay(self)
         }
     }
 }
