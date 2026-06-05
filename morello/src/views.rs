@@ -958,8 +958,38 @@ impl<T: View> View for SqueezeDimsView<T> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr_with_layout(&self, _layout: &Layout) -> NonAffineExpr<BufferVar> {
-        todo!()
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        debug_assert!(
+            self.dims.windows(2).all(|w| w[0] < w[1]),
+            "SqueezeDimsView dims must be sorted and unique"
+        );
+
+        // Map each original dimension to its squeezed-view dimension, or `None` if the original
+        // dimension is a removed size-one dimension.
+        let mut next_dropped_dim = self.dims.iter().copied().peekable();
+        let mut dropped_before = 0u8;
+        let mut dim_map = Vec::new();
+        dim_map.reserve_exact(self.inner.shape().len());
+        for dim in 0..self.inner.shape().len() {
+            let dim = u8::try_from(dim).unwrap();
+            if next_dropped_dim.peek().copied() == Some(dim) {
+                dim_map.push(None);
+                dropped_before += 1;
+                next_dropped_dim.next();
+            } else {
+                dim_map.push(Some(dim - dropped_before));
+            }
+        }
+
+        self.inner
+            .make_buffer_indexing_expr_with_layout(layout)
+            .map_vars(&mut |term_var| match term_var {
+                BufferVar::Pt(dim, _) => match dim_map[usize::from(dim)] {
+                    Some(new_dim) => NonAffine::Leaf(BufferVar::Pt(new_dim, self.unique_id)).into(),
+                    None => AffineForm::zero(),
+                },
+                BufferVar::TileIdx(_, _) => NonAffine::Leaf(term_var).into(),
+            })
     }
 
     fn bind(
@@ -997,8 +1027,15 @@ impl<T: View> View for OnePrefixView<T> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr_with_layout(&self, _layout: &Layout) -> NonAffineExpr<BufferVar> {
-        todo!()
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        self.inner
+            .make_buffer_indexing_expr_with_layout(layout)
+            .map_vars(&mut |term_var| match term_var {
+                BufferVar::Pt(dim, _) => {
+                    NonAffine::Leaf(BufferVar::Pt(dim + 1, self.unique_id)).into()
+                }
+                BufferVar::TileIdx(_, _) => NonAffine::Leaf(term_var).into(),
+            })
     }
 
     fn bind(
@@ -1035,8 +1072,16 @@ impl<T: View> View for TransposeView<T> {
         &self.spec
     }
 
-    fn make_buffer_indexing_expr_with_layout(&self, _layout: &Layout) -> NonAffineExpr<BufferVar> {
-        todo!()
+    fn make_buffer_indexing_expr_with_layout(&self, layout: &Layout) -> NonAffineExpr<BufferVar> {
+        self.inner
+            .make_buffer_indexing_expr_with_layout(layout)
+            .map_vars(&mut |term_var| match term_var {
+                BufferVar::Pt(dim, _) => {
+                    debug_assert!(dim < 2);
+                    NonAffine::Leaf(BufferVar::Pt(1 - dim, self.unique_id)).into()
+                }
+                BufferVar::TileIdx(_, _) => NonAffine::Leaf(term_var).into(),
+            })
     }
 
     fn bind(
@@ -1147,5 +1192,103 @@ impl<T: View> View for BoundaryTile<T> {
         F: FnMut(u8, &TensorSpec<Self::Tgt>),
     {
         self.view.visit_params(visitor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        common::{Dtype, Shape},
+        layout, shape,
+        target::{Avx2Target, CpuMemory},
+    };
+
+    /// Verifies that squeezing a size-one dimension removes it from point indexing.
+    #[test]
+    fn test_squeeze_dims_index_expr_drops_squeezed_dimension() {
+        let tensor = l1_u32_tensor(shape![2, 1, 3]);
+        let view = tensor.squeeze_dims([1u8]);
+        let expr = view.make_buffer_indexing_expr_with_layout(&layout![0, 1, 2]);
+        let expr_id = view.identifier();
+
+        let expected = NonAffineExpr::constant(0)
+            + Term(3, NonAffine::Leaf(BufferVar::Pt(0, expr_id)))
+            + Term(1, NonAffine::Leaf(BufferVar::Pt(1, expr_id)));
+        assert_eq!(expr, expected);
+    }
+
+    /// Verifies that squeezing removes size-one dimensions from the logical shape.
+    #[test]
+    fn test_squeeze_dims_view_shape_drops_squeezed_dimension() {
+        let tensor = l1_u32_tensor(shape![2, 1, 3]);
+        let view = tensor.squeeze_dims([1u8]);
+
+        assert_eq!(view.shape(), shape![2, 3].as_slice());
+    }
+
+    /// Verifies that adding a leading size-one dimension shifts existing point dimensions.
+    #[test]
+    fn test_one_prefix_index_expr_shifts_inner_dimensions() {
+        let tensor = l1_u32_tensor(shape![2, 3]);
+        let view = tensor.one_prefix();
+        let expr = view.make_buffer_indexing_expr_with_layout(&row_major(&shape![2, 3]));
+        let expr_id = view.identifier();
+
+        let expected = NonAffineExpr::constant(0)
+            + Term(3, NonAffine::Leaf(BufferVar::Pt(1, expr_id)))
+            + Term(1, NonAffine::Leaf(BufferVar::Pt(2, expr_id)));
+        assert_eq!(expr, expected);
+    }
+
+    /// Verifies that prefixing adds a leading size-one dimension to the logical shape.
+    #[test]
+    fn test_one_prefix_view_shape_adds_leading_dimension() {
+        let tensor = l1_u32_tensor(shape![2, 3]);
+        let view = tensor.one_prefix();
+
+        assert_eq!(view.shape(), shape![1, 2, 3].as_slice());
+    }
+
+    /// Verifies that transposing a matrix swaps its point dimensions in the index expression.
+    #[test]
+    fn test_transpose_index_expr_swaps_matrix_dimensions() {
+        let tensor = l1_u32_tensor(shape![2, 3]);
+        let view = tensor.transpose();
+        let expr = view.make_buffer_indexing_expr_with_layout(&row_major(&shape![2, 3]));
+        let expr_id = view.identifier();
+
+        let expected = NonAffineExpr::constant(0)
+            + Term(3, NonAffine::Leaf(BufferVar::Pt(1, expr_id)))
+            + Term(1, NonAffine::Leaf(BufferVar::Pt(0, expr_id)));
+        assert_eq!(expr, expected);
+    }
+
+    /// Verifies that transposing a matrix swaps its logical shape dimensions.
+    #[test]
+    fn test_transpose_view_shape_swaps_matrix_dimensions() {
+        let tensor = l1_u32_tensor(shape![2, 3]);
+        let view = tensor.transpose();
+
+        assert_eq!(view.shape(), shape![3, 2].as_slice());
+    }
+
+    /// Verifies that transposing is currently defined only for matrix-shaped views.
+    #[test]
+    #[should_panic(expected = "Cannot transpose a tensor with shape")]
+    fn test_transpose_view_rejects_three_dimensional_shape() {
+        l1_u32_tensor(shape![2, 3, 4]).transpose();
+    }
+
+    /// Constructs an L1-resident `u32` tensor with a row-major layout.
+    fn l1_u32_tensor(shape: Shape) -> Tensor<Avx2Target> {
+        let layout = row_major(&shape);
+        Tensor::new(TensorSpec::new_canon(
+            shape,
+            Dtype::Uint32,
+            CpuMemory::L1,
+            layout,
+            None,
+        ))
     }
 }
