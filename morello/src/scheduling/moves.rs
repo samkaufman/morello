@@ -2,12 +2,12 @@ use crate::common::{DimSize, Dtype};
 use crate::imp::allocs::{alloc_memory_allocation, move_cost, Alloc};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
-use crate::layout::Layout;
+use crate::layout::{row_major, Layout};
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{ActionSolver, ActionT, ApplyError, MoveActionSolver, NotApplicableReason};
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Memory, Target, MEMORY_COUNT};
-use crate::tensorspec::{self, TensorSpec};
+use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
 use crate::views::{CacheView, Param, Tensor, ViewE};
 use serde::{Deserialize, Serialize};
 use std::mem;
@@ -180,9 +180,8 @@ fn plan_alloc<'a, Tgt: Target>(
 
     let mut new_operands = operands.to_vec();
     new_operands[usize::from(source_idx)] = new_spec.clone();
-    let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
-    new_body_spec.0.replace_io(&new_operands);
-    new_body_spec.canonicalize().unwrap();
+    let new_body_spec =
+        make_body_spec_for_move(spec, source_idx, &new_spec, &new_operands, lower_limits);
 
     Ok(AllocPlan {
         outer_moved_operand_spec,
@@ -261,14 +260,8 @@ fn plan_alloc_for_solver<Tgt: Target>(
         spec.0.serial_only(),
     );
 
-    let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
-    let LogicalSpec::Primitive(basics, auxes, _) = &mut new_body_spec.0 else {
-        unreachable!();
-    };
-    let source_idx = usize::from(source_idx);
-    basics.dtypes[source_idx] = new_spec.dtype();
-    auxes[source_idx] = new_spec.aux.clone();
-    new_body_spec.canonicalize().unwrap();
+    let new_body_spec =
+        make_primitive_body_spec_for_move(spec, usize::from(source_idx), &new_spec, lower_limits);
 
     Ok(SolverAllocPlan {
         outer_moved_operand_spec,
@@ -404,20 +397,91 @@ fn make_logue<Tgt: Target>(
     if flip {
         mem::swap(&mut left_spec, &mut right_spec);
     }
-    let mut logue_spec = Spec(
-        LogicalSpec::Primitive(
-            PrimitiveBasics {
-                typ: PrimitiveSpecType::Move,
-                spec_shape: left_spec.shape().into(),
-                dtypes: vec![left_spec.dtype(), right_spec.dtype()],
-            },
-            vec![left_spec.aux.clone(), right_spec.aux.clone()],
-            serial_only,
-        ),
+    let basics = PrimitiveBasics {
+        typ: PrimitiveSpecType::Move,
+        spec_shape: left_spec.shape().into(),
+        dtypes: vec![left_spec.dtype(), right_spec.dtype()],
+    };
+    let mut auxes = vec![left_spec.aux.clone(), right_spec.aux.clone()];
+    canonicalize_matching_contiguous_move_auxes(&basics.spec_shape, &basics.dtypes, &mut auxes);
+    let logue_spec = Spec(
+        LogicalSpec::Primitive(basics, auxes, serial_only),
         lower_limits.clone(),
     );
-    logue_spec.canonicalize().unwrap();
     Some(logue_spec)
+}
+
+fn make_body_spec_for_move<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    source_idx: u8,
+    new_spec: &TensorSpec<Tgt>,
+    new_operands: &[TensorSpec<Tgt>],
+    lower_limits: MemoryLimits,
+) -> Spec<Tgt> {
+    match &spec.0 {
+        LogicalSpec::Primitive(..) => {
+            make_primitive_body_spec_for_move(spec, usize::from(source_idx), new_spec, lower_limits)
+        }
+        LogicalSpec::Compose { .. } => {
+            let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
+            new_body_spec.0.replace_io(new_operands);
+            new_body_spec.canonicalize().unwrap();
+            new_body_spec
+        }
+    }
+}
+
+fn make_primitive_body_spec_for_move<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    source_idx: usize,
+    new_spec: &TensorSpec<Tgt>,
+    lower_limits: MemoryLimits,
+) -> Spec<Tgt> {
+    let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
+    let LogicalSpec::Primitive(basics, auxes, _) = &mut new_body_spec.0 else {
+        unreachable!();
+    };
+    basics.dtypes[source_idx] = new_spec.dtype();
+    auxes[source_idx] = new_spec.aux.clone();
+
+    if matches!(basics.typ, PrimitiveSpecType::Move) {
+        canonicalize_matching_contiguous_move_auxes(&basics.spec_shape, &basics.dtypes, auxes);
+    }
+
+    new_body_spec
+}
+
+/// Applies the only [LogicalSpec::canonicalize] rewrite that is not already guaranteed by
+/// [plan_alloc_shared] and the canonical input spec.
+///
+/// `Move` specs with equal dtypes, equal layouts, and fully-contiguous operands are canonicalized
+/// to row-major layouts as a symmetry break. The direct move-planning path constructs logue
+/// [Spec]s and primitive moved bodies from already-canonical operand auxes, so it can preserve
+/// canonical form by applying just this targeted rule instead of running full
+/// [Spec::canonicalize].
+fn canonicalize_matching_contiguous_move_auxes<Tgt: Target>(
+    shape: &[DimSize],
+    dtypes: &[Dtype],
+    auxes: &mut [TensorSpecAux<Tgt>],
+) {
+    debug_assert_eq!(dtypes.len(), auxes.len());
+    if dtypes.is_empty() {
+        return;
+    }
+
+    let first_dtype = dtypes[0];
+    let first_layout = &auxes[0].layout;
+    if dtypes.iter().all(|&dtype| dtype == first_dtype)
+        && auxes
+            .iter()
+            .all(|aux| &aux.layout == first_layout && aux.layout.is_fully_contiguous())
+    {
+        for aux in auxes {
+            if aux.memory.has_layout() {
+                aux.layout = row_major(shape);
+            }
+        }
+    }
 }
 
 fn move_gens_prologue<Tgt: Target>(
@@ -470,6 +534,84 @@ mod tests {
     use crate::scheduling::Action;
     use crate::spec;
     use crate::target::{Avx2Target, CpuMemory};
+    use proptest::prelude::*;
+    use proptest::proptest;
+    use proptest::sample::select;
+
+    fn arb_primitive_movable_spec_and_action(
+    ) -> impl Strategy<Value = (Spec<Avx2Target>, Move<Avx2Target>)> {
+        crate::spec::arb_canonical_primitive_spec::<Avx2Target>(
+            Some(DimSize::new(8).unwrap()),
+            None,
+        )
+        .prop_filter_map("Primitive Spec should have Move actions", |spec| {
+            let moves = Avx2Target::actions(&spec.0)
+                .filter_map(|action| match action {
+                    Action::Move(action) => Some(action),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            (!moves.is_empty()).then_some((spec, moves))
+        })
+        .prop_flat_map(|(spec, moves)| (Just(spec), select(moves)))
+    }
+
+    proptest! {
+        #[test]
+        fn test_primitive_body_spec_for_move_is_canonical(
+            (spec, action) in arb_primitive_movable_spec_and_action()
+        ) {
+            let outer_moved_operand_spec = spec.0.parameter(usize::from(action.source_idx));
+            let Ok(AllocPlanShared { new_spec, lower_limits, .. }) = plan_alloc_shared(
+                &spec,
+                &outer_moved_operand_spec,
+                action.destination_dtype,
+                action.destination_level,
+                &action.destination_layout,
+                action.destination_vector_size,
+            ) else {
+                return Ok(());
+            };
+
+            let new_body_spec = make_primitive_body_spec_for_move(
+                &spec,
+                usize::from(action.source_idx),
+                &new_spec,
+                lower_limits,
+            );
+            prop_assert!(new_body_spec.is_canonical());
+        }
+
+        #[test]
+        fn test_logue_spec_for_move_is_canonical(
+            (spec, action) in arb_primitive_movable_spec_and_action()
+        ) {
+            let outer_moved_operand_spec = spec.0.parameter(usize::from(action.source_idx));
+            let Ok(AllocPlanShared { new_spec, lower_limits, .. }) = plan_alloc_shared(
+                &spec,
+                &outer_moved_operand_spec,
+                action.destination_dtype,
+                action.destination_level,
+                &action.destination_layout,
+                action.destination_vector_size,
+            ) else {
+                return Ok(());
+            };
+
+            for flip in [false, true] {
+                let logue_spec = make_logue(
+                    flip,
+                    true,
+                    &outer_moved_operand_spec,
+                    &new_spec,
+                    &lower_limits,
+                    spec.0.serial_only(),
+                )
+                .unwrap();
+                prop_assert!(logue_spec.is_canonical());
+            }
+        }
+    }
 
     #[test]
     fn test_subspecs_when_moving_into_degenerate_packed_layout_solver() {

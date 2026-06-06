@@ -504,8 +504,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
     }
 
     fn locate_at_point_int(&self, pt: &[RTreeInt]) -> Option<&T> {
-        RTree::locate_at_point_int(self, &padded_pt::<D>(pt))
-            .map(|rect| &rect.value)
+        RTree::locate_at_point_int(self, &padded_pt::<D>(pt)).map(|rect| &rect.value)
     }
 
     fn locate_all_at_point(&self, pt: &[RTreeInt]) -> Box<dyn Iterator<Item = &T> + '_> {
