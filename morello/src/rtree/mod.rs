@@ -41,7 +41,7 @@ trait RTreeGeneric<T> {
 
     fn envelope(&self) -> Option<(Vec<RTreeInt>, Vec<RTreeInt>)>;
 
-    fn locate_at_point(&self, pt: &[RTreeInt]) -> Option<&T>;
+    fn locate_at_point_int(&self, pt: &[RTreeInt]) -> Option<&T>;
 
     fn locate_all_at_point(&self, pt: &[RTreeInt]) -> Box<dyn Iterator<Item = &T> + '_>;
 
@@ -176,10 +176,10 @@ macro_rules! rtreedyn_cases {
                 }
             }
 
-            pub fn locate_at_point(&self, pt: &[RTreeInt]) -> Option<&T> {
+            pub fn locate_at_point_int(&self, pt: &[RTreeInt]) -> Option<&T> {
                 debug_assert_eq!(pt.len(), self.dim_count());
                 match self {
-                    $( RTreeDyn::$name(t) => RTreeGeneric::locate_at_point(t, pt), )*
+                    $( RTreeDyn::$name(t) => RTreeGeneric::locate_at_point_int(t, pt), )*
                 }
             }
 
@@ -503,8 +503,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         Some((bottom, top))
     }
 
-    fn locate_at_point(&self, pt: &[RTreeInt]) -> Option<&T> {
-        self.locate_at_point(&padded_pt::<D>(pt))
+    fn locate_at_point_int(&self, pt: &[RTreeInt]) -> Option<&T> {
+        RTree::locate_at_point_int(self, &padded_pt::<D>(pt))
             .map(|rect| &rect.value)
     }
 
@@ -1576,7 +1576,7 @@ mod tests {
         assert_eq!(entries[0].0, &[1, 2]);
         assert_eq!(entries[0].1, &[3, 4]);
         assert_eq!(entries[0].2, &7);
-        assert_eq!(tree.locate_at_point(&[2, 3]), Some(&7));
+        assert_eq!(tree.locate_at_point_int(&[2, 3]), Some(&7));
     }
 
     #[test]
@@ -1773,7 +1773,7 @@ mod tests {
 
         let overlap_point = RTreePt::<3> { arr: [3, 2, 3] };
         assert_eq!(
-            tree.locate_at_point(&overlap_point).map(|r| r.value),
+            tree.locate_at_point_int(&overlap_point).map(|r| r.value),
             Some(0)
         );
     }
@@ -1947,8 +1947,8 @@ mod tests {
         let mut tree = RTreeDyn::empty(2);
         tree.insert(&[0, 0], &[1, 1], 1);
         tree.fold_insert(&[2, 2], &[3, 3], 2, false, |a, b| a + b);
-        assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
-        assert_eq!(tree.locate_at_point(&[2, 2]), Some(&2));
+        assert_eq!(tree.locate_at_point_int(&[0, 0]), Some(&1));
+        assert_eq!(tree.locate_at_point_int(&[2, 2]), Some(&2));
     }
 
     #[test]
@@ -1956,9 +1956,9 @@ mod tests {
         let mut tree = RTreeDyn::empty(2);
         tree.insert(&[0, 0], &[2, 2], 1);
         tree.fold_insert(&[1, 1], &[3, 3], 2, false, |a, b| a + b);
-        assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
-        assert_eq!(tree.locate_at_point(&[1, 1]), Some(&3));
-        assert_eq!(tree.locate_at_point(&[3, 3]), Some(&2));
+        assert_eq!(tree.locate_at_point_int(&[0, 0]), Some(&1));
+        assert_eq!(tree.locate_at_point_int(&[1, 1]), Some(&3));
+        assert_eq!(tree.locate_at_point_int(&[3, 3]), Some(&2));
     }
 
     #[test]
@@ -1970,10 +1970,10 @@ mod tests {
             println!("{:?}", entry);
         }
         tree.fold_insert(&[2, 2], &[4, 4], 3, false, |a, b| a + b);
-        assert_eq!(tree.locate_at_point(&[0, 0]), Some(&1));
-        assert_eq!(tree.locate_at_point(&[1, 1]), Some(&3));
-        assert_eq!(tree.locate_at_point(&[2, 2]), Some(&6));
-        assert_eq!(tree.locate_at_point(&[4, 4]), Some(&3));
+        assert_eq!(tree.locate_at_point_int(&[0, 0]), Some(&1));
+        assert_eq!(tree.locate_at_point_int(&[1, 1]), Some(&3));
+        assert_eq!(tree.locate_at_point_int(&[2, 2]), Some(&6));
+        assert_eq!(tree.locate_at_point_int(&[4, 4]), Some(&3));
     }
 
     proptest! {
@@ -2015,7 +2015,7 @@ mod tests {
                 let pt = RTreePt::<3> {
                     arr: pt.try_into().unwrap(),
                 };
-                let tree_value = tree.locate_at_point(&pt).map(|r| r.value);
+                let tree_value = tree.locate_at_point_int(&pt).map(|r| r.value);
                 let mut expected_value = None;
                 for r in rects.iter().rev() {
                     if pt

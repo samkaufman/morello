@@ -102,7 +102,7 @@ where
         self.tables
             .get(table_key)
             .and_then(|page_tables| page_tables.get(&page_point))
-            .is_some_and(|table| table.locate_at_point(&local_point).is_some())
+            .is_some_and(|table| table.locate_at_point_int(&local_point).is_some())
     }
 
     fn table_mut(

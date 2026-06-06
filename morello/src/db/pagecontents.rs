@@ -95,7 +95,7 @@ impl RTreePageContents {
             .collect::<Vec<_>>();
 
         // TODO: Return (and test!) k > 1. (The above point may be in a space without k dim.)
-        let value = self.0.locate_at_point(&arr)?;
+        let value = self.0.locate_at_point_int(&arr)?;
         Some(ActionCostVec(match &value {
             Some((cost_intensity, peaks, depth, action_num)) => {
                 let cost = NormalizedCost {
