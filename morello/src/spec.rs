@@ -2135,10 +2135,10 @@ where
     type DomainIter = Box<dyn Iterator<Item = Self::Domain>>;
 
     fn apply(&self, t: &Self::Domain) -> Self::Codomain {
-        let mut initial = SurMap::apply(&self.logical_spec_surmap, &t.0);
-        initial
-            .1
-            .extend(BiMap::apply(&self.memory_limits_bimap, &t.1));
+        let mut initial = self
+            .logical_spec_surmap
+            .apply_with_additional_point_capacity::<N>(&t.0, Tgt::memories().len());
+        self.memory_limits_bimap.apply_into(&t.1, &mut initial.1);
         initial
     }
 
@@ -2173,6 +2173,104 @@ impl<Tgt, F, A, Aa> LogicalSpecSurMap<Tgt, F, A, Aa> {
     }
 }
 
+impl<Tgt, F, A, Aa> LogicalSpecSurMap<Tgt, F, A, Aa>
+where
+    Tgt: Target,
+    Tgt::Memory: CanonicalBimap,
+    <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Domain = Tgt::Memory, Codomain = u8>,
+    F: Fn(&[DimSize], Dtype) -> A,
+{
+    fn apply_with_additional_point_capacity<const N: usize>(
+        &self,
+        spec: &LogicalSpec<Tgt>,
+        additional_point_capacity: usize,
+    ) -> ((SpecKey, Vec<Aa>), Vec<BimapInt>)
+    where
+        A: SurMap<Domain = TensorSpecAux<Tgt>, Codomain = (Aa, [BimapInt; N])>,
+    {
+        match spec {
+            LogicalSpec::Primitive(basics, auxes, serial_only) => {
+                debug_assert_eq!(auxes.len(), basics.typ.operand_count());
+                debug_assert_eq!(basics.dtypes.len(), auxes.len());
+
+                let mut pt = Vec::with_capacity(
+                    self.primitive_basics_bimap.coordinate_len(basics)
+                        + (auxes.len() * N)
+                        + 1
+                        + additional_point_capacity,
+                );
+                let key = self.primitive_basics_bimap.apply_into(basics, &mut pt);
+                let mut aux_keys = Vec::with_capacity(auxes.len());
+
+                for (param_idx, tensor_aux) in auxes.iter().enumerate() {
+                    let tensor_shape = basics.parameter_shape(param_idx);
+                    let dtype = basics.dtypes[param_idx];
+                    let aux_bimap = (self.aux_surmap_fn)(&tensor_shape, dtype);
+                    let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
+                    pt.extend_from_slice(&aux_pt);
+                    aux_keys.push(aux_key);
+                }
+
+                pt.push(!*serial_only as _);
+                ((key, aux_keys), pt)
+            }
+            LogicalSpec::Compose {
+                components,
+                operand_auxes,
+                serial_only,
+            } => {
+                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.tile_scale);
+                let shape_coordinate_len = components
+                    .iter()
+                    .map(|c| shape_bimap.codomain_len(c.spec_shape.len().try_into().unwrap()))
+                    .sum::<usize>();
+
+                let mut pt = Vec::with_capacity(
+                    shape_coordinate_len
+                        + (operand_auxes.len() * N)
+                        + 1
+                        + additional_point_capacity,
+                );
+
+                let key = SpecKey::Compose {
+                    components: components
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.typ,
+                                c.dtypes.clone(),
+                                c.spec_shape.len().try_into().unwrap(),
+                            )
+                        })
+                        .collect(),
+                };
+
+                for c in components {
+                    let len_before = pt.len();
+                    shape_bimap.apply_into(&c.spec_shape, &mut pt);
+                    debug_assert_eq!(
+                        shape_bimap.codomain_len(c.spec_shape.len().try_into().unwrap()),
+                        pt.len() - len_before
+                    );
+                }
+
+                // TODO: Avoid calling self.parameters(), which is expensive, if possible
+                let mut aux_keys = Vec::with_capacity(operand_auxes.len());
+                for (tensor_aux, parameter) in operand_auxes.iter().zip(spec.parameters()) {
+                    let aux_bimap = (self.aux_surmap_fn)(parameter.shape(), parameter.dtype());
+                    let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
+                    debug_assert_eq!(aux_pt.len(), N);
+                    pt.extend_from_slice(&aux_pt);
+                    aux_keys.push(aux_key);
+                }
+
+                pt.push(!*serial_only as _);
+                ((key, aux_keys), pt)
+            }
+        }
+    }
+}
+
 impl<Tgt, F, A, Aa, const N: usize> SurMap for LogicalSpecSurMap<Tgt, F, A, Aa>
 where
     Tgt: Target,
@@ -2188,70 +2286,7 @@ where
     type DomainIter = Box<dyn Iterator<Item = Self::Domain> + Send>;
 
     fn apply(&self, spec: &LogicalSpec<Tgt>) -> Self::Codomain {
-        match spec {
-            LogicalSpec::Primitive(basics, auxes, serial_only) => {
-                let (key, mut pt) = BiMap::apply(&self.primitive_basics_bimap, basics);
-                let aux_keys = auxes
-                    .iter()
-                    .zip(basics.parameter_shapes())
-                    .zip(&basics.dtypes)
-                    .map(|((tensor_aux, tensor_shape), dtype)| {
-                        let aux_bimap = (self.aux_surmap_fn)(&tensor_shape, *dtype);
-                        let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
-                        pt.extend(aux_pt);
-                        aux_key
-                    })
-                    .collect();
-                pt.push(!*serial_only as _);
-                ((key, aux_keys), pt)
-            }
-            LogicalSpec::Compose {
-                components,
-                operand_auxes,
-                serial_only,
-            } => {
-                let shape_bimap = ShapeBimap(self.primitive_basics_bimap.tile_scale);
-
-                let key = SpecKey::Compose {
-                    components: components
-                        .iter()
-                        .map(|c| {
-                            (
-                                c.typ,
-                                c.dtypes.clone(),
-                                c.spec_shape.len().try_into().unwrap(),
-                            )
-                        })
-                        .collect(),
-                };
-                let mut pt = components
-                    .iter()
-                    .flat_map(|c| {
-                        let mapped_shape = BiMap::apply(&shape_bimap, &c.spec_shape);
-                        debug_assert_eq!(
-                            shape_bimap.codomain_len(c.spec_shape.len().try_into().unwrap()),
-                            mapped_shape.len()
-                        );
-                        mapped_shape
-                    })
-                    .collect::<Vec<_>>();
-                // TODO: Avoid calling self.parameters(), which is expensive, if possible
-                let aux_keys = operand_auxes
-                    .iter()
-                    .zip(spec.parameters())
-                    .map(|(tensor_aux, parameter)| {
-                        let aux_bimap = (self.aux_surmap_fn)(parameter.shape(), parameter.dtype());
-                        let (aux_key, aux_pt) = aux_bimap.apply(tensor_aux);
-                        debug_assert_eq!(aux_pt.len(), N);
-                        pt.extend(aux_pt);
-                        aux_key
-                    })
-                    .collect();
-
-                pt.push(!*serial_only as _);
-                ((key, aux_keys), pt)
-            }
-        }
+        self.apply_with_additional_point_capacity::<N>(spec, 0)
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::DomainIter {
@@ -2398,136 +2433,9 @@ impl BiMap for PrimitiveBasicsBimap {
     type Codomain = (SpecKey, Vec<BimapInt>);
 
     fn apply(&self, basics: &PrimitiveBasics) -> Self::Codomain {
-        let PrimitiveBasics {
-            typ,
-            spec_shape,
-            dtypes,
-        } = basics;
-        let shifted_shape = BiMap::apply(&ShapeBimap(self.tile_scale), spec_shape);
-        match *typ {
-            PrimitiveSpecType::Matmul { accum } => {
-                let v = once(!accum as _).chain(shifted_shape).collect();
-                (
-                    SpecKey::Matmul {
-                        dtypes: dtypes.as_slice().try_into().unwrap(),
-                    },
-                    v,
-                )
-            }
-            PrimitiveSpecType::Conv { accum } => {
-                let v: Vec<_> = once(!accum as _).chain(shifted_shape).collect();
-                (
-                    SpecKey::Conv {
-                        dtypes: dtypes.as_slice().try_into().unwrap(),
-                    },
-                    v,
-                )
-            }
-            PrimitiveSpecType::Broadcast { dim } => (
-                SpecKey::Broadcast {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                shifted_shape,
-            ),
-            PrimitiveSpecType::Softmax { scan_dim } => {
-                assert_eq!(dtypes.len(), 2);
-                (
-                    SpecKey::Softmax {
-                        rank: spec_shape.len().try_into().unwrap(),
-                        scan_dim,
-                        dtypes: dtypes.as_slice().try_into().unwrap(),
-                    },
-                    shifted_shape,
-                )
-            }
-            PrimitiveSpecType::SoftmaxComplete { scan_dim } => (
-                SpecKey::SoftmaxComplete {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    scan_dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                shifted_shape,
-            ),
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim } => (
-                SpecKey::SoftmaxDenominatorAndMax {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    scan_dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                shifted_shape,
-            ),
-            PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim, accum } => (
-                SpecKey::SoftmaxDenominatorAndUnscaled {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    scan_dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                once(!accum as _).chain(shifted_shape).collect(),
-            ),
-            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, accum } => (
-                SpecKey::SoftmaxDenominatorAndUnscaledFromMax {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    scan_dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                once(!accum as _).chain(shifted_shape).collect(),
-            ),
-            PrimitiveSpecType::SoftmaxDenominator { scan_dim, accum } => (
-                SpecKey::SoftmaxDenominator {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    scan_dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                once(!accum as _).chain(shifted_shape).collect(),
-            ),
-            PrimitiveSpecType::Max { dim, accum } => (
-                SpecKey::Max {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                once(!accum as _).chain(shifted_shape).collect(),
-            ),
-            PrimitiveSpecType::OnePrefix => (
-                SpecKey::OnePrefix {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                shifted_shape,
-            ),
-            PrimitiveSpecType::Move => (
-                SpecKey::Move {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                shifted_shape,
-            ),
-            PrimitiveSpecType::Fill { value } => (
-                SpecKey::Fill {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    value,
-                    dtype: dtypes[0],
-                },
-                shifted_shape,
-            ),
-            PrimitiveSpecType::DivideVec => (
-                SpecKey::DivideVec {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                shifted_shape,
-            ),
-            PrimitiveSpecType::DivideVecScalar { scan_dim } => (
-                SpecKey::DivideVecScalar {
-                    rank: spec_shape.len().try_into().unwrap(),
-                    scan_dim,
-                    dtypes: dtypes.as_slice().try_into().unwrap(),
-                },
-                shifted_shape,
-            ),
-        }
+        let mut v = Vec::with_capacity(self.coordinate_len(basics));
+        let key = self.apply_into(basics, &mut v);
+        (key, v)
     }
 
     fn apply_inverse(&self, c: &Self::Codomain) -> Self::Domain {
@@ -2726,34 +2634,169 @@ impl BiMap for PrimitiveBasicsBimap {
     }
 }
 
-impl BiMap for ShapeBimap {
-    type Domain = Shape;
-    type Codomain = Vec<BimapInt>;
+impl PrimitiveBasicsBimap {
+    fn coordinate_len(&self, basics: &PrimitiveBasics) -> usize {
+        (if basics.typ.accum_coordinate().is_some() {
+            1
+        } else {
+            0
+        }) + ShapeBimap(self.tile_scale).codomain_len(basics.spec_shape.len().try_into().unwrap())
+    }
 
-    fn apply(&self, shape: &Self::Domain) -> Self::Codomain {
+    fn apply_into(&self, basics: &PrimitiveBasics, out: &mut Vec<BimapInt>) -> SpecKey {
+        let PrimitiveBasics {
+            typ,
+            spec_shape,
+            dtypes,
+        } = basics;
+
+        if let Some(accum_coordinate) = typ.accum_coordinate() {
+            out.push(accum_coordinate);
+        }
+        ShapeBimap(self.tile_scale).apply_into(spec_shape, out);
+
+        match *typ {
+            PrimitiveSpecType::Matmul { accum: _ } => SpecKey::Matmul {
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::Conv { accum: _ } => SpecKey::Conv {
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::Broadcast { dim } => SpecKey::Broadcast {
+                rank: spec_shape.len().try_into().unwrap(),
+                dim,
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::Softmax { scan_dim } => {
+                assert_eq!(dtypes.len(), 2);
+                SpecKey::Softmax {
+                    rank: spec_shape.len().try_into().unwrap(),
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                }
+            }
+            PrimitiveSpecType::SoftmaxComplete { scan_dim } => SpecKey::SoftmaxComplete {
+                rank: spec_shape.len().try_into().unwrap(),
+                scan_dim,
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim } => {
+                SpecKey::SoftmaxDenominatorAndMax {
+                    rank: spec_shape.len().try_into().unwrap(),
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                }
+            }
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { scan_dim, accum: _ } => {
+                SpecKey::SoftmaxDenominatorAndUnscaled {
+                    rank: spec_shape.len().try_into().unwrap(),
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                }
+            }
+            PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { scan_dim, accum: _ } => {
+                SpecKey::SoftmaxDenominatorAndUnscaledFromMax {
+                    rank: spec_shape.len().try_into().unwrap(),
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                }
+            }
+            PrimitiveSpecType::SoftmaxDenominator { scan_dim, accum: _ } => {
+                SpecKey::SoftmaxDenominator {
+                    rank: spec_shape.len().try_into().unwrap(),
+                    scan_dim,
+                    dtypes: dtypes.as_slice().try_into().unwrap(),
+                }
+            }
+            PrimitiveSpecType::Max { dim, accum: _ } => SpecKey::Max {
+                rank: spec_shape.len().try_into().unwrap(),
+                dim,
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::OnePrefix => SpecKey::OnePrefix {
+                rank: spec_shape.len().try_into().unwrap(),
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::Move => SpecKey::Move {
+                rank: spec_shape.len().try_into().unwrap(),
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::Fill { value } => SpecKey::Fill {
+                rank: spec_shape.len().try_into().unwrap(),
+                value,
+                dtype: dtypes[0],
+            },
+            PrimitiveSpecType::DivideVec => SpecKey::DivideVec {
+                rank: spec_shape.len().try_into().unwrap(),
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+            PrimitiveSpecType::DivideVecScalar { scan_dim } => SpecKey::DivideVecScalar {
+                rank: spec_shape.len().try_into().unwrap(),
+                scan_dim,
+                dtypes: dtypes.as_slice().try_into().unwrap(),
+            },
+        }
+    }
+}
+
+impl PrimitiveSpecType {
+    fn accum_coordinate(&self) -> Option<BimapInt> {
+        match *self {
+            PrimitiveSpecType::Matmul { accum }
+            | PrimitiveSpecType::Conv { accum }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+            | PrimitiveSpecType::Max { accum, .. } => Some(!accum as _),
+            PrimitiveSpecType::OnePrefix
+            | PrimitiveSpecType::Fill { .. }
+            | PrimitiveSpecType::Move
+            | PrimitiveSpecType::Broadcast { .. }
+            | PrimitiveSpecType::DivideVec
+            | PrimitiveSpecType::DivideVecScalar { .. }
+            | PrimitiveSpecType::Softmax { .. }
+            | PrimitiveSpecType::SoftmaxComplete { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => None,
+        }
+    }
+}
+
+impl ShapeBimap {
+    fn apply_into(&self, shape: &Shape, out: &mut Vec<BimapInt>) {
         match self.0 {
-            TileScale::Linear => shape.iter().map(|d| d.get() - 1).collect(),
-            TileScale::PowerOfTwo => shape
-                .iter()
-                .map(|d| {
+            TileScale::Linear => {
+                out.extend(shape.iter().map(|d| d.get() - 1));
+            }
+            TileScale::PowerOfTwo => {
+                out.extend(shape.iter().map(|d| {
                     let d = d.get();
                     if !d.is_power_of_two() {
                         panic!("Given shape {d}, which is not a power of two");
                     }
                     d.ilog2()
-                })
-                .collect(),
-            TileScale::PowerOrThreePower => shape
-                .iter()
-                .flat_map(|d| {
+                }));
+            }
+            TileScale::PowerOrThreePower => {
+                out.extend(shape.iter().flat_map(|d| {
                     let d = d.get();
                     let Some((power, scale)) = encode_power_or_three_power(d) else {
                         panic!("Given shape {d}, which is not 2^x or 3*2^x");
                     };
                     [power, scale]
-                })
-                .collect(),
+                }));
+            }
         }
+    }
+}
+
+impl BiMap for ShapeBimap {
+    type Domain = Shape;
+    type Codomain = Vec<BimapInt>;
+
+    fn apply(&self, shape: &Self::Domain) -> Self::Codomain {
+        let mut result = Vec::with_capacity(self.codomain_len(shape.len().try_into().unwrap()));
+        self.apply_into(shape, &mut result);
+        result
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {

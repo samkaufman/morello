@@ -689,24 +689,30 @@ impl Iterator for MemVecIter<'_> {
 
 impl ExactSizeIterator for MemVecIter<'_> {}
 
-impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
-    type Domain = MemoryLimits;
-    type Codomain = Vec<BimapInt>;
-
-    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+impl<Tgt: Target> MemoryLimitsBimap<Tgt> {
+    pub(crate) fn apply_into(&self, t: &MemoryLimits, out: &mut Vec<BimapInt>) {
         match t {
-            MemoryLimits::Standard(limits_vec) => Tgt::memories()
-                .into_iter()
-                .enumerate()
-                .map(|(i, memory)| {
+            MemoryLimits::Standard(limits_vec) => {
+                out.extend(Tgt::memories().into_iter().enumerate().map(|(i, memory)| {
                     if memory.counts_registers() {
                         BimapInt::try_from(limits_vec.get_unscaled(i)).unwrap()
                     } else {
                         BimapInt::from(limits_vec.get_binary_scaled(i))
                     }
-                })
-                .collect(),
+                }));
+            }
         }
+    }
+}
+
+impl<Tgt: Target> BiMap for MemoryLimitsBimap<Tgt> {
+    type Domain = MemoryLimits;
+    type Codomain = Vec<BimapInt>;
+
+    fn apply(&self, t: &Self::Domain) -> Self::Codomain {
+        let mut result = Vec::with_capacity(Tgt::memories().len());
+        self.apply_into(t, &mut result);
+        result
     }
 
     fn apply_inverse(&self, i: &Self::Codomain) -> Self::Domain {
