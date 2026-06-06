@@ -463,9 +463,15 @@ impl Layout {
     }
 
     pub fn canonicalize(&self, shape: &[DimSize]) -> Result<Layout, LayoutError> {
-        // `canonicalize` logic is equivalent to updating for tiling when the shape doesn't change.
-        // We just make up a contig and ignore the returned contig.
-        self.update_for_tiling(shape, shape)
+        let mut new_layout = self.clone();
+
+        new_layout.validate_shape_for_canonicalize(shape)?;
+        new_layout.contig = new_layout.contig.min(new_layout.contiguous_full());
+        new_layout.contig =
+            new_layout.prune_size_one_logical_dims_with_contig(shape, new_layout.contig);
+        new_layout.merge_consecutive_dimensions();
+        new_layout.drop_unneeded_packings(shape);
+        Ok(new_layout)
     }
 
     pub fn update_for_tiling(
@@ -511,6 +517,50 @@ impl Layout {
             .unwrap())
     }
 
+    fn validate_shape_for_canonicalize(
+        &self,
+        logical_shape: &[DimSize],
+    ) -> Result<(), LayoutError> {
+        let Layout { dims, contig: _ } = self;
+        let mut logical_shape_remaining: SmallVec<[_; 5]> =
+            logical_shape.iter().map(|x| x.get()).collect();
+        let mut tiled_packing: SmallVec<[bool; 5]> = smallvec![false; logical_shape.len()];
+
+        for (dim, phys_dim) in dims.iter().rev() {
+            let remaining_size = &mut logical_shape_remaining[usize::from(*dim)];
+            debug_assert_ne!(
+                *remaining_size, 0,
+                "Dynamic dimension {dim} already seen in {dims:?}"
+            );
+            match phys_dim {
+                PhysDim::OddEven(pack_size) | PhysDim::Packed(pack_size) => {
+                    if *remaining_size < pack_size.get() {
+                        let smaller_remaining_allowed =
+                            matches!(phys_dim, PhysDim::Packed(_)) || *remaining_size == 1;
+                        if !smaller_remaining_allowed || tiled_packing[usize::from(*dim)] {
+                            return Err(LayoutError::InvalidShape(logical_shape.into()));
+                        }
+                        *remaining_size = 1;
+                        tiled_packing[usize::from(*dim)] = true;
+                    } else if *remaining_size % pack_size.get() != 0 {
+                        return Err(LayoutError::InvalidShape(logical_shape.into()));
+                    } else {
+                        *remaining_size /= pack_size.get();
+                    }
+                }
+                PhysDim::Dynamic => {
+                    DimSize::new(*remaining_size).unwrap();
+                    *remaining_size = 0;
+                }
+            }
+        }
+
+        if logical_shape_remaining.iter().any(|&d| d > 1) {
+            return Err(LayoutError::InvalidShape(logical_shape.into()));
+        }
+        Ok(())
+    }
+
     /// Asserts that there are no consecutive packed or OddEven dimensions with the same logical
     /// dimension.
     ///
@@ -541,19 +591,23 @@ impl Layout {
         let first_contig_idx = self.dims.len() - usize::from(self.contig);
 
         let mut new_contig = self.contig;
-        let mut new_dims = Vec::with_capacity(self.dims.len());
-        new_dims.push(self.dims[0]);
+        let mut write_idx = 1;
 
-        for (idx, (dim, phys_dim)) in self.dims.iter().enumerate().skip(1) {
-            let (last_dim, last_phys_dim): &mut (u8, PhysDim) = new_dims.last_mut().unwrap();
+        for idx in 1..self.dims.len() {
+            let (dim, phys_dim) = self.dims[idx];
+            let last_idx = write_idx - 1;
+            let (last_dim, last_phys_dim) = self.dims[last_idx];
             if dim != last_dim {
-                new_dims.push((*dim, *phys_dim));
+                if write_idx != idx {
+                    self.dims[write_idx] = (dim, phys_dim);
+                }
+                write_idx += 1;
                 continue;
             }
 
             match (last_phys_dim, phys_dim) {
                 (PhysDim::Packed(l), PhysDim::Packed(n)) => {
-                    *l = l.checked_mul(*n).unwrap();
+                    self.dims[last_idx].1 = PhysDim::Packed(l.checked_mul(n).unwrap());
                     if idx >= first_contig_idx {
                         new_contig -= 1;
                     }
@@ -567,7 +621,10 @@ impl Layout {
                 | (PhysDim::Packed(_), PhysDim::OddEven(_))
                 | (PhysDim::OddEven(_), PhysDim::Dynamic)
                 | (PhysDim::OddEven(_), PhysDim::Packed(_)) => {
-                    new_dims.push((*dim, *phys_dim));
+                    if write_idx != idx {
+                        self.dims[write_idx] = (dim, phys_dim);
+                    }
+                    write_idx += 1;
                 }
                 (PhysDim::OddEven(_), PhysDim::OddEven(_)) => todo!(),
                 (PhysDim::Packed(_), PhysDim::Dynamic) => {
@@ -579,7 +636,7 @@ impl Layout {
             }
         }
 
-        self.dims = new_dims;
+        self.dims.truncate(write_idx);
         self.contig = new_contig;
     }
 
@@ -598,7 +655,7 @@ impl Layout {
         // outer OddEven, even if the volume is covered.
         let outer_oe_exists = {
             let mut outer_oddeven_for_ld: SmallVec<[bool; 5]> = smallvec![false; tile_shape.len()];
-            let mut buf: Vec<bool> = Vec::with_capacity(dims.len());
+            let mut buf: SmallVec<[bool; 8]> = SmallVec::with_capacity(dims.len());
             for (ld, pd) in dims.iter().copied() {
                 let ld_us = usize::from(ld);
                 buf.push(outer_oddeven_for_ld[ld_us]);
@@ -650,27 +707,32 @@ impl Layout {
         // Rebuild dims while counting drops in the contiguous suffix and collapsing
         // adjacent Dynamics.
         let mut drops_in_contig: usize = 0;
-        let mut merged: Vec<(u8, PhysDim)> = Vec::with_capacity(dims.len());
-        for (idx, (ld, pd)) in dims.iter().copied().enumerate() {
+        let mut write_idx = 0;
+        for idx in 0..dims.len() {
+            let (ld, pd) = dims[idx];
             let logical_dim_us = usize::from(ld);
-            let should_skip = match (logical_dims_noneified[logical_dim_us], merged.last(), pd) {
+            let previous_kept = (write_idx > 0).then(|| dims[write_idx - 1]);
+            let should_skip = match (logical_dims_noneified[logical_dim_us], previous_kept, pd) {
                 (Some(nidx), _, _) if idx < nidx => true,
-                (_, Some(&(l, PhysDim::Dynamic)), PhysDim::Dynamic) if l == ld => true,
+                (_, Some((l, PhysDim::Dynamic)), PhysDim::Dynamic) if l == ld => true,
                 _ => false,
             };
             if !should_skip {
-                merged.push((ld, pd));
+                if write_idx != idx {
+                    dims[write_idx] = (ld, pd);
+                }
+                write_idx += 1;
             } else if idx >= first_contig_idx {
                 drops_in_contig += 1;
             }
         }
-        *dims = merged;
+        dims.truncate(write_idx);
 
         // Update contiguousness: subtract each dropped dimension that was previously counted as
         // contiguous (i.e., within the contiguous suffix). Clamp to the new number of dims.
         self.contig = usize::from(contig)
             .saturating_sub(drops_in_contig)
-            .min(dims.len())
+            .min(write_idx)
             .try_into()
             .unwrap();
     }

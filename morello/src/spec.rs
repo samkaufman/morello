@@ -1383,10 +1383,20 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         )
     }
 
+    // TODO: Rename to parameter_directions
     pub fn operand_directions(&self) -> Vec<OperandDirection> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_directions().into(),
             LogicalSpec::Compose { components, .. } => compose_parameter_directions(components),
+        }
+    }
+
+    pub fn parameter_direction(&self, index: usize) -> OperandDirection {
+        match self {
+            LogicalSpec::Primitive(basics, _, _) => basics.typ.operand_directions()[index],
+            LogicalSpec::Compose { components, .. } => {
+                compose_parameter_direction(components, index)
+            }
         }
     }
 
@@ -3127,6 +3137,54 @@ fn compose_parameter_directions(components: &[PrimitiveBasics]) -> Vec<OperandDi
     result
 }
 
+fn compose_parameter_direction(
+    components: &[PrimitiveBasics],
+    mut index: usize,
+) -> OperandDirection {
+    debug_assert!(components.len() >= 2);
+
+    macro_rules! try_parameter {
+        ($component:expr, $parameter_idx:expr) => {{
+            let component = $component;
+            let parameter_idx = $parameter_idx;
+            if index == 0 {
+                return component.typ.operand_directions()[parameter_idx];
+            }
+            index -= 1;
+        }};
+    }
+
+    let c0_output_idx = components[0].typ.unique_output_index().unwrap();
+    for parameter_idx in 1..components[0].typ.operand_count() {
+        if parameter_idx != c0_output_idx {
+            try_parameter!(&components[0], parameter_idx);
+        }
+    }
+
+    for component in components.iter().take(components.len() - 1).skip(1) {
+        let output_idx = component.typ.unique_output_index().unwrap();
+        for parameter_idx in 1..component.typ.operand_count() {
+            if parameter_idx != output_idx {
+                try_parameter!(component, parameter_idx);
+            }
+        }
+    }
+
+    let last_component = components.last().unwrap();
+    let last_output_idx = last_component.typ.unique_output_index().unwrap();
+    for parameter_idx in 0..last_component.typ.operand_count() {
+        if parameter_idx != last_output_idx {
+            try_parameter!(last_component, parameter_idx);
+        }
+    }
+
+    if index == 0 {
+        components[0].typ.operand_directions()[c0_output_idx]
+    } else {
+        panic!("Compose has too few parameters")
+    }
+}
+
 fn compose_parameter_visit(components: &[PrimitiveBasics], mut visitor: impl FnMut(usize, usize)) {
     debug_assert!(components.len() >= 2);
 
@@ -4122,6 +4180,15 @@ mod tests {
             let parameters = spec.parameters();
             let individual_parameters = (0..parameters.len()).map(|i| spec.parameter(i)).collect::<Vec<_>>();
             prop_assert_eq!(parameters, individual_parameters);
+        }
+
+        #[test]
+        fn test_parameter_direction_matches_operand_directions(spec in any::<LogicalSpec<Avx2Target>>()) {
+            let operand_directions = spec.operand_directions();
+            let individual_directions = (0..operand_directions.len())
+                .map(|i| spec.parameter_direction(i))
+                .collect::<Vec<_>>();
+            prop_assert_eq!(operand_directions, individual_directions);
         }
 
         #[test]

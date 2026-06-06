@@ -32,6 +32,20 @@ struct AllocPlan<'a, Tgt: Target> {
     is_cache_miss: bool,
 }
 
+struct SolverAllocPlan<Tgt: Target> {
+    outer_moved_operand_spec: TensorSpec<Tgt>,
+    new_spec: TensorSpec<Tgt>,
+    prologue_spec: Option<Spec<Tgt>>,
+    epilogue_spec: Option<Spec<Tgt>>,
+    new_body_spec: Spec<Tgt>,
+}
+
+struct AllocPlanShared<Tgt: Target> {
+    new_spec: TensorSpec<Tgt>,
+    lower_limits: MemoryLimits,
+    is_cache_miss: bool,
+}
+
 impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
@@ -102,17 +116,15 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
     }
 
     fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
-        let operands = spec.0.parameters();
-        let plan = plan_alloc(
+        let plan = plan_alloc_for_solver(
             spec,
-            &operands,
             self.source_idx,
             self.destination_dtype,
             self.destination_level,
             &self.destination_layout,
             self.destination_vector_size,
         )?;
-        let base_main_cost = move_cost(plan.outer_moved_operand_spec) + move_cost(&plan.new_spec);
+        let base_main_cost = move_cost(&plan.outer_moved_operand_spec) + move_cost(&plan.new_spec);
         let allocation = alloc_memory_allocation(&plan.new_spec);
         Ok(MoveActionSolver {
             prologue: plan.prologue_spec,
@@ -136,6 +148,145 @@ fn plan_alloc<'a, Tgt: Target>(
 ) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
+    let AllocPlanShared {
+        new_spec,
+        lower_limits,
+        is_cache_miss,
+    } = plan_alloc_shared(
+        spec,
+        outer_moved_operand_spec,
+        destination_dtype,
+        destination_level,
+        destination_layout,
+        destination_vector_size,
+    )?;
+
+    let prologue_spec = make_logue(
+        false,
+        move_gens_prologue(source_idx, &spec.0, is_cache_miss),
+        outer_moved_operand_spec,
+        &new_spec,
+        &lower_limits,
+        spec.0.serial_only(),
+    );
+    let epilogue_spec = make_logue(
+        true,
+        move_gens_epilogue(source_idx, &spec.0, is_cache_miss),
+        outer_moved_operand_spec,
+        &new_spec,
+        &lower_limits,
+        spec.0.serial_only(),
+    );
+
+    let mut new_operands = operands.to_vec();
+    new_operands[usize::from(source_idx)] = new_spec.clone();
+    let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
+    new_body_spec.0.replace_io(&new_operands);
+    new_body_spec.canonicalize().unwrap();
+
+    Ok(AllocPlan {
+        outer_moved_operand_spec,
+        new_spec,
+        prologue_spec,
+        epilogue_spec,
+        new_body_spec,
+        new_operands,
+        is_cache_miss,
+    })
+}
+
+/// Lightweight variant of [plan_alloc].
+///
+/// The full [plan_alloc] path must keep a replacement operand vector to build child views for the
+/// final [Alloc]. The solver only needs prologue/body/epilogue sub-Specs and costs.
+fn plan_alloc_for_solver<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    source_idx: u8,
+    destination_dtype: Dtype,
+    destination_level: Tgt::Memory,
+    destination_layout: &Layout,
+    destination_vector_size: Option<DimSize>,
+) -> Result<SolverAllocPlan<Tgt>, ApplyError> {
+    if !matches!(spec.0, LogicalSpec::Primitive(..)) {
+        // Compose replacement currently relies on LogicalSpec::replace_io to propagate shapes,
+        // dtypes, and auxes through each component. Keep that less common path on the full planner
+        // until it has a specialized updater like the primitive fast path below.
+        let operands = spec.0.parameters();
+        let plan = plan_alloc(
+            spec,
+            &operands,
+            source_idx,
+            destination_dtype,
+            destination_level,
+            destination_layout,
+            destination_vector_size,
+        )?;
+        return Ok(SolverAllocPlan {
+            outer_moved_operand_spec: plan.outer_moved_operand_spec.clone(),
+            new_spec: plan.new_spec,
+            prologue_spec: plan.prologue_spec,
+            epilogue_spec: plan.epilogue_spec,
+            new_body_spec: plan.new_body_spec,
+        });
+    }
+
+    let outer_moved_operand_spec = spec.0.parameter(usize::from(source_idx));
+    let AllocPlanShared {
+        new_spec,
+        lower_limits,
+        is_cache_miss,
+    } = plan_alloc_shared(
+        spec,
+        &outer_moved_operand_spec,
+        destination_dtype,
+        destination_level,
+        destination_layout,
+        destination_vector_size,
+    )?;
+
+    let prologue_spec = make_logue(
+        false,
+        move_gens_prologue(source_idx, &spec.0, is_cache_miss),
+        &outer_moved_operand_spec,
+        &new_spec,
+        &lower_limits,
+        spec.0.serial_only(),
+    );
+    let epilogue_spec = make_logue(
+        true,
+        move_gens_epilogue(source_idx, &spec.0, is_cache_miss),
+        &outer_moved_operand_spec,
+        &new_spec,
+        &lower_limits,
+        spec.0.serial_only(),
+    );
+
+    let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
+    let LogicalSpec::Primitive(basics, auxes, _) = &mut new_body_spec.0 else {
+        unreachable!();
+    };
+    let source_idx = usize::from(source_idx);
+    basics.dtypes[source_idx] = new_spec.dtype();
+    auxes[source_idx] = new_spec.aux.clone();
+    new_body_spec.canonicalize().unwrap();
+
+    Ok(SolverAllocPlan {
+        outer_moved_operand_spec,
+        new_spec,
+        prologue_spec,
+        epilogue_spec,
+        new_body_spec,
+    })
+}
+
+fn plan_alloc_shared<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    outer_moved_operand_spec: &TensorSpec<Tgt>,
+    destination_dtype: Dtype,
+    destination_level: Tgt::Memory,
+    destination_layout: &Layout,
+    destination_vector_size: Option<DimSize>,
+) -> Result<AllocPlanShared<Tgt>, ApplyError> {
     let (destination_layout_canonicalized, is_cache_miss) = if !destination_level.has_layout() {
         let empty_layout = Layout::empty();
         let is_cache_miss = move_is_cache_miss(
@@ -146,24 +297,27 @@ fn plan_alloc<'a, Tgt: Target>(
         );
         (empty_layout, is_cache_miss)
     } else {
-        let mut layout_canon = destination_layout
-            .canonicalize(outer_moved_operand_spec.shape())
-            .unwrap();
-        let is_cache_miss = move_is_cache_miss(
-            outer_moved_operand_spec,
-            destination_dtype,
-            &destination_level,
-            &layout_canon,
-        );
-        if !is_cache_miss {
-            layout_canon.set_contiguous_full();
-            // Canonicalize again in case setting contiguous affected anything.
-            // TODO: Don't call canonicalize twice.
-            layout_canon = layout_canon
+        let cache_miss_possible = !destination_level.is_addressed()
+            && destination_dtype == outer_moved_operand_spec.dtype();
+        if cache_miss_possible {
+            let mut layout_canon = destination_layout
                 .canonicalize(outer_moved_operand_spec.shape())
                 .unwrap();
+            let is_cache_miss = move_is_cache_miss(
+                outer_moved_operand_spec,
+                destination_dtype,
+                &destination_level,
+                &layout_canon,
+            );
+            if !is_cache_miss {
+                layout_canon.set_contiguous_full();
+            }
+            (layout_canon, is_cache_miss)
+        } else {
+            let mut layout = destination_layout.clone();
+            layout.set_contiguous_full();
+            (layout, false)
         }
-        (layout_canon, is_cache_miss)
     };
     let mut new_spec = TensorSpec::<Tgt>::new_noncanon(
         outer_moved_operand_spec.shape().into(),
@@ -226,50 +380,44 @@ fn plan_alloc<'a, Tgt: Target>(
         }
     };
 
-    // Closure which makes a prologue or epilogue sub-Spec.
-    let make_logue = |flip, f: &dyn Fn(_, _, _) -> bool| {
-        if f(source_idx, &spec.0, is_cache_miss) {
-            let mut left_spec = outer_moved_operand_spec;
-            let mut right_spec = &new_spec;
-            if flip {
-                mem::swap(&mut left_spec, &mut right_spec);
-            }
-            let mut logue_spec = Spec(
-                LogicalSpec::Primitive(
-                    PrimitiveBasics {
-                        typ: PrimitiveSpecType::Move,
-                        spec_shape: left_spec.shape().into(),
-                        dtypes: vec![left_spec.dtype(), right_spec.dtype()],
-                    },
-                    vec![left_spec.aux.clone(), right_spec.aux.clone()],
-                    spec.0.serial_only(),
-                ),
-                lower_limits.clone(),
-            );
-            logue_spec.canonicalize().unwrap();
-            Some(logue_spec)
-        } else {
-            None
-        }
-    };
-    let prologue_spec = make_logue(false, &move_gens_prologue);
-    let epilogue_spec = make_logue(true, &move_gens_epilogue);
-
-    let mut new_operands = operands.to_vec();
-    new_operands[usize::from(source_idx)] = new_spec.clone();
-    let mut new_body_spec = Spec(spec.0.clone(), lower_limits);
-    new_body_spec.0.replace_io(&new_operands);
-    new_body_spec.canonicalize().unwrap();
-
-    Ok(AllocPlan {
-        outer_moved_operand_spec,
+    Ok(AllocPlanShared {
         new_spec,
-        prologue_spec,
-        epilogue_spec,
-        new_body_spec,
-        new_operands,
+        lower_limits,
         is_cache_miss,
     })
+}
+
+fn make_logue<Tgt: Target>(
+    flip: bool,
+    should_generate: bool,
+    outer_moved_operand_spec: &TensorSpec<Tgt>,
+    new_spec: &TensorSpec<Tgt>,
+    lower_limits: &MemoryLimits,
+    serial_only: bool,
+) -> Option<Spec<Tgt>> {
+    if !should_generate {
+        return None;
+    }
+
+    let mut left_spec = outer_moved_operand_spec;
+    let mut right_spec = new_spec;
+    if flip {
+        mem::swap(&mut left_spec, &mut right_spec);
+    }
+    let mut logue_spec = Spec(
+        LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Move,
+                spec_shape: left_spec.shape().into(),
+                dtypes: vec![left_spec.dtype(), right_spec.dtype()],
+            },
+            vec![left_spec.aux.clone(), right_spec.aux.clone()],
+            serial_only,
+        ),
+        lower_limits.clone(),
+    );
+    logue_spec.canonicalize().unwrap();
+    Some(logue_spec)
 }
 
 fn move_gens_prologue<Tgt: Target>(
@@ -277,12 +425,13 @@ fn move_gens_prologue<Tgt: Target>(
     logical_spec: &LogicalSpec<Tgt>,
     is_cache_miss: bool,
 ) -> bool {
-    // TODO: Don't allocate whole operand_directions
-    let is_read = match logical_spec.operand_directions()[usize::from(source_idx)] {
+    if is_cache_miss {
+        return false;
+    }
+    match logical_spec.parameter_direction(usize::from(source_idx)) {
         OperandDirection::In | OperandDirection::InOut => true,
         OperandDirection::Out => false,
-    };
-    is_read && !is_cache_miss
+    }
 }
 
 fn move_gens_epilogue<Tgt: Target>(
@@ -290,9 +439,11 @@ fn move_gens_epilogue<Tgt: Target>(
     logical_spec: &LogicalSpec<Tgt>,
     is_cache_miss: bool,
 ) -> bool {
+    if is_cache_miss {
+        return false;
+    }
     let source_idx_usize = usize::from(source_idx);
-    let is_output = logical_spec.parameter_is_output(source_idx_usize);
-    is_output && !is_cache_miss
+    logical_spec.parameter_is_output(source_idx_usize)
 }
 
 /// Returns `true` if the move is a simple cache miss.
