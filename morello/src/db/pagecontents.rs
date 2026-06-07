@@ -58,6 +58,18 @@ impl PageContents {
             PageContents::RTree(b) => b.fill_region(k, dim_ranges, value),
         }
     }
+
+    #[cfg(feature = "db-inspection")]
+    pub(super) fn iter_rectangles(&self) -> Box<dyn Iterator<Item = (Vec<i64>, Vec<i64>)> + '_> {
+        match self {
+            PageContents::RTree(contents) => Box::new(contents.0.iter().map(|(bottom, top, _)| {
+                (
+                    bottom.iter().map(|&coord| i64::from(coord)).collect(),
+                    top.iter().map(|&coord| i64::from(coord)).collect(),
+                )
+            })),
+        }
+    }
 }
 
 impl RTreePageContents {

@@ -1443,6 +1443,18 @@ fn read_any_format(file: fs::File) -> Result<Page, ReadAnyFormatError> {
     })
 }
 
+/// Read rectangle bounds from one serialized database page file.
+///
+/// This function is experiment-facing and not a stable API.
+#[cfg(feature = "db-inspection")]
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn read_page_rectangles(file: fs::File) -> Result<Vec<(Vec<i64>, Vec<i64>)>, String> {
+    read_any_format(file)
+        .map(|page| page.contents.iter_rectangles().collect())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(feature = "db-stats")]
 fn analyze_visit_dir(
     root: &path::Path,
