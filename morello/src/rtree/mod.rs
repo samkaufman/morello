@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::mem::swap;
+use std::ops::ControlFlow;
 
 mod aabb;
 
@@ -629,7 +630,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         // TODO: Implement without requiring a separate locate_ traversal.
         if disallow_overlap {
             let new_envelope = new_rect.envelope();
-            for candidate in self.locate_in_envelope_intersecting(&new_envelope) {
+            let _ = self.locate_in_envelope_intersecting_int(&new_envelope, |candidate| {
                 if candidate.value != new_rect.value
                     && candidate.envelope().intersects(&new_envelope)
                 {
@@ -637,7 +638,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                         "New rectangle overlaps with existing rectangle that has a different value"
                     );
                 }
-            }
+                ControlFlow::<()>::Continue(())
+            });
         }
 
         // Find the first rectangle which matches except for one dimension which is larger or
@@ -656,7 +658,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                 to_insert.top.arr.map(|t| t.saturating_add(1)).into(),
             );
             let insert_envelope = to_insert.envelope();
-            for candidate in self.locate_in_envelope_intersecting(&candidate_area) {
+            let _ = self.locate_in_envelope_intersecting_int(&candidate_area, |candidate| {
                 let value_matches = candidate.value == to_insert.value;
 
                 // When the inserted rect has matching value and would be fully contained (or is identical),
@@ -667,7 +669,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     // Assert the MainCost, but not the later tuple elements, are unchanged.
                     should_repeat = false;
                     skip_insert = true;
-                    break;
+                    return ControlFlow::Break(());
                 }
 
                 // If the candidate is contained by the to-be-inserted rectangle and has a matching
@@ -677,7 +679,7 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     to_remove.queue_removal(candidate.clone());
                     // Assert the MainCost, but not the later tuple elements, are unchanged.
                     // TODO: Remove the following assert and lift short-circuit.
-                    continue;
+                    return ControlFlow::Continue(());
                 }
 
                 // If a candidate extrudes the to-be-inserted rect. in exactly one dimension and the
@@ -710,13 +712,14 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     // scan with an updated to_insert.
                     // TODO: Starting over for every adjacent/mergeble rect has bad asymptotics!
                     to_remove.queue_removal(candidate.clone());
-                    break;
+                    return ControlFlow::Break(());
                 }
 
                 if value_matches && candidate_envelope.intersects(&insert_envelope) {
                     needs_overlap_subtraction = true;
                 }
-            }
+                ControlFlow::Continue(())
+            });
 
             let expected_removals = to_remove.to_remove.len();
             if expected_removals != 0 {
