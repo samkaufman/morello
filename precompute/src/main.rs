@@ -61,7 +61,7 @@ const DOWNSCALE: bool = false;
 struct Args {
     #[arg(long)]
     db: Option<path::PathBuf>,
-    #[arg(long, default_value = "2000", help = "Cache size in database pages.")]
+    #[arg(long, default_value = "20000", help = "Cache size in database pages.")]
     cache_size: usize,
     /// Target architecture
     #[arg(long, value_enum, hide_default_value = true, default_value_t = TargetId::default())]
