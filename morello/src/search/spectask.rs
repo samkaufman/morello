@@ -35,7 +35,6 @@ enum SpecTaskState<Tgt: Target> {
 enum WorkingPartialImpl<Tgt: Target> {
     Constructing {
         solver: ActionSolver<Tgt>,
-        subspecs: Vec<Spec<Tgt>>,
         subspec_costs: Vec<Option<Cost>>, // empty = unsat; all Some = ready-to-complete
         producing_action_num: ActionNum,
     },
@@ -60,20 +59,16 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let mut partial_impls = Vec::new();
         let mut partial_impls_incomplete = 0;
 
-        let all_actions = Tgt::actions(&goal.0).collect::<Vec<_>>();
-
-        for (action_num, action) in all_actions.iter().enumerate() {
+        for (action_num, action) in Tgt::actions(&goal.0).enumerate() {
             match action.top_down_solver(&goal) {
                 Ok(solver) => {
-                    let partial_impl_subspecs = solver.subspecs().collect::<Vec<_>>();
-
-                    let subspec_count = partial_impl_subspecs.len();
+                    let subspec_count = solver.subspec_count();
                     max_children = max_children.max(subspec_count);
 
                     // If the resulting Impl is already complete, update the reducer. If there
                     // are nested sub-Specs, then store the partial Impl for resolution by the
                     // caller.
-                    if partial_impl_subspecs.is_empty() {
+                    if subspec_count == 0 {
                         reducer.insert(
                             u16::try_from(action_num).unwrap(),
                             solver.compute_cost(iter::empty()),
@@ -81,7 +76,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
                     } else {
                         partial_impls.push(WorkingPartialImpl::Constructing {
                             solver,
-                            subspecs: partial_impl_subspecs,
                             subspec_costs: vec![None; subspec_count],
                             producing_action_num: action_num.try_into().unwrap(),
                         });
@@ -150,11 +144,11 @@ impl<Tgt: Target> SpecTask<Tgt> {
 
         // TODO: Assert/test that we return unique Specs
         Some(partial_impls.iter().enumerate().filter_map(move |(i, p)| {
-            let WorkingPartialImpl::Constructing { subspecs, .. } = p else {
+            let WorkingPartialImpl::Constructing { solver, .. } = p else {
                 return None;
             };
-            subspecs
-                .get(subspec_idx)
+            solver
+                .subspec_at(subspec_idx)
                 .map(|s| (s.clone(), (i, subspec_idx)))
         }))
     }
@@ -190,7 +184,6 @@ impl<Tgt: Target> SpecTask<Tgt> {
         match entry {
             WorkingPartialImpl::Constructing {
                 solver,
-                subspecs: _,
                 subspec_costs,
                 producing_action_num,
             } => {

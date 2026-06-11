@@ -187,6 +187,74 @@ pub enum NotApplicableReason {
 }
 
 impl<Tgt: Target> ActionSolver<Tgt> {
+    pub(crate) fn subspec_count(&self) -> usize {
+        match self {
+            ActionSolver::PrimitiveTileOut(solver) => solver.body_specs.len(),
+            ActionSolver::Move(move_solver) => {
+                usize::from(move_solver.prologue.is_some())
+                    + 1
+                    + usize::from(move_solver.epilogue.is_some())
+            }
+            ActionSolver::Fallback(partial_impl) => {
+                fn count_nested_specs<Tgt: Target>(imp: &ImplNode<Tgt>) -> usize {
+                    match imp {
+                        ImplNode::SpecApp(_) => 1,
+                        _ => imp.children().iter().map(count_nested_specs).sum(),
+                    }
+                }
+
+                count_nested_specs(partial_impl)
+            }
+        }
+    }
+
+    pub(crate) fn subspec_at(&self, index: usize) -> Option<&Spec<Tgt>> {
+        match self {
+            ActionSolver::PrimitiveTileOut(solver) => solver.body_specs.get(index),
+            ActionSolver::Move(move_solver) => {
+                let mut index = index;
+
+                if let Some(prologue) = &move_solver.prologue {
+                    if index == 0 {
+                        return Some(prologue);
+                    }
+                    index -= 1;
+                }
+
+                if index == 0 {
+                    return Some(&move_solver.body);
+                }
+                index -= 1;
+
+                move_solver.epilogue.as_ref().filter(|_| index == 0)
+            }
+            ActionSolver::Fallback(partial_impl) => {
+                fn nested_spec_at<'a, Tgt: Target>(
+                    imp: &'a ImplNode<Tgt>,
+                    index: &mut usize,
+                ) -> Option<&'a Spec<Tgt>> {
+                    match imp {
+                        ImplNode::SpecApp(spec_app) => {
+                            if *index == 0 {
+                                Some(&spec_app.0)
+                            } else {
+                                *index -= 1;
+                                None
+                            }
+                        }
+                        _ => imp
+                            .children()
+                            .iter()
+                            .find_map(|child| nested_spec_at(child, index)),
+                    }
+                }
+
+                let mut index = index;
+                nested_spec_at(partial_impl, &mut index)
+            }
+        }
+    }
+
     pub fn subspecs(&self) -> impl Iterator<Item = Spec<Tgt>> {
         match self {
             ActionSolver::PrimitiveTileOut(solver) => {
@@ -687,6 +755,12 @@ mod tests {
                 match (action.top_down_solver(&spec), action.apply(&spec)) {
                     (Ok(solver), Ok(applied)) => {
                         let subspecs = solver.subspecs().collect::<Vec<_>>();
+                        prop_assert_eq!(solver.subspec_count(), subspecs.len());
+                        for (idx, subspec) in subspecs.iter().enumerate() {
+                            prop_assert_eq!(solver.subspec_at(idx), Some(subspec));
+                        }
+                        prop_assert!(solver.subspec_at(subspecs.len()).is_none());
+
                         let mut applied_subspecs = Vec::new();
                         collect_nested_specs(&applied, &mut applied_subspecs);
                         prop_assert_eq!(&subspecs, &applied_subspecs);
