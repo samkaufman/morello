@@ -1614,7 +1614,7 @@ dependencies = [
 [[package]]
 name = "rstar"
 version = "0.12.1"
-source = "git+https://github.com/samkaufman/rstar.git?branch=low-precision-scalars#22915446e5bfd84b3e80e07c39c851f82af8fb4b"
+source = "git+https://github.com/samkaufman/rstar.git?branch=backtracking-drain#2d4fec77472040b5ab0eb096124cb98ed82c5459"
 dependencies = [
  "heapless",
  "num-traits",
