@@ -22,13 +22,17 @@ use atomic_write_file::AtomicWriteFile;
 use itertools::Itertools;
 use parking_lot::{Mutex, MutexGuard};
 use prehash::{new_prehashed_set, DefaultPrehasher, Prehashed, PrehashedSet, Prehasher};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, DeserializeOwned, MapAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use wtinylfu::WTinyLfuCache;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{self, Debug};
 use std::fs;
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Range, RangeInclusive};
 use std::path::{self, Path};
@@ -46,6 +50,7 @@ type TableKey = (SpecKey, Vec<()>);
 type PageKey = DbKey;
 type SpatialQueryPageResult = (Vec<BimapSInt>, Vec<BimapSInt>, Option<NormalizedCost>);
 type DbValue = Option<(CostIntensity, MemVec, u8, ActionNum)>;
+type NonSpatialEntries = HashMap<NonSpatialKey, RTreePageContents>;
 pub type ActionNum = u16;
 
 #[cfg(test)]
@@ -59,7 +64,8 @@ const THREAD_SHARDS: usize = 2;
 const CHANNEL_SIZE: usize = 2;
 /// Compress pages when writing to disk.
 const COMPRESS_PAGES: bool = true;
-const NONSPATIAL_CACHE_FILE: &str = "NONSPATIAL_CACHE";
+const LEGACY_NONSPATIAL_CACHE_FILE: &str = "NONSPATIAL_CACHE";
+const SEMISPATIAL_CACHE_FILE: &str = "SEMISPATIAL_CACHE";
 const DEFAULT_PROACTIVE_SAVE_INTERVAL: Duration = Duration::from_secs(600);
 const BACKGROUND_SAVE_SHARDS_PER_PUT: usize = THREAD_SHARDS;
 const BACKGROUND_SAVE_PAGES_PER_SHARD: usize = CHANNEL_SIZE;
@@ -109,11 +115,16 @@ struct Page {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct NonSpatialKey {
+    logical_spec: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct LegacyNonSpatialKey {
     spec: Vec<u8>,
 }
 
 struct NonSpatialCache {
-    entries: HashMap<NonSpatialKey, ActionCostVec>,
+    entries: NonSpatialEntries,
     modified: bool,
     last_save: Option<Instant>,
 }
@@ -140,7 +151,7 @@ struct AnalyzeWriters {
 enum ShardThreadMsg {
     Get(Prehashed<PageKey>),
     Put(PageKey, PageContents),
-    PutNonSpatial(path::PathBuf, HashMap<NonSpatialKey, ActionCostVec>),
+    PutNonSpatial(path::PathBuf, NonSpatialEntries),
     Flush(mpsc::Sender<()>),
     Exit,
 }
@@ -185,6 +196,156 @@ struct ReadAnyFormatError {
     plain_error: bincode::Error,
 }
 
+fn read_semispatial_cache(root: &Path) -> Option<NonSpatialEntries> {
+    let semispatial_path = semispatial_cache_file_path(root);
+    if semispatial_path.exists() {
+        return Some(read_cache_file(&semispatial_path).unwrap_or_else(|e| {
+            panic!(
+                "Failed to read semispatial cache at {}: {e}",
+                semispatial_path.display()
+            )
+        }));
+    }
+    None
+}
+
+// TODO: Remove this after everything is migrated
+fn read_or_migrate_semispatial_cache<Tgt>(root: &Path, k: u8) -> Option<NonSpatialEntries>
+where
+    Tgt: Target,
+{
+    let semispatial_path = semispatial_cache_file_path(root);
+    if let Some(cache) = read_semispatial_cache(root) {
+        return Some(cache);
+    }
+
+    let legacy_path = legacy_nonspatial_cache_file_path(root);
+    if !legacy_path.exists() {
+        return None;
+    }
+
+    if k != 1 {
+        panic!("non-spatial cache migration currently supports only k=1");
+    }
+
+    let migrated = read_migrated_legacy_nonspatial_cache_for_target::<Tgt>(&legacy_path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to migrate legacy non-spatial cache at {}: {e}",
+                legacy_path.display()
+            )
+        });
+    write_semispatial_cache_atomic(&semispatial_path, &migrated);
+    Some(migrated)
+}
+
+struct MigratedLegacyNonSpatialCache<Tgt>
+where
+    Tgt: Target,
+{
+    entries: NonSpatialEntries,
+    _target: PhantomData<Tgt>,
+}
+
+impl<'de, Tgt> Deserialize<'de> for MigratedLegacyNonSpatialCache<Tgt>
+where
+    Tgt: Target,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(MigratedLegacyNonSpatialCacheVisitor::<Tgt> {
+            target: PhantomData,
+        })
+    }
+}
+
+struct MigratedLegacyNonSpatialCacheVisitor<Tgt>
+where
+    Tgt: Target,
+{
+    target: PhantomData<Tgt>,
+}
+
+impl<'de, Tgt> Visitor<'de> for MigratedLegacyNonSpatialCacheVisitor<Tgt>
+where
+    Tgt: Target,
+{
+    type Value = MigratedLegacyNonSpatialCache<Tgt>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a legacy non-spatial cache map")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut entries = HashMap::new();
+        let mut entry_idx = 0;
+        while let Some((legacy_key, action_costs)) =
+            map.next_entry::<LegacyNonSpatialKey, ActionCostVec>()?
+        {
+            migrate_legacy_nonspatial_entry_for_target::<Tgt>(
+                entry_idx,
+                legacy_key,
+                action_costs,
+                &mut entries,
+            )
+            .map_err(de::Error::custom)?;
+            entry_idx += 1;
+        }
+        Ok(MigratedLegacyNonSpatialCache {
+            entries,
+            _target: PhantomData,
+        })
+    }
+}
+
+fn read_migrated_legacy_nonspatial_cache_for_target<Tgt>(
+    path: &Path,
+) -> Result<NonSpatialEntries, String>
+where
+    Tgt: Target,
+{
+    let file =
+        fs::File::open(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
+    let migrated: MigratedLegacyNonSpatialCache<Tgt> =
+        bincode::deserialize_from(BufReader::new(file))
+            .map_err(|e| format!("Failed to decode {}: {e}", path.display()))?;
+    Ok(migrated.entries)
+}
+
+fn migrate_legacy_nonspatial_entry_for_target<Tgt>(
+    entry_idx: usize,
+    legacy_key: LegacyNonSpatialKey,
+    action_costs: ActionCostVec,
+    migrated_cache: &mut NonSpatialEntries,
+) -> Result<(), String>
+where
+    Tgt: Target,
+{
+    let mut spec: Spec<Tgt> = bincode::deserialize(&legacy_key.spec)
+        .map_err(|e| format!("Failed to decode legacy Spec at entry {entry_idx}: {e}"))?;
+    spec.canonicalize()
+        .map_err(|e| format!("Failed to canonicalize legacy Spec at entry {entry_idx}: {e}"))?;
+
+    let key = NonSpatialKey {
+        logical_spec: bincode::serialize(&spec.0)
+            .expect("LogicalSpec should serialize for non-spatial cache key"),
+    };
+    let (bottom, top) = memory_bounds_to_fill::<Tgt>(&spec.1, &action_costs.0);
+    let dim_ranges = inclusive_bounds_to_ranges(bottom, top);
+    let normalized_action_costs = ActionNormalizedCostVec::normalize(action_costs, spec.0.volume());
+
+    migrated_cache
+        .entry(key)
+        .or_insert_with(|| RTreePageContents::empty(MEMORY_COUNT))
+        .fill_region(1, &dim_ranges, &normalized_action_costs);
+    Ok(())
+}
+
 impl FilesDatabase {
     pub fn new<Tgt: Target>(
         file_path: Option<&path::Path>,
@@ -205,13 +366,16 @@ impl FilesDatabase {
         ensure_target_file::<Tgt>(dir_handle.path()).expect("Target validation failed");
         ensure_tilescale_file(dir_handle.path(), tile_scale).expect("TILESCALE validation failed");
 
-        Self::new_with_dir_handle(
+        let nonspatial_entries =
+            read_or_migrate_semispatial_cache::<Tgt>(dir_handle.path(), k).unwrap_or_default();
+        Self::from_dir_handle_and_nonspatial_entries(
             dir_handle,
             tile_scale,
             k,
             cache_size,
             thread_count,
             file_path.is_some(),
+            nonspatial_entries,
         )
     }
 
@@ -234,24 +398,36 @@ impl FilesDatabase {
         let dir_handle = Arc::new(DirPathHandle::Persisted(path.to_owned()));
         log::info!("Opening database at: {}", dir_handle.path().display());
         validate_tilescale_file(dir_handle.path(), tile_scale)?;
-        Ok(Self::new_with_dir_handle(
+        let nonspatial_entries = if let Some(cache) = read_semispatial_cache(dir_handle.path()) {
+            cache
+        } else if legacy_nonspatial_cache_file_path(dir_handle.path()).exists() {
+            return Err(
+                "Cannot migrate legacy NONSPATIAL_CACHE without a target; use FilesDatabase::new::<Tgt>"
+                    .to_string(),
+            );
+        } else {
+            HashMap::new()
+        };
+        Ok(Self::from_dir_handle_and_nonspatial_entries(
             dir_handle,
             tile_scale,
             k,
             cache_size,
             thread_count,
             true,
+            nonspatial_entries,
         ))
     }
 
     /// Common logic for [FilesDatabase::new] and [FilesDatabase::open].
-    fn new_with_dir_handle(
+    fn from_dir_handle_and_nonspatial_entries(
         dir_handle: Arc<DirPathHandle>,
         tile_scale: TileScale,
         k: u8,
         cache_size: usize,
         thread_count: usize,
         proactive_saves_enabled: bool,
+        nonspatial_entries: NonSpatialEntries,
     ) -> Self {
         #[cfg(feature = "db-stats")]
         let stats = Arc::new(FilesDatabaseStats::default());
@@ -283,7 +459,7 @@ impl FilesDatabase {
                 .collect(),
         );
         let nonspatial_cache = Mutex::new(NonSpatialCache {
-            entries: read_nonspatial_cache(dir_handle.path()),
+            entries: nonspatial_entries,
             modified: false,
             last_save: None,
         });
@@ -372,7 +548,14 @@ impl FilesDatabase {
 
         if !self.can_memoize_efficiently(query) {
             let key = self.nonspatial_key(query);
-            return match self.nonspatial_cache.lock().entries.get(&key).cloned() {
+            let memory_pt = BiMap::apply(&MemoryLimitsBimap::<Tgt>::default(), &query.1);
+            return match self
+                .nonspatial_cache
+                .lock()
+                .entries
+                .get(&key)
+                .and_then(|tree| tree.get(&memory_pt, query.0.volume()))
+            {
                 Some(v) => GetPreference::Hit(v),
                 None => GetPreference::Miss(None),
             };
@@ -487,11 +670,17 @@ impl FilesDatabase {
 
         if !self.can_memoize_efficiently(spec) {
             let key = self.nonspatial_key(spec);
+            let (bottom, top) = memory_bounds_to_fill::<Tgt>(&spec.1, &decisions);
+            let dim_ranges = inclusive_bounds_to_ranges(bottom, top);
+            let normalized_decisions =
+                ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
             {
                 let mut nonspatial_cache = self.nonspatial_cache.lock();
                 nonspatial_cache
                     .entries
-                    .insert(key, ActionCostVec(decisions));
+                    .entry(key)
+                    .or_insert_with(|| RTreePageContents::empty(MEMORY_COUNT))
+                    .fill_region(self.k, &dim_ranges, &normalized_decisions);
                 nonspatial_cache.modified = true;
             }
             if self.proactive_saves_enabled {
@@ -616,7 +805,7 @@ impl FilesDatabase {
             return;
         };
         let msg = ShardThreadMsg::PutNonSpatial(
-            nonspatial_cache_file_path(self.dir_handle.path()),
+            semispatial_cache_file_path(self.dir_handle.path()),
             nonspatial_cache.entries.clone(),
         );
         match shard_guard.thread_tx.try_send(msg) {
@@ -676,9 +865,9 @@ impl FilesDatabase {
         Tgt: Target,
     {
         NonSpatialKey {
-            // Serialize the key to erase the Tgt type parameter
-            spec: bincode::serialize(spec)
-                .expect("Spec should serialize for non-spatial cache key"),
+            // Serialize the key to erase the Tgt type parameter.
+            logical_spec: bincode::serialize(&spec.0)
+                .expect("LogicalSpec should serialize for non-spatial cache key"),
         }
     }
 
@@ -687,7 +876,7 @@ impl FilesDatabase {
         if !nonspatial_cache.modified {
             return;
         }
-        let path = nonspatial_cache_file_path(self.dir_handle.path());
+        let path = semispatial_cache_file_path(self.dir_handle.path());
         let mut shard_guard = self.shards.0[0].lock();
 
         let cache = nonspatial_cache.entries.clone();
@@ -1085,7 +1274,7 @@ impl Shard {
                                 log::debug!("Writing non-spatial database cache");
                             }
 
-                            write_nonspatial_cache_atomic(&path, &cache);
+                            write_semispatial_cache_atomic(&path, &cache);
 
                             #[cfg(feature = "db-stats")]
                             {
@@ -1601,17 +1790,12 @@ where
     <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     B: BiMap<Domain = Spec<Tgt>, Codomain = DbKey>,
 {
-    // Compute worst-case bound of solutions' memory usage. This lower bounds the range.
-    let per_level_peaks = impls
-        .iter()
-        .fold(MemVec::zero::<Tgt>(), |acc, (_, cost)| acc.max(&cost.peaks));
-
     // Compute the complete upper and lower bounds from the given Spec and that Spec modified with
     // the peaks' bound (computed above).
     let upper_inclusive = BiMap::apply(bimap, spec);
     let lower_inclusive = {
         let mut lower_bound_spec = spec.clone();
-        lower_bound_spec.1 = MemoryLimits::Standard(per_level_peaks);
+        lower_bound_spec.1 = MemoryLimits::Standard(per_level_peak_memory::<Tgt>(impls));
         BiMap::apply(bimap, &lower_bound_spec)
     };
 
@@ -1623,6 +1807,59 @@ where
     );
 
     (upper_inclusive.0, (lower_inclusive.1, upper_inclusive.1))
+}
+
+fn per_level_peak_memory<Tgt>(impls: &[(ActionNum, Cost)]) -> MemVec
+where
+    Tgt: Target,
+{
+    impls
+        .iter()
+        .fold(MemVec::zero::<Tgt>(), |acc, (_, cost)| acc.max(&cost.peaks))
+}
+
+fn memory_bounds_to_fill<Tgt>(
+    upper_memory_limits: &MemoryLimits,
+    impls: &[(ActionNum, Cost)],
+) -> (Vec<BimapInt>, Vec<BimapInt>)
+where
+    Tgt: Target,
+{
+    let memory_bimap = MemoryLimitsBimap::<Tgt>::default();
+    let upper_inclusive = BiMap::apply(&memory_bimap, upper_memory_limits);
+    let lower_inclusive = BiMap::apply(
+        &memory_bimap,
+        &MemoryLimits::Standard(per_level_peak_memory::<Tgt>(impls)),
+    );
+
+    debug_assert_eq!(upper_inclusive.len(), MEMORY_COUNT);
+    debug_assert_eq!(lower_inclusive.len(), MEMORY_COUNT);
+    debug_assert!(
+        lower_inclusive
+            .iter()
+            .zip(&upper_inclusive)
+            .all(|(bottom, top)| bottom <= top),
+        "peak memory lower bound exceeded Spec memory limits"
+    );
+
+    (lower_inclusive, upper_inclusive)
+}
+
+fn inclusive_bounds_to_ranges(
+    lower_inclusive: Vec<BimapInt>,
+    upper_inclusive: Vec<BimapInt>,
+) -> Vec<Range<BimapInt>> {
+    lower_inclusive
+        .into_iter()
+        .zip(upper_inclusive)
+        .map(|(bottom, top)| {
+            debug_assert!(bottom <= top);
+            bottom
+                ..top
+                    .checked_add(1)
+                    .expect("inclusive upper bound should fit exclusive range")
+        })
+        .collect()
 }
 
 /// Iterate blocks of an integer range.
@@ -1813,24 +2050,22 @@ fn write_page_atomic(path: &Path, contents: &PageContents) {
     file.commit().unwrap();
 }
 
-fn nonspatial_cache_file_path(root: &Path) -> path::PathBuf {
-    root.join(NONSPATIAL_CACHE_FILE)
+fn semispatial_cache_file_path(root: &Path) -> path::PathBuf {
+    root.join(SEMISPATIAL_CACHE_FILE)
 }
 
-fn read_nonspatial_cache(root: &Path) -> HashMap<NonSpatialKey, ActionCostVec> {
-    let path = nonspatial_cache_file_path(root);
-    let Ok(file) = fs::File::open(&path) else {
-        return HashMap::new();
-    };
-    bincode::deserialize_from(BufReader::new(file)).unwrap_or_else(|e| {
-        panic!(
-            "Failed to read non-spatial cache at {}: {e}",
-            path.display()
-        )
-    })
+fn legacy_nonspatial_cache_file_path(root: &Path) -> path::PathBuf {
+    root.join(LEGACY_NONSPATIAL_CACHE_FILE)
 }
 
-fn write_nonspatial_cache_atomic(path: &Path, cache: &HashMap<NonSpatialKey, ActionCostVec>) {
+fn read_cache_file<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let file =
+        fs::File::open(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
+    bincode::deserialize_from(BufReader::new(file))
+        .map_err(|e| format!("Failed to decode {}: {e}", path.display()))
+}
+
+fn write_semispatial_cache_atomic(path: &Path, cache: &NonSpatialEntries) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -2234,6 +2469,44 @@ mod tests {
         db.put(spec.clone(), decisions.clone());
 
         assert_eq!(db.get(&spec), Some(ActionCostVec(decisions)));
+    }
+
+    #[test]
+    fn test_nonspatial_put_fills_across_memory_limits() {
+        let mut spec: Spec<Avx2Target> = spec!(Move([5], (u8, L1, row_major), (u8, L1, row_major)));
+        spec.1 = MemoryLimits::Standard(MemVec::new_for_target::<Avx2Target>(std::array::from_fn(
+            |_| 16u64,
+        )));
+        spec.canonicalize().unwrap();
+        let db = FilesDatabase::new::<Avx2Target>(None, TileScale::PowerOrThreePower, 1, 2, 1);
+        assert!(!db.can_memoize_efficiently(&spec));
+
+        let decisions = vec![(
+            0,
+            Cost {
+                main: 7,
+                peaks: MemVec::zero::<Avx2Target>(),
+                depth: 0,
+            },
+        )];
+        db.put(spec.clone(), decisions.clone());
+
+        let smaller_memory_spec = Spec(
+            spec.0.clone(),
+            MemoryLimits::Standard(MemVec::zero::<Avx2Target>()),
+        );
+        assert_eq!(
+            db.get(&smaller_memory_spec),
+            Some(ActionCostVec(decisions.clone()))
+        );
+
+        let larger_memory_spec = Spec(
+            spec.0,
+            MemoryLimits::Standard(MemVec::new_for_target::<Avx2Target>(std::array::from_fn(
+                |_| 32u64,
+            ))),
+        );
+        assert_eq!(db.get(&larger_memory_spec), None);
     }
 
     #[test]
