@@ -1,3 +1,41 @@
+__m128 exp128_ps(__m128 x) {
+  __m128 t, f, p, r;
+  __m128i i, j;
+
+  const __m128 l2e = _mm_set1_ps(1.442695041f);    /* log2(e) */
+  const __m128 l2h = _mm_set1_ps(-6.93145752e-1f); /* -log(2)_hi */
+  const __m128 l2l = _mm_set1_ps(-1.42860677e-6f); /* -log(2)_lo */
+  /* coefficients for core approximation to exp() in [-log(2)/2, log(2)/2] */
+  const __m128 c0 = _mm_set1_ps(0.041944388f);
+  const __m128 c1 = _mm_set1_ps(0.168006673f);
+  const __m128 c2 = _mm_set1_ps(0.499999940f);
+  const __m128 c3 = _mm_set1_ps(0.999956906f);
+  const __m128 c4 = _mm_set1_ps(0.999999642f);
+
+  /* exp(x) = 2^i * e^f; i = rint (log2(e) * x), f = x - log(2) * i */
+  t = _mm_mul_ps(x, l2e); /* t = log2(e) * x */
+  r = _mm_round_ps(t, _MM_FROUND_TO_NEAREST_INT |
+                          _MM_FROUND_NO_EXC); /* r = rint (t) */
+
+  f = _mm_fmadd_ps(r, l2h, x); /* x - log(2)_hi * r */
+  f = _mm_fmadd_ps(r, l2l, f); /* f = x - log(2)_hi * r - log(2)_lo * r */
+
+  i = _mm_cvtps_epi32(t); /* i = (int)rint(t) */
+
+  /* p ~= exp (f), -log(2)/2 <= f <= log(2)/2 */
+  p = c0;                    /* c0 */
+  p = _mm_fmadd_ps(p, f, c1); /* c0*f+c1 */
+  p = _mm_fmadd_ps(p, f, c2); /* (c0*f+c1)*f+c2 */
+  p = _mm_fmadd_ps(p, f, c3); /* ((c0*f+c1)*f+c2)*f+c3 */
+  p = _mm_fmadd_ps(p, f, c4); /* (((c0*f+c1)*f+c2)*f+c3)*f+c4 ~= exp(f) */
+
+  /* exp(x) = 2^i * p */
+  j = _mm_slli_epi32(i, 23); /* i << 23 */
+  r = _mm_castsi128_ps(_mm_add_epi32(j, _mm_castps_si128(p))); /* r = p * 2^i */
+
+  return r;
+}
+
 // From SO user "njuffa": https://stackoverflow.com/a/49090523/110389
 __m256 exp256_ps(__m256 x) {
   __m256 t, f, p, r;

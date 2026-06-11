@@ -69,6 +69,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
     fn require_x86_f32_exp_helper(&mut self, vector_size: DimSize) -> &'static str {
         match vector_size.get() {
+            4 => {
+                self.headers.emit_expf_avx2 = true;
+                "exp128_ps"
+            }
             8 => {
                 self.headers.emit_expf_avx2 = true;
                 "exp256_ps"
@@ -83,6 +87,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
     fn require_x86_f32_sum_helper(&mut self, vector_size: DimSize) -> &'static str {
         match vector_size.get() {
+            4 => {
+                self.headers.emit_sum8 = true;
+                "sum4"
+            }
             8 => {
                 self.headers.emit_sum8 = true;
                 "sum8"
