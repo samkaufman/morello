@@ -5,7 +5,8 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::{row_major, Layout};
 use crate::scheduling::{
-    check_tile_out_applies, tile_to_apply_err, ActionT, ApplyError, NotApplicableReason,
+    check_tile_out_applies, tile_to_apply_err, ActionSolver, ActionT, ApplyError,
+    NotApplicableReason, PrimitiveTileOutSolver,
 };
 use crate::spec::{
     CanonicalizeError, LogicalSpec, LogicalSpecInputTilingInference, PrimitiveBasics,
@@ -123,113 +124,88 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         tile_out_loop_spec_with_shrunken_tiles(component_input_tilings, new_tiles, parallel, spec)
     }
 
-    // fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
-    //     if self.parallel() {
-    //         for idx in 0..spec.0.operand_count() {
-    //             if !spec.0.parameter_memory(idx).can_parallel_tile() {
-    //                 return Err(ApplyError::NotApplicable(
-    //                     NotApplicableReason::LevelPreventedParallel,
-    //                 ));
-    //             }
-    //         }
-    //     }
-    //
-    //     match &spec.0 {
-    //         LogicalSpec::Primitive(basics, ..) => {
-    //             // TODO: Replace SoftmaxDenominatorAndUnscaledFromMax case with more general tiling.
-    //             if tile_out_sdaufm(spec, self).is_some() {
-    //                 todo!("Implement solver for SoftmaxDenominatorAndUnscaledFromMax");
-    //             };
-    //
-    //             let Some(output_tensor) = spec.0.unique_output() else {
-    //                 return Err(ApplyError::NotApplicable(
-    //                     NotApplicableReason::MultipleOutputs,
-    //                 ));
-    //             };
-    //             let untiled_output_shape = output_tensor.shape();
-    //             let tile_shape = self.tiled_output_shape(untiled_output_shape);
-    //             let parallel = self.parallel();
-    //
-    //             check_tile_out_applies(
-    //                 untiled_output_shape,
-    //                 &tile_shape,
-    //                 &output_tensor,
-    //                 parallel,
-    //             )?;
-    //
-    //             // Check if any dimension will create boundary regions
-    //             // This happens when tile size doesn't evenly divide the untiled size
-    //             let will_have_boundaries = tile_shape
-    //                 .iter()
-    //                 .zip(untiled_output_shape.iter())
-    //                 .any(|(tile_size, untiled_size)| untiled_size.get() % tile_size.get() != 0);
-    //
-    //             match basics.typ {
-    //                 PrimitiveSpecType::Matmul { .. } => {
-    //                     if will_have_boundaries {
-    //                         // TODO: Speed up this path.
-    //                         let slow_path_impl = self.apply_unchecked_canon(spec)?;
-    //                         let mut slow_path_subspecs = Vec::new();
-    //                         collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: slow_path_subspecs,
-    //                         }
-    //                         .into());
-    //                     } else {
-    //                         let main_body_spec = ActionSolver::tiled_subspec_fast(
-    //                             [(0, 0), (1, 1), (3, 2)].into_iter(),
-    //                             spec,
-    //                             &tile_shape,
-    //                             parallel,
-    //                         )?;
-    //
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: vec![main_body_spec],
-    //                         }
-    //                         .into());
-    //                     }
-    //                 }
-    //                 PrimitiveSpecType::Move
-    //                 | PrimitiveSpecType::Fill {
-    //                     value: FillValue::Zero,
-    //                 } => {
-    //                     if will_have_boundaries {
-    //                         // TODO: Speed up this path.
-    //                         let slow_path_impl = self.apply_unchecked_canon(spec)?;
-    //                         let mut slow_path_subspecs = Vec::new();
-    //                         collect_nested_specs(&slow_path_impl, &mut slow_path_subspecs);
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: slow_path_subspecs,
-    //                         }
-    //                         .into());
-    //                     } else {
-    //                         let rank = basics.spec_shape.len();
-    //                         let main_body_spec = ActionSolver::tiled_subspec_fast(
-    //                             (0..rank).map(|i| (i, i)),
-    //                             spec,
-    //                             &tile_shape,
-    //                             parallel,
-    //                         )?;
-    //
-    //                         return Ok(PrimitiveTileOutSolver {
-    //                             outer_spec: spec.clone(),
-    //                             body_specs: vec![main_body_spec],
-    //                         }
-    //                         .into());
-    //                     }
-    //                 }
-    //                 _ => {}
-    //             }
-    //         }
-    //         LogicalSpec::Compose { .. } => {}
-    //     };
-    //
-    //     self.apply_unchecked_canon(spec)
-    //         .map(|applied| ActionSolver::Fallback(Box::new(applied)))
-    // }
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+        let logical_spec = &spec.0;
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Matmul { .. },
+                ..
+            },
+            _,
+            _,
+        ) = logical_spec
+        else {
+            return Ok(ActionSolver::Fallback(Box::new(
+                self.apply_unchecked_canon(spec)?,
+            )));
+        };
+
+        let Some(output_idx) = logical_spec.unique_output_index() else {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::MultipleOutputs,
+            ));
+        };
+
+        let old_params = logical_spec.parameters();
+        let output = &old_params[output_idx];
+
+        let tile_shape = self.tiled_output_shape(output.shape());
+        let parallel = self.parallel();
+
+        if parallel && !old_params.iter().all(|p| p.memory().can_parallel_tile()) {
+            return Err(ApplyError::NotApplicable(
+                NotApplicableReason::LevelPreventedParallel,
+            ));
+        }
+
+        check_tile_out_applies(output.shape(), &tile_shape, output, parallel)?;
+
+        let will_have_boundaries = tile_shape
+            .iter()
+            .zip(output.shape())
+            .any(|(tile, full)| !full.get().is_multiple_of(tile.get()));
+        if will_have_boundaries {
+            return Ok(ActionSolver::Fallback(Box::new(
+                self.apply_unchecked_canon(spec)?,
+            )));
+        }
+
+        let mut body = spec.clone();
+
+        let LogicalSpec::Primitive(basics, auxes, serial_only) = &mut body.0 else {
+            unreachable!("body was cloned from a primitive spec");
+        };
+
+        basics.spec_shape[0] = tile_shape[0];
+        basics.spec_shape[1] = tile_shape[1];
+        basics.spec_shape[3] = tile_shape[2];
+        *serial_only |= parallel;
+
+        let shapes = basics.parameter_shapes();
+        for ((old, shape), aux) in old_params.iter().zip(shapes).zip(auxes) {
+            if !old.memory().has_layout() {
+                continue;
+            }
+
+            aux.layout = match old.layout().update_for_tiling(old.shape(), &shape) {
+                Ok(layout) => layout,
+                Err(_) => {
+                    return Ok(ActionSolver::Fallback(Box::new(
+                        self.apply_unchecked_canon(spec)?,
+                    )));
+                }
+            };
+        }
+
+        body.canonicalize()
+            .map_err(|_| ApplyError::NotApplicable(NotApplicableReason::TileShapeInvalid))?;
+
+        Ok(PrimitiveTileOutSolver {
+            outer_spec: spec.clone(),
+            body_specs: vec![body],
+        }
+        .into())
+    }
 }
 
 impl TileOut {
@@ -891,7 +867,7 @@ fn create_region_output_tiling<Tgt: Target>(
     tiles: &[LoopTile<Tgt>],
     region_id: NonZeroUsize,
     spec: &Spec<Tgt>,
-) -> Result<crate::tiling::Tiling, ApplyError> {
+) -> Result<Tiling, ApplyError> {
     let output_index = spec.0.unique_output_index().unwrap();
     let output_tile = tiles
         .iter()
