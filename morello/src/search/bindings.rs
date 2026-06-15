@@ -45,11 +45,12 @@ where
         task: &mut Self::Task,
         request: Self::Request,
         child_value: Self::Value,
-    ) {
+    ) -> bool {
         if task.is_running() {
             let cost = child_value.0.into_iter().next().map(|(_, cost)| cost);
             task.resolve_request(request, cost);
         }
+        task.is_running()
     }
 
     fn finish(&self, task: Self::Task) -> Self::Value {

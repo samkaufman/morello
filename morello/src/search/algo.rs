@@ -3,6 +3,12 @@ use std::hash::Hash;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 
+/// Stop solving the rest of a request batch once the current task completes.
+///
+/// This avoids work that cannot affect the completed parent result, but it also skips
+/// memoizing those unused suffix children for potential later requests.
+const STOP_BATCH_WHEN_TASK_COMPLETES: bool = true;
+
 pub trait Problem {
     /// A node in the search DAG.
     type Node: Clone + Eq + Hash;
@@ -18,12 +24,15 @@ pub trait Problem {
     fn next_request_batch(&self, task: &mut Self::Task)
         -> Option<Vec<(Self::Node, Self::Request)>>;
 
+    /// Applies `child_value` to the outstanding dependency identified by `request`.
+    ///
+    /// Returns whether `task` still needs more child results after applying this one.
     fn resolve_request(
         &self,
         task: &mut Self::Task,
         request: Self::Request,
         child_value: Self::Value,
-    );
+    ) -> bool;
 
     fn finish(&self, task: Self::Task) -> Self::Value;
 }
@@ -62,15 +71,15 @@ where
 
         let mut task = self.problem.start(&node);
         while let Some(batch) = self.problem.next_request_batch(&mut task) {
-            let mut child_values = Vec::with_capacity(batch.len());
             for (child, request) in batch {
                 let child_value = self.solve_node(child);
-                child_values.push((request, child_value));
-            }
-
-            for (request, child_value) in child_values {
-                self.problem
-                    .resolve_request(&mut task, request, child_value);
+                if !self
+                    .problem
+                    .resolve_request(&mut task, request, child_value)
+                    && STOP_BATCH_WHEN_TASK_COMPLETES
+                {
+                    break;
+                }
             }
         }
 
