@@ -1204,28 +1204,6 @@ impl PrimitiveSpecType {
         Some(first_out)
     }
 
-    // TODO: Rename
-    // TODO: Needed?
-    pub fn output_is_read(&self) -> bool {
-        match self {
-            PrimitiveSpecType::Matmul { accum }
-            | PrimitiveSpecType::Conv { accum }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
-            | PrimitiveSpecType::Max { accum, .. }
-            | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => *accum,
-            PrimitiveSpecType::OnePrefix
-            | PrimitiveSpecType::Fill { .. }
-            | PrimitiveSpecType::Move
-            | PrimitiveSpecType::Broadcast { .. }
-            | PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
-            | PrimitiveSpecType::DivideVec
-            | PrimitiveSpecType::DivideVecScalar { .. } => false,
-        }
-    }
-
     /// Return the output shape of the primitive given the input shapes.
     ///
     /// This returns `None` if either there are multiple outputs or the output shape cannot be
@@ -2019,13 +1997,6 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     primitive_aux[i] = new_operands[i].aux.clone();
                 }
             }
-        }
-    }
-
-    pub fn output_is_read(&self) -> bool {
-        match self {
-            LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => typ.output_is_read(),
-            LogicalSpec::Compose { components, .. } => components[0].typ.output_is_read(),
         }
     }
 
