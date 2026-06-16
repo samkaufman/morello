@@ -128,7 +128,10 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
         let logical_spec = &spec.0;
         let LogicalSpec::Primitive(
             PrimitiveBasics {
-                typ: PrimitiveSpecType::Matmul { .. },
+                typ:
+                    PrimitiveSpecType::Matmul { .. }
+                    | PrimitiveSpecType::Move
+                    | PrimitiveSpecType::Fill { .. },
                 ..
             },
             _,
@@ -176,9 +179,20 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
             unreachable!("body was cloned from a primitive spec");
         };
 
-        basics.spec_shape[0] = tile_shape[0];
-        basics.spec_shape[1] = tile_shape[1];
-        basics.spec_shape[3] = tile_shape[2];
+        match basics.typ {
+            PrimitiveSpecType::Matmul { .. } => {
+                let [b, m, _, n] = &mut basics.spec_shape[..] else {
+                    panic!("Matmul spec should have 4 parameters");
+                };
+                *b = tile_shape[0];
+                *m = tile_shape[1];
+                *n = tile_shape[2];
+            }
+            PrimitiveSpecType::Move | PrimitiveSpecType::Fill { .. } => {
+                basics.spec_shape.copy_from_slice(&tile_shape);
+            }
+            _ => unreachable!(),
+        }
         *serial_only |= parallel;
 
         let shapes = basics.parameter_shapes();
