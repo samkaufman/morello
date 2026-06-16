@@ -515,6 +515,70 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
             LogicalSpec::Compose { .. } => todo!(),
         }
     }
+
+    fn top_down_solver(&self, spec: &Spec<Tgt>) -> Result<ActionSolver<Tgt>, ApplyError> {
+        let logical_spec = &spec.0;
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ: PrimitiveSpecType::Matmul { accum: true },
+                spec_shape,
+                ..
+            },
+            _,
+            _,
+        ) = logical_spec
+        else {
+            return Ok(ActionSolver::Fallback(Box::new(
+                self.apply_unchecked_canon(spec)?,
+            )));
+        };
+
+        assert!(
+            self.k < spec_shape[2],
+            "Cannot split to k={} when inner dim. is not larger (it is {})",
+            self.k,
+            spec_shape[2]
+        );
+
+        if !spec_shape[2].get().is_multiple_of(self.k.get()) {
+            return Ok(ActionSolver::Fallback(Box::new(
+                self.apply_unchecked_canon(spec)?,
+            )));
+        }
+
+        let old_params = logical_spec.parameters();
+        let mut body = spec.clone();
+
+        let LogicalSpec::Primitive(basics, auxes, _) = &mut body.0 else {
+            unreachable!("body was cloned from a primitive spec");
+        };
+        basics.spec_shape[2] = self.k;
+
+        let shapes = basics.parameter_shapes();
+        for ((old, shape), aux) in old_params.iter().zip(shapes).zip(auxes) {
+            if !old.memory().has_layout() {
+                continue;
+            }
+
+            aux.layout = match old.layout().update_for_tiling(old.shape(), &shape) {
+                Ok(layout) => layout,
+                Err(_) => {
+                    return Ok(ActionSolver::Fallback(Box::new(
+                        self.apply_unchecked_canon(spec)?,
+                    )));
+                }
+            };
+        }
+
+        body.canonicalize()
+            .map_err(|_| ApplyError::NotApplicable(NotApplicableReason::TileShapeInvalid))?;
+
+        Ok(PrimitiveTileOutSolver {
+            outer_spec: spec.clone(),
+            body_specs: vec![body],
+        }
+        .into())
+    }
 }
 
 /// A `TileOut` special case for [SoftmaxDenominatorAndUnscaledFromMax].
