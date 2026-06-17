@@ -167,6 +167,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxPartsRecompute<Tgt> {
         let denom_app = ImplNode::from(SpecApp::new_primitive_app(
             PrimitiveSpecType::SoftmaxDenominatorAndMax {
                 scan_dim: *scan_dim,
+                accum: false,
             },
             [
                 ViewE::from(Param::new(0, operands[0].clone())),

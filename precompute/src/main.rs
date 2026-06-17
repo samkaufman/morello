@@ -531,6 +531,21 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
                         true,
                     ));
 
+                    matmul_phase.push(primitive_gl_top::<Tgt>(
+                        PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                            scan_dim: dim,
+                            accum: false,
+                        },
+                        size_cube.clone(),
+                        dtype,
+                    ));
+
+                    matmul_phase.push(primitive_gl_top::<Tgt>(
+                        PrimitiveSpecType::SoftmaxComplete { scan_dim: dim },
+                        size_cube.clone(),
+                        dtype,
+                    ));
+
                     matmul_phase.push(LogicalSpec::Primitive(
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
@@ -707,6 +722,25 @@ fn fill_zero_top<Tgt: CpuTarget>(size: DimSize, rank: u8, dtype: Dtype) -> Logic
         vec![taux_gl::<Tgt>(&shape)],
         true,
     )
+}
+
+fn primitive_gl_top<Tgt: CpuTarget>(
+    typ: PrimitiveSpecType,
+    spec_shape: Shape,
+    dtype: Dtype,
+) -> LogicalSpec<Tgt> {
+    let dtypes = vec![dtype; typ.operand_count()];
+    let basics = PrimitiveBasics {
+        typ,
+        spec_shape,
+        dtypes,
+    };
+    let auxes = basics
+        .parameter_shapes()
+        .into_iter()
+        .map(|shape| taux_gl::<Tgt>(&shape))
+        .collect();
+    LogicalSpec::Primitive(basics, auxes, true)
 }
 
 fn next_limits<'a, L: Memory + 'a>(

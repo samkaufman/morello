@@ -41,6 +41,11 @@ pub struct Split {
     pub k: DimSize,
 }
 
+#[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SplitSoftmaxDenominatorAndMax {
+    pub k: DimSize,
+}
+
 impl TileOut {
     fn parallel(&self) -> bool {
         match self {
@@ -248,11 +253,11 @@ impl TileOut {
 impl<Tgt: Target> ActionT<Tgt> for Split {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let logical_spec = &spec.0;
-        let operands = logical_spec.parameters();
 
         match logical_spec {
             LogicalSpec::Primitive(PrimitiveBasics { typ, .. }, _, _) => match typ {
                 PrimitiveSpecType::Matmul { accum: true } => {
+                    let operands = logical_spec.parameters();
                     let [lhs, rhs] = &operands[..2] else {
                         panic!();
                     };
@@ -377,71 +382,18 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                     scan_dim: dim,
                     accum: true,
                 } => {
-                    let in_tensor_spec = &operands[0];
-                    assert!(
-                        self.k < in_tensor_spec.shape()[usize::from(*dim)],
-                        "Cannot split to k={} when inner dim. is not larger (it is {})",
-                        self.k,
-                        in_tensor_spec.shape()[usize::from(*dim)]
-                    );
-
-                    let mut split_shape = Shape::from_slice(in_tensor_spec.shape());
-                    split_shape[usize::from(*dim)] = self.k;
-                    let split_tiling = Tiling::new_simple(split_shape.clone());
-
-                    let (main_tile, boundary_tiles) = split_tiling
-                        .apply_with_boundaries(Param::new(0, in_tensor_spec.clone()))
-                        .map_err(tile_to_apply_err)?;
-
-                    let tiles = vec![LoopTile {
-                        parameter_index: 0,
-                        axes: (0..u8::try_from(in_tensor_spec.shape().len()).unwrap()).collect(),
-                        tile: main_tile.boxed_viewe(),
-                    }];
-
-                    let new_shapes: Vec<_> = once(split_shape)
-                        .chain(operands.iter().skip(1).map(|o| o.shape().into()))
-                        .collect();
-
-                    let mut bodies = Vec::<ImplNode<_>>::with_capacity(boundary_tiles.len() + 1);
-                    bodies.push(create_main_body(&tiles, &[new_shapes], false, spec)?.into());
-
-                    for boundary_tile in boundary_tiles {
-                        let boundary_new_shapes: Vec<_> =
-                            once(Shape::from_slice(boundary_tile.shape()))
-                                .chain(operands.iter().skip(1).map(|o| o.shape().into()))
-                                .collect();
-
-                        // Create the boundary spec directly (no LoopTiles needed for boundary regions)
-                        let mut boundary_body_logicalspec = spec.0.clone();
-                        update_component_shapes(
-                            &mut boundary_body_logicalspec,
-                            &[boundary_new_shapes],
-                        )?;
-                        let mut boundary_spec = Spec(boundary_body_logicalspec, spec.1.clone());
-                        boundary_spec
-                            .canonicalize()
-                            .map_err(spec_canonicalize_to_apply_err)?;
-                        let boundary_args = std::iter::once(ViewE::from(boundary_tile.clone()))
-                            .chain(operands.iter().skip(1).enumerate().map(|(i, operand)| {
-                                ViewE::Param(Param::new(
-                                    u8::try_from(i + 1).unwrap(),
-                                    operand.clone(),
-                                ))
-                            }))
-                            .collect::<Vec<_>>();
-                        bodies.push(SpecApp::new(boundary_spec, boundary_args).into());
-                    }
-
-                    Ok(ImplNode::Loop(Loop {
-                        tiles,
-                        bodies,
-                        parallel: false,
-                        spec: Some(spec.clone()),
-                    }))
+                    let operands = logical_spec.parameters();
+                    split_reduction_input(spec, &operands, 0, *dim, self.k)
+                }
+                PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+                    scan_dim: dim,
+                    accum: true,
+                } => {
+                    let operands = logical_spec.parameters();
+                    split_tiled_reduction_parameters(spec, &operands, &[0, 3], *dim, self.k)
                 }
                 _ => Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
-                    "Split only applies to Matmul, Max, and SoftmaxDenominator",
+                    "Split only applies to supported accumulating reductions",
                 )))),
             },
             LogicalSpec::Compose { components, .. }
@@ -579,6 +531,171 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
         }
         .into())
     }
+}
+
+impl<Tgt: Target> ActionT<Tgt> for SplitSoftmaxDenominatorAndMax {
+    fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ:
+                    PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                        scan_dim,
+                        accum: true,
+                    },
+                ..
+            },
+            ..,
+        ) = &spec.0
+        else {
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "SplitSoftmaxDenominatorAndMax only applies to SoftmaxDenominatorAndMaxAccum",
+            ))));
+        };
+
+        let operands = spec.0.parameters();
+        split_reduction_input(spec, &operands, 0, *scan_dim, self.k)
+    }
+}
+
+fn split_reduction_input<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    operands: &[TensorSpec<Tgt>],
+    input_parameter_index: u8,
+    reduction_dim: u8,
+    k: DimSize,
+) -> Result<ImplNode<Tgt>, ApplyError> {
+    split_tiled_reduction_parameters(spec, operands, &[input_parameter_index], reduction_dim, k)
+}
+
+fn split_tiled_reduction_parameters<Tgt: Target>(
+    spec: &Spec<Tgt>,
+    operands: &[TensorSpec<Tgt>],
+    tiled_parameter_indices: &[u8],
+    reduction_dim: u8,
+    k: DimSize,
+) -> Result<ImplNode<Tgt>, ApplyError> {
+    let Some((&first_parameter_index, rest_parameter_indices)) =
+        tiled_parameter_indices.split_first()
+    else {
+        panic!("at least one parameter must be tiled");
+    };
+    let first_parameter_index_us = usize::from(first_parameter_index);
+    let first_tensor_spec = &operands[first_parameter_index_us];
+    assert!(
+        k < first_tensor_spec.shape()[usize::from(reduction_dim)],
+        "Cannot split to k={} when inner dim. is not larger (it is {})",
+        k,
+        first_tensor_spec.shape()[usize::from(reduction_dim)]
+    );
+
+    for &parameter_index in rest_parameter_indices {
+        let tensor_spec = &operands[usize::from(parameter_index)];
+        if tensor_spec.shape() != first_tensor_spec.shape() {
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "split reduction parameters must share a shape",
+            ))));
+        }
+    }
+
+    let mut tiles = Vec::with_capacity(tiled_parameter_indices.len());
+    let mut split_shapes = Vec::with_capacity(tiled_parameter_indices.len());
+    let mut boundary_tile_sets = Vec::with_capacity(tiled_parameter_indices.len());
+
+    for &parameter_index in tiled_parameter_indices {
+        let parameter_index_us = usize::from(parameter_index);
+        let tensor_spec = &operands[parameter_index_us];
+        let mut split_shape = Shape::from_slice(tensor_spec.shape());
+        split_shape[usize::from(reduction_dim)] = k;
+        let split_tiling = Tiling::new_simple(split_shape.clone());
+
+        let (main_tile, boundary_tiles) = split_tiling
+            .apply_with_boundaries(Param::new(parameter_index, tensor_spec.clone()))
+            .map_err(tile_to_apply_err)?;
+
+        tiles.push(LoopTile {
+            parameter_index,
+            axes: (0..u8::try_from(tensor_spec.shape().len()).unwrap()).collect(),
+            tile: main_tile.boxed_viewe(),
+        });
+        split_shapes.push((parameter_index_us, split_shape));
+        boundary_tile_sets.push((parameter_index_us, boundary_tiles));
+    }
+
+    let new_shapes: Vec<_> = operands
+        .iter()
+        .enumerate()
+        .map(|(i, operand)| {
+            split_shapes
+                .iter()
+                .find_map(|(parameter_index, split_shape)| {
+                    (*parameter_index == i).then(|| split_shape.clone())
+                })
+                .unwrap_or_else(|| operand.shape().into())
+        })
+        .collect();
+
+    let boundary_count = boundary_tile_sets
+        .first()
+        .map(|(_, boundary_tiles)| boundary_tiles.len())
+        .unwrap_or(0);
+    if boundary_tile_sets
+        .iter()
+        .any(|(_, boundary_tiles)| boundary_tiles.len() != boundary_count)
+    {
+        return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+            "split reduction parameters produced mismatched boundary regions",
+        ))));
+    }
+
+    let mut bodies = Vec::<ImplNode<_>>::with_capacity(boundary_count + 1);
+    bodies.push(create_main_body(&tiles, &[new_shapes], false, spec)?.into());
+
+    for boundary_idx in 0..boundary_count {
+        let boundary_new_shapes: Vec<_> = operands
+            .iter()
+            .enumerate()
+            .map(|(i, operand)| {
+                boundary_tile_sets
+                    .iter()
+                    .find_map(|(parameter_index, boundary_tiles)| {
+                        (*parameter_index == i)
+                            .then(|| Shape::from_slice(boundary_tiles[boundary_idx].shape()))
+                    })
+                    .unwrap_or_else(|| operand.shape().into())
+            })
+            .collect();
+
+        // Create the boundary spec directly because boundary regions do not need LoopTiles.
+        let mut boundary_body_logicalspec = spec.0.clone();
+        update_component_shapes(&mut boundary_body_logicalspec, &[boundary_new_shapes])?;
+        let mut boundary_spec = Spec(boundary_body_logicalspec, spec.1.clone());
+        boundary_spec
+            .canonicalize()
+            .map_err(spec_canonicalize_to_apply_err)?;
+        let boundary_args = operands
+            .iter()
+            .enumerate()
+            .map(|(i, operand)| {
+                boundary_tile_sets
+                    .iter()
+                    .find_map(|(parameter_index, boundary_tiles)| {
+                        (*parameter_index == i)
+                            .then(|| ViewE::from(boundary_tiles[boundary_idx].clone()))
+                    })
+                    .unwrap_or_else(|| {
+                        ViewE::Param(Param::new(u8::try_from(i).unwrap(), operand.clone()))
+                    })
+            })
+            .collect::<Vec<_>>();
+        bodies.push(SpecApp::new(boundary_spec, boundary_args).into());
+    }
+
+    Ok(ImplNode::Loop(Loop {
+        tiles,
+        bodies,
+        parallel: false,
+        spec: Some(spec.clone()),
+    }))
 }
 
 /// A `TileOut` special case for [SoftmaxDenominatorAndUnscaledFromMax].

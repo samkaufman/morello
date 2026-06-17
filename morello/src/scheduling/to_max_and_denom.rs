@@ -22,7 +22,11 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndDenominator {
             ))));
         };
         let PrimitiveBasics {
-            typ: PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim },
+            typ:
+                PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                    scan_dim,
+                    accum: false,
+                },
             spec_shape: _,
             dtypes: _,
         } = head

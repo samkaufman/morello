@@ -38,6 +38,7 @@ use std::iter::{self, once};
 
 const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
+const SCALAR_EXPF_COST: MainCost = 6 * INST_COST;
 
 #[cfg(feature = "drop-rf")]
 const CPU_MEMORIES: [CpuMemory; MEMORY_COUNT] = [CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
@@ -121,8 +122,11 @@ pub enum CpuKernel {
     VectorInterleaveBf16F32,
     VectorDeinterleaveF32Bf16,
     ValueSoftmaxComplete,
+    ValueSoftmaxDenominatorAndMax,
     ValueSoftmaxDenominator,
+    ValueSoftmaxDenominatorAndUnscaledFromMax,
     VectorSoftmaxDenominator,
+    VectorSoftmaxDenominatorAndMax,
     VectorSoftmaxComplete,
     VectorSoftmaxDenominatorAndUnscaledF32,
     ValueMax,
@@ -131,6 +135,7 @@ pub enum CpuKernel {
     VectorMaxLoop,
     VecScalarAssign,
     DivideVec,
+    ValueDivideVecScalar,
     /// Lowers to an implementation of `DivideVecScalar` that computes `1 / denominator`
     /// once per reduced index and then multiplies vectors by that scalar reciprocal.
     ///
@@ -477,10 +482,24 @@ impl<T: CpuTarget> Target for T {
                     ];
                     &SOFTMAX_COMPLETE_KERNELS
                 }
-                PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[],
+                PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. } => {
+                    if *accum {
+                        const SOFTMAX_DENOMINATOR_AND_MAX_KERNELS: [CpuKernel; 2] = [
+                            CpuKernel::ValueSoftmaxDenominatorAndMax,
+                            CpuKernel::VectorSoftmaxDenominatorAndMax,
+                        ];
+                        &SOFTMAX_DENOMINATOR_AND_MAX_KERNELS
+                    } else {
+                        &[]
+                    }
+                }
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => &[],
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => {
-                    &[CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32]
+                    const SOFTMAX_DENOMINATOR_AND_UNSCALED_FROM_MAX_KERNELS: [CpuKernel; 2] = [
+                        CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax,
+                        CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32,
+                    ];
+                    &SOFTMAX_DENOMINATOR_AND_UNSCALED_FROM_MAX_KERNELS
                 }
                 PrimitiveSpecType::SoftmaxDenominator { accum, .. } => {
                     if *accum {
@@ -495,7 +514,11 @@ impl<T: CpuTarget> Target for T {
                 }
                 PrimitiveSpecType::DivideVec => &[CpuKernel::DivideVec],
                 PrimitiveSpecType::DivideVecScalar { .. } => {
-                    &[CpuKernel::DivideVecScalarReciprocal]
+                    const DIVIDE_VEC_SCALAR_KERNELS: [CpuKernel; 2] = [
+                        CpuKernel::ValueDivideVecScalar,
+                        CpuKernel::DivideVecScalarReciprocal,
+                    ];
+                    &DIVIDE_VEC_SCALAR_KERNELS
                 }
                 PrimitiveSpecType::Max { accum, .. } => {
                     if *accum {
@@ -574,6 +597,15 @@ impl<T: CpuTarget> Target for T {
                 _primitive_aux,
                 _serial_only,
             ) => match typ {
+                PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. } => Box::new(
+                    iter.chain(once(Action::ToMaxAndDenominator(
+                        ToMaxAndDenominator::default(),
+                    )))
+                    .chain(once(ToAccum::default().into())),
+                ),
+                PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: true, .. } => {
+                    Box::new(iter.chain(split_actions(spec, Self::TILE_SCALE)))
+                }
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Max { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
@@ -585,6 +617,7 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Max { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
                     if *accum =>
                 {
                     Box::new(iter.chain(split_actions(spec, Self::TILE_SCALE)))
@@ -678,9 +711,6 @@ impl<T: CpuTarget> Target for T {
                     }
                     Box::new(iter.chain(softmax_actions))
                 }
-                PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => Box::new(iter.chain(once(
-                    Action::ToMaxAndDenominator(ToMaxAndDenominator::default()),
-                ))),
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => {
                     let mut unscaled_actions = Vec::new();
                     if let LogicalSpec::Primitive(basics, _, _) = spec {
@@ -745,11 +775,14 @@ impl CpuKernel {
     pub fn argument_count(&self) -> u8 {
         match self {
             CpuKernel::ValueSoftmaxComplete
+            | CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax
             | CpuKernel::VectorSoftmaxComplete
             | CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => 4,
             CpuKernel::MultAdd
+            | CpuKernel::ValueSoftmaxDenominatorAndMax
             | CpuKernel::ValueSoftmaxDenominator
             | CpuKernel::VectorSoftmaxDenominator
+            | CpuKernel::VectorSoftmaxDenominatorAndMax
             | CpuKernel::BroadcastVecMultAdd
             | CpuKernel::BroadcastVecMultAddBf16F32
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
@@ -758,6 +791,7 @@ impl CpuKernel {
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
             | CpuKernel::DotProductLoopBf16Bf16F32
             | CpuKernel::DivideVec
+            | CpuKernel::ValueDivideVecScalar
             | CpuKernel::DivideVecScalarReciprocal => 3,
             CpuKernel::OnePrefixNoOp
             | CpuKernel::PhysicalTransposeByte128
@@ -1019,6 +1053,31 @@ impl CpuKernel {
                 }
                 true
             }
+            CpuKernel::ValueSoftmaxDenominatorAndMax => {
+                debug_assert_eq!(operands.len(), 3);
+                if !matches!(
+                    typ,
+                    PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: true, .. }
+                ) {
+                    return false;
+                }
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                    if !is_rf_or_l1_memory(o.memory()) {
+                        return false;
+                    }
+                }
+                true
+            }
             CpuKernel::VectorSoftmaxComplete => {
                 debug_assert_eq!(operands.len(), 4);
                 if !matches!(typ, PrimitiveSpecType::SoftmaxComplete { .. }) {
@@ -1057,11 +1116,81 @@ impl CpuKernel {
                 }
                 true
             }
+            CpuKernel::VectorSoftmaxDenominatorAndMax => {
+                debug_assert_eq!(operands.len(), 3);
+                if !x86_vector_helpers_available::<Tgt>() {
+                    return false;
+                }
+                let PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                    accum: true,
+                    scan_dim,
+                } = *typ
+                else {
+                    return false;
+                };
+
+                for (dim, size) in operands[0].shape().iter().enumerate() {
+                    if dim != usize::from(scan_dim) && size.get() != 1 {
+                        return false;
+                    }
+                }
+                for operand in &operands[1..] {
+                    if operand.shape().iter().any(|d| d.get() != 1) {
+                        return false;
+                    }
+                }
+                if operands[0].memory() != CpuMemory::VRF
+                    || !is_rf_or_l1_memory(operands[1].memory())
+                    || !is_rf_or_l1_memory(operands[2].memory())
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                }
+                let Some(vector_size) = operands[0].vector_size() else {
+                    return false;
+                };
+                if !matches!(vector_size.get(), 4 | 8 | 16) {
+                    return false;
+                }
+                if !operands[0].volume().get().is_multiple_of(vector_size.get()) {
+                    return false;
+                }
+                true
+            }
             CpuKernel::ValueSoftmaxDenominator => {
                 debug_assert_eq!(operands.len(), 3);
                 if !matches!(
                     typ,
                     PrimitiveSpecType::SoftmaxDenominator { accum: true, .. }
+                ) {
+                    return false;
+                }
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                    if !is_rf_or_l1_memory(o.memory()) {
+                        return false;
+                    }
+                }
+                true
+            }
+            CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax => {
+                debug_assert_eq!(operands.len(), 4);
+                if !matches!(
+                    typ,
+                    PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: true, .. }
                 ) {
                     return false;
                 }
@@ -1204,6 +1333,9 @@ impl CpuKernel {
             }
             CpuKernel::VectorMax => {
                 debug_assert_eq!(operands.len(), 2);
+                if !x86_vector_helpers_available::<Tgt>() {
+                    return false;
+                }
                 if !matches!(typ, PrimitiveSpecType::Max { accum: true, .. }) {
                     return false;
                 }
@@ -1222,7 +1354,7 @@ impl CpuKernel {
                 let Some(vector_size) = operands[0].vector_size() else {
                     return false;
                 };
-                if !matches!(vector_size.get(), 8 | 16) {
+                if !matches!(vector_size.get(), 4 | 8 | 16) {
                     return false;
                 }
                 if !operands[0].volume().get().is_multiple_of(vector_size.get()) {
@@ -1410,6 +1542,28 @@ impl CpuKernel {
                     .enumerate()
                     .any(|(dim, size)| dim != scan_dim && size.get() != 1)
                 {
+                    return false;
+                }
+
+                true
+            }
+            CpuKernel::ValueDivideVecScalar => {
+                if !matches!(typ, PrimitiveSpecType::DivideVecScalar { .. }) {
+                    return false;
+                }
+                debug_assert_eq!(operands.len(), 3);
+
+                if operands.iter().any(|o| o.dtype() != Dtype::Float32) {
+                    return false;
+                }
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+                if operands.iter().any(|o| !is_rf_or_l1_memory(o.memory())) {
                     return false;
                 }
 
@@ -1662,15 +1816,14 @@ impl CpuKernel {
             }
             CpuKernel::VectorMax => MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
                 if memory.vector_rf() {
-                    1 // one __m128 allocated by horizontal_max_f32
+                    1 // horizontal max helper allocates one temp. vector
                 } else {
                     0
                 }
             })),
             CpuKernel::VectorMaxLoop => {
                 MemoryAllocation::Simple(
-                    // `VECTOR_ACCUM_COUNT` `__m256` accumulators plus the `__m128` temp in
-                    // `horizontal_max_f32`.
+                    // accumulators plus the horizontal max helper temporary.
                     CPU_MEMORIES.map(|memory| {
                         if memory.vector_rf() {
                             u64::from(VECTOR_ACCUM_COUNT) + 1
@@ -1703,6 +1856,17 @@ impl CpuKernel {
                     }
                 }))
             }
+            CpuKernel::VectorSoftmaxDenominatorAndMax => {
+                MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
+                    if memory.vector_rf() {
+                        // Max accumulators, denominator accumulators, one temporary for
+                        // broadcasting the chunk max, and the x86 exp budget.
+                        (2 * u64::from(VECTOR_ACCUM_COUNT)) + 1 + X86_EXP_PS_REG_COUNT
+                    } else {
+                        0
+                    }
+                }))
+            }
             CpuKernel::DivideVecScalarReciprocal => MemoryAllocation::Simple(
                 CPU_MEMORIES.map(|memory| if memory.vector_rf() { 2 } else { 0 }),
             ),
@@ -1710,7 +1874,11 @@ impl CpuKernel {
         }
     }
 
-    pub fn main_cost<P: View>(&self, parameters: &[P]) -> MainCost {
+    pub fn main_cost<P>(&self, parameters: &[P]) -> MainCost
+    where
+        P: View,
+        P::Tgt: CpuTarget,
+    {
         match self {
             CpuKernel::OnePrefixNoOp => 0,
             CpuKernel::BroadcastVecMultAdd
@@ -1790,22 +1958,42 @@ impl CpuKernel {
                     .sum::<MainCost>();
                 INST_COST * (vector_cnt + 1) + io_cost
             }
+            CpuKernel::ValueDivideVecScalar => {
+                // TODO: Measure throughput.
+                INST_COST
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
+            }
             CpuKernel::VectorMaxLoop => {
-                // TODO: Measure throughput! This is a rough estimate.
                 let value_cnt = parameters[0].spec().volume().get();
-                let vector_cnt = value_cnt / DOT_PRODUCT_STRIP_SIZE.get();
-                let accum_count =
-                    vector_accum_count(value_cnt, DOT_PRODUCT_STRIP_SIZE.get()).unwrap();
-                INST_COST * (2 * vector_cnt + accum_count + 2) + move_cost(parameters[1].spec())
+                let (vector_size, accum_count) = vector_max_loop_properties::<P::Tgt>(value_cnt)
+                    .expect("VectorMaxLoop should only apply to supported vector sizes");
+                let vector_cnt = value_cnt / vector_size.get();
+                // Hot-L1 throughput is limited by vector max/reduction and shuffle ports. The
+                // vector loads and scalar output update overlap with that work.
+                let vector_max_cost = (vector_cnt + accum_count + 3).div_ceil(2) * INST_COST;
+                let horizontal_tail_cost = match vector_size.get() {
+                    4 => 4 * INST_COST,
+                    8 => 5 * INST_COST,
+                    16 => 6 * INST_COST,
+                    _ => unreachable!("unsupported VectorMaxLoop width"),
+                };
+                let l1_io_cost = (vector_cnt.div_ceil(2) + 1) * INST_COST;
+                vector_max_cost.max(horizontal_tail_cost).max(l1_io_cost)
+                    + slower_than_l1_io_cost(parameters)
             }
             CpuKernel::DivideVecScalarReciprocal => {
                 // Setup once:
-                //   - `vdivss`      : scalar reciprocal
+                //   - `vdivss`      : scalar reciprocal, with load folded into the divide
                 //   - `vbroadcastss`: splat reciprocal to a vector register
-                // per output vector:
-                //   - `vmulps` + load/store traffic (compiler may unroll)
-                const RECIPROCAL_SETUP_COST: MainCost = 2 * INST_COST;
-                const PER_VECTOR_COST: MainCost = 2 * INST_COST;
+                //
+                // Per output vector, the hot-cache loop loads one vector, multiplies by the
+                // reciprocal, and stores one vector. Throughput is store-port limited for AVX2
+                // once the vector count exceeds the scalar divide throughput.
+                const RECIPROCAL_SETUP_COST: MainCost = 3 * INST_COST;
+                const PER_VECTOR_COST: MainCost = INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = divide_vec_scalar_reciprocal_vector_size(
                     parameters[0].spec(),
@@ -1815,8 +2003,8 @@ impl CpuKernel {
                 .get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
-                let io_cost = move_cost(parameters[0].spec()) + move_cost(parameters[2].spec());
-                RECIPROCAL_SETUP_COST + PER_VECTOR_COST * vector_cnt + io_cost
+                RECIPROCAL_SETUP_COST.max(PER_VECTOR_COST * vector_cnt)
+                    + slower_than_l1_io_cost(parameters)
             }
             CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
                 // TODO: Measure throughput.
@@ -1834,17 +2022,57 @@ impl CpuKernel {
                     .sum::<MainCost>();
                 PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + io_cost
             }
-            CpuKernel::ValueSoftmaxDenominator | CpuKernel::VectorSoftmaxDenominator => {
-                // TODO: Measure throughput!
+            CpuKernel::VectorSoftmaxDenominatorAndMax => {
+                const PER_VECTOR_COST: MainCost = 4 * INST_COST;
+                const FINAL_REDUCTION_COST: MainCost = 8 * INST_COST;
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_size = parameters[0].spec().vector_size().unwrap().get();
+                debug_assert_eq!(value_cnt % vector_size, 0);
+                let vector_cnt = value_cnt / vector_size;
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
+                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + 2 * SCALAR_EXPF_COST + io_cost
+            }
+            CpuKernel::ValueSoftmaxDenominatorAndMax => {
+                // Updates the running max and denominator with two scalar `expf` rescalings.
+                INST_COST * 6
+                    + 2 * SCALAR_EXPF_COST
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
+            }
+            CpuKernel::VectorSoftmaxDenominator => {
+                const PER_VECTOR_COST: MainCost = 6 * INST_COST;
+                const FINAL_REDUCTION_COST: MainCost = 2 * INST_COST;
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_size = parameters[0].spec().vector_size().unwrap().get();
+                debug_assert_eq!(value_cnt % vector_size, 0);
+                let vector_cnt = value_cnt / vector_size;
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
+                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + io_cost
+            }
+            CpuKernel::ValueSoftmaxDenominator
+            | CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax => {
+                // Accumulates one scalar exponential into the denominator. The unscaled variant
+                // also writes that exponential to the unscaled output.
                 INST_COST * 3
+                    + SCALAR_EXPF_COST
                     + parameters
                         .iter()
                         .map(|p| move_cost(p.spec()))
                         .sum::<MainCost>()
             }
             CpuKernel::ValueSoftmaxComplete => {
-                // TODO: Measure throughput!
+                // Computes one scalar exponential, divides by the denominator, and writes one
+                // output value.
                 INST_COST * 4
+                    + SCALAR_EXPF_COST
                     + parameters
                         .iter()
                         .map(|p| move_cost(p.spec()))
@@ -1852,23 +2080,22 @@ impl CpuKernel {
             }
             CpuKernel::VectorSoftmaxComplete => {
                 // Setup once:
-                //   - `vdivss`      : scalar reciprocal
+                //   - `vdivss`      : scalar reciprocal, with load folded into the divide
                 //   - `vbroadcastss`: splat reciprocal to a vector register
-                // per output vector:
-                //   - exp approximation, `vmulps`, and load/store traffic
+                //
+                // Per output vector, the vector exponential dominates the fused exp/scale/store
+                // body. Hot-L1 input and output traffic overlaps with that vector-exp work.
                 const RECIPROCAL_SETUP_COST: MainCost = 2 * INST_COST;
-                const PER_VECTOR_COST: MainCost = 4 * INST_COST;
+                const VECTOR_EXPF_AND_SCALE_COST: MainCost = 6 * INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = softmax_vector_size(parameters[0].spec(), parameters[3].spec())
                     .unwrap()
                     .get();
                 debug_assert!(value_cnt.is_multiple_of(vector_size));
                 let vector_cnt = value_cnt / vector_size;
-                let io_cost = parameters
-                    .iter()
-                    .map(|p| move_cost(p.spec()))
-                    .sum::<MainCost>();
-                RECIPROCAL_SETUP_COST + PER_VECTOR_COST * vector_cnt + io_cost
+                RECIPROCAL_SETUP_COST
+                    + VECTOR_EXPF_AND_SCALE_COST * vector_cnt
+                    + slower_than_l1_io_cost(parameters)
             }
             CpuKernel::MultAdd => {
                 let compute_cost = match parameters[0].spec().dtype() {
@@ -1934,12 +2161,19 @@ impl CpuKernel {
     }
 }
 
-pub(crate) fn x86_f32_horizontal_max_helper(vector_size: DimSize) -> &'static str {
-    match vector_size.get() {
-        8 => "horizontal_max_f32",
-        16 => "_mm512_reduce_max_ps",
-        _ => panic!("Unsupported x86 float32 max helper width {vector_size}"),
-    }
+/// Returns movement cost only for operand in memories slower than L1.
+///
+/// Kernels use this when their hot-L1 loads and stores overlap with compute throughput, but slower
+/// memory accesses should still affect scheduling.
+fn slower_than_l1_io_cost<P>(parameters: &[P]) -> MainCost
+where
+    P: View,
+{
+    parameters
+        .iter()
+        .filter(|p| p.spec().memory().cache_hit_cost() > CpuMemory::L1.cache_hit_cost())
+        .map(|p| move_cost(p.spec()))
+        .sum::<MainCost>()
 }
 
 /// Returns the number of vector accumulators to use for the given strip width.
@@ -1968,9 +2202,16 @@ fn largest_vector_size_for_volume<Tgt: Target>(dtype: Dtype, volume: u32) -> Opt
         .map(|vec_type| DimSize::new(u32::from(vec_type.value_cnt)).unwrap())
 }
 
-pub(crate) fn vector_max_loop_properties<Tgt: Target>(value_cnt: u32) -> Option<(DimSize, u32)> {
+/// Returns the vector width and accumulator count for `VectorMaxLoop`.
+///
+/// Returns `None` when the target lacks the x86 horizontal-max helpers or no supported vector
+/// width evenly partitions `value_cnt`.
+pub(crate) fn vector_max_loop_properties<Tgt: CpuTarget>(value_cnt: u32) -> Option<(DimSize, u32)> {
+    if !x86_vector_helpers_available::<Tgt>() {
+        return None;
+    }
     let vector_size = largest_vector_size_for_volume::<Tgt>(Dtype::Float32, value_cnt)?;
-    if !matches!(vector_size.get(), 8 | 16) {
+    if !matches!(vector_size.get(), 4 | 8 | 16) {
         return None;
     }
     let accum_count = vector_accum_count(value_cnt, vector_size.get())?;
@@ -2578,6 +2819,11 @@ fn is_rf_or_l1_memory<M: Copy + PartialEq<CpuMemory>>(memory: M) -> bool {
     memory == CpuMemory::L1 || is_rf_memory(memory)
 }
 
+// TODO: This should go away when Avx2 and Avx512 get their own "supertype"
+fn x86_vector_helpers_available<Tgt: CpuTarget>() -> bool {
+    matches!(Tgt::target_id(), TargetId::Avx2 | TargetId::Avx512)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2589,7 +2835,7 @@ mod tests {
         scheduling::{moves::Move, Action, ActionT, ApplyError, NotApplicableReason},
         shape, spec,
         spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
-        target::{Avx2Target, Target},
+        target::Avx2Target,
         tensorspec::{TensorSpec, TensorSpecAux},
         views::Param,
     };

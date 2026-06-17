@@ -100,6 +100,8 @@ pub enum PrimitiveSpecType {
         // TODO: Swap variant name order to match args
         #[cfg_attr(test, proptest(strategy = "0..4u8"))]
         scan_dim: u8,
+        /// Whether to update the maximum and denominator tensors in place.
+        accum: bool,
     },
     /// Computes `Σ_j e^(x_j - max_k x_k)` and each `e^(x_i - max_k x_k)` as outputs.
     ///
@@ -557,6 +559,7 @@ impl PrimitiveBasics {
             PrimitiveSpecType::Matmul { accum }
             | PrimitiveSpecType::Conv { accum }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
             | PrimitiveSpecType::Max { accum, .. } => accum,
@@ -564,7 +567,6 @@ impl PrimitiveBasics {
             PrimitiveSpecType::OnePrefix
             | PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::DivideVec
             | PrimitiveSpecType::DivideVecScalar { .. }
             | PrimitiveSpecType::Broadcast { .. }
@@ -589,6 +591,19 @@ impl PrimitiveBasics {
                     _ => None,
                 }
             }
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: true, .. } => match index {
+                1 => match dtypes[index] {
+                    Dtype::Uint8
+                    | Dtype::Uint16
+                    | Dtype::Uint32
+                    | Dtype::Sint8
+                    | Dtype::Sint16
+                    | Dtype::Sint32 => Some(FillValue::Min),
+                    Dtype::Float32 | Dtype::Bfloat16 => Some(FillValue::NegInf),
+                },
+                2 => Some(FillValue::Zero),
+                _ => None,
+            },
             PrimitiveSpecType::Max { accum: true, .. } => match dtypes[index] {
                 Dtype::Uint8
                 | Dtype::Uint16
@@ -607,7 +622,7 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Max { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum: false, .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. }
             | PrimitiveSpecType::Broadcast { dim: _ } => panic!("Not an accumulating Spec"),
             PrimitiveSpecType::DivideVec => todo!(),
@@ -1149,7 +1164,8 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::SoftmaxComplete { .. } => &[In, In, In, Out],
             PrimitiveSpecType::SoftmaxDenominator { accum: true, .. } => &[In, In, InOut],
             PrimitiveSpecType::SoftmaxDenominator { accum: false, .. } => &[In, In, Out],
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => &[In, Out, Out],
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: true, .. } => &[In, InOut, InOut],
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. } => &[In, Out, Out],
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum: true, .. } => {
                 &[In, InOut, Out]
             }
@@ -1288,6 +1304,9 @@ impl Display for PrimitiveSpecType {
             PrimitiveSpecType::Softmax { scan_dim } => write!(f, "Softmax{scan_dim}"),
             PrimitiveSpecType::SoftmaxComplete { scan_dim } => {
                 write!(f, "SoftmaxComplete{scan_dim}")
+            }
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, accum } if *accum => {
+                write!(f, "SoftmaxDenominatorAndMaxAccum{scan_dim}")
             }
             PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, .. } => {
                 write!(f, "SoftmaxDenominatorAndMax{scan_dim}")
@@ -2007,6 +2026,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
                     *accum = true;
@@ -2017,6 +2037,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Matmul { accum }
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. } => {
                     *accum = true;
@@ -2419,6 +2440,11 @@ impl BiMap for PrimitiveBasicsBimap {
                 scan_dim: _,
                 dtypes: _,
             }
+            | SpecKey::SoftmaxDenominatorAndMax {
+                rank: _,
+                scan_dim: _,
+                dtypes: _,
+            }
             | SpecKey::SoftmaxDenominator {
                 rank: _,
                 scan_dim: _,
@@ -2464,6 +2490,17 @@ impl BiMap for PrimitiveBasicsBimap {
                         },
                         dtypes.into(),
                     ),
+                    SpecKey::SoftmaxDenominatorAndMax {
+                        rank: _,
+                        scan_dim,
+                        dtypes,
+                    } => (
+                        PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                            scan_dim: *scan_dim,
+                            accum,
+                        },
+                        dtypes.into(),
+                    ),
                     SpecKey::SoftmaxDenominator {
                         rank: _,
                         scan_dim,
@@ -2501,11 +2538,6 @@ impl BiMap for PrimitiveBasicsBimap {
                 rank: _,
                 scan_dim: _,
                 dtypes: _,
-            }
-            | SpecKey::SoftmaxDenominatorAndMax {
-                rank: _,
-                scan_dim: _,
-                dtypes: _,
             } => {
                 let (typ, dtypes) = match key {
                     SpecKey::Softmax {
@@ -2524,16 +2556,6 @@ impl BiMap for PrimitiveBasicsBimap {
                         dtypes,
                     } => (
                         PrimitiveSpecType::SoftmaxComplete {
-                            scan_dim: *scan_dim,
-                        },
-                        dtypes.into(),
-                    ),
-                    SpecKey::SoftmaxDenominatorAndMax {
-                        rank: _,
-                        scan_dim,
-                        dtypes,
-                    } => (
-                        PrimitiveSpecType::SoftmaxDenominatorAndMax {
                             scan_dim: *scan_dim,
                         },
                         dtypes.into(),
@@ -2651,7 +2673,7 @@ impl PrimitiveBasicsBimap {
                 scan_dim,
                 dtypes: dtypes.as_slice().try_into().unwrap(),
             },
-            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim } => {
+            PrimitiveSpecType::SoftmaxDenominatorAndMax { scan_dim, accum: _ } => {
                 SpecKey::SoftmaxDenominatorAndMax {
                     rank: spec_shape.len().try_into().unwrap(),
                     scan_dim,
@@ -2716,6 +2738,7 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Matmul { accum }
             | PrimitiveSpecType::Conv { accum }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { accum, .. }
+            | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
             | PrimitiveSpecType::Max { accum, .. } => Some(!accum as _),
@@ -2726,8 +2749,7 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::DivideVec
             | PrimitiveSpecType::DivideVecScalar { .. }
             | PrimitiveSpecType::Softmax { .. }
-            | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => None,
+            | PrimitiveSpecType::SoftmaxComplete { .. } => None,
         }
     }
 }

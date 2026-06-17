@@ -7,7 +7,7 @@ use crate::{
     scheduling::{
         bufferize::Bufferize,
         moves::Move,
-        tiling::{Split, TileOut},
+        tiling::{Split, SplitSoftmaxDenominatorAndMax, TileOut},
         Action,
     },
     spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType},
@@ -136,23 +136,19 @@ pub fn split_actions<Tgt: Target>(
 
     let operands = spec.parameters();
 
-    match typ {
+    let orig_dim_size = match typ {
         PrimitiveSpecType::Matmul { accum: true } => {
-            let [b, m, orig_k, n] = spec_shape[..] else {
+            let [_, _, orig_k, _] = spec_shape[..] else {
                 unreachable!();
             };
-            Either::Left(
-                dim_range(orig_k, false, tile_scale)
-                    .filter(move |&new_k| {
-                        // TODO: Shouldn't this be rejected during application instead?
-                        operands[0].is_valid_tile_shape(&[b, m, new_k], false)
-                            && operands[1].is_valid_tile_shape(&[b, new_k, n], false)
-                    })
-                    .map(|k| Action::Split(Split { k })),
-            )
+            orig_k
         }
         PrimitiveSpecType::Max { dim, accum: true }
         | PrimitiveSpecType::SoftmaxDenominator {
+            scan_dim: dim,
+            accum: true,
+        }
+        | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
             scan_dim: dim,
             accum: true,
         } => {
@@ -164,24 +160,77 @@ pub fn split_actions<Tgt: Target>(
                     spec_shape.len()
                 );
             }
-            let orig_dim_size = spec_shape[scan_dim_idx];
-            Either::Right(
-                dim_range(orig_dim_size, false, tile_scale)
-                    .filter(move |&new_k| {
-                        // TODO: Shouldn't this be rejected during application instead?
-                        operands.first().is_some_and(|input_spec| {
-                            let mut tile_shape = spec_shape.clone();
-                            tile_shape[scan_dim_idx] = new_k;
-                            input_spec.is_valid_tile_shape(&tile_shape, false)
-                        })
-                    })
-                    .map(|k| Action::Split(Split { k })),
-            )
+            spec_shape[scan_dim_idx]
+        }
+        PrimitiveSpecType::SoftmaxDenominatorAndMax {
+            scan_dim,
+            accum: true,
+        } => {
+            let scan_dim_idx = usize::from(*scan_dim);
+            if scan_dim_idx >= spec_shape.len() {
+                panic!(
+                    "scan_dim {} is out of bounds for spec_shape with length {}",
+                    scan_dim_idx,
+                    spec_shape.len()
+                );
+            }
+            spec_shape[scan_dim_idx]
         }
         _ => {
             panic!("split_actions called on unsupported spec type: {typ:?}");
         }
-    }
+    };
+
+    dim_range(orig_dim_size, false, tile_scale).filter_map(move |k| match typ {
+        PrimitiveSpecType::Matmul { accum: true } => {
+            let [b, m, _, n] = spec_shape[..] else {
+                unreachable!();
+            };
+            // TODO: Shouldn't this be rejected during application instead?
+            (operands[0].is_valid_tile_shape(&[b, m, k], false)
+                && operands[1].is_valid_tile_shape(&[b, k, n], false))
+            .then_some(Action::Split(Split { k }))
+        }
+        PrimitiveSpecType::Max { dim, accum: true }
+        | PrimitiveSpecType::SoftmaxDenominator {
+            scan_dim: dim,
+            accum: true,
+        } => {
+            // TODO: Shouldn't this be rejected during application instead?
+            let scan_dim_idx = usize::from(*dim);
+            let mut tile_shape = spec_shape.clone();
+            tile_shape[scan_dim_idx] = k;
+            operands[0]
+                .is_valid_tile_shape(&tile_shape, false)
+                .then_some(Action::Split(Split { k }))
+        }
+        PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
+            scan_dim: dim,
+            accum: true,
+        } => {
+            // TODO: Shouldn't this be rejected during application instead?
+            let scan_dim_idx = usize::from(*dim);
+            let mut tile_shape = spec_shape.clone();
+            tile_shape[scan_dim_idx] = k;
+            (operands[0].is_valid_tile_shape(&tile_shape, false)
+                && operands[3].is_valid_tile_shape(&tile_shape, false))
+            .then_some(Action::Split(Split { k }))
+        }
+        PrimitiveSpecType::SoftmaxDenominatorAndMax {
+            scan_dim,
+            accum: true,
+        } => {
+            let scan_dim_idx = usize::from(*scan_dim);
+            let mut tile_shape = spec_shape.clone();
+            tile_shape[scan_dim_idx] = k;
+            operands[0]
+                .is_valid_tile_shape(&tile_shape, false)
+                .then_some(Action::SplitSoftmaxDenominatorAndMax(
+                    SplitSoftmaxDenominatorAndMax { k },
+                ))
+        }
+        _ => unreachable!(),
+    })
 }
 
 pub fn bufferize_actions<Tgt: Target>(

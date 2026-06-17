@@ -16,7 +16,8 @@ pub struct HeaderEmitter {
     pub emit_cores_clamp: bool,
     pub emit_sum8: bool,
     pub emit_cvtbf16_fp32: bool,
-    pub emit_max: bool,
+    pub emit_horizontal_max4: bool,
+    pub emit_horizontal_max8: bool,
     pub benchmark_counters: BTreeMap<String, String>,
 }
 
@@ -56,8 +57,11 @@ impl HeaderEmitter {
         if self.emit_cvtbf16_fp32 {
             out.write_str(include_str!("../codegen/partials/x86/cvtbf16_fp32.c"))?;
         }
-        if self.emit_max {
-            out.write_str(include_str!("../codegen/partials/x86/max.c"))?;
+        if self.emit_horizontal_max4 {
+            out.write_str(include_str!("../codegen/partials/x86/max4.c"))?;
+        }
+        if self.emit_horizontal_max8 {
+            out.write_str(include_str!("../codegen/partials/x86/max8.c"))?;
         }
         if self.emit_expf_avx2 {
             out.write_str(include_str!("../codegen/partials/x86/expf_avx2.c"))?;
