@@ -620,11 +620,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         match kernel {
             Avx512Kernel::Cpu(_) => unreachable!("CPU kernels should use the generic emitter"),
             Avx512Kernel::DotProductLoopVdpbf16ps => {
-                let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                    0 | 1 => self.c_index_ptr(a, b, None),
-                    2 => self.c_index(a, b, None),
-                    _ => unreachable!(),
-                });
+                let exprs = [
+                    self.c_ptr_arg(&arguments[0]),
+                    self.c_ptr_arg(&arguments[1]),
+                    self.c_value_arg(&arguments[2]),
+                ];
 
                 let lhs_spec = arguments[0].spec();
                 let k = lhs_spec.shape()[2].get();
@@ -1337,16 +1337,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             }) => {
                 match kernel_type.into_cpu_kernel() {
                     Some(CpuKernel::OnePrefixNoOp) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0])
                     }
                     Some(CpuKernel::ValueSoftmaxComplete) => {
                         self.headers.emit_math_include = true;
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         writeln!(
                             w,
                             "{}{} = expf({} - {}) / {};",
@@ -1359,9 +1355,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     Some(CpuKernel::ValueSoftmaxDenominatorAndMax) => {
                         self.headers.emit_math_include = true;
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         let old_max_name = self.namer.fresh_name();
                         let new_max_name = self.namer.fresh_name();
                         writeln!(w, "{}float {old_max_name} = {};", indent(depth), exprs[1],)?;
@@ -1383,9 +1377,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     Some(CpuKernel::ValueSoftmaxDenominator) => {
                         self.headers.emit_math_include = true;
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         writeln!(
                             w,
                             "{}{} += expf({} - {});",
@@ -1397,9 +1389,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     Some(CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax) => {
                         self.headers.emit_math_include = true;
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         let reg_name = self.namer.fresh_name();
                         writeln!(
                             w,
@@ -1420,14 +1410,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_size = arguments[0].spec().vector_size().unwrap();
                         let exp_helper = self.require_x86_f32_exp_helper(vector_size);
                         let sum_helper = self.require_x86_f32_sum_helper(vector_size);
-                        let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let out_tensor = arguments[2].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
-                        let out_buffer = self.name_env.get(&out_tensor.identifier()).unwrap();
-                        let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
-                        let out_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
-                        let max_expr = self.c_index(max_buffer, &max_iexpr, None);
-                        let out_expr = self.c_index(out_buffer, &out_iexpr, None);
+                        let max_expr = self.c_value_arg(&arguments[1]);
+                        let out_expr = self.c_value_arg(&arguments[2]);
 
                         let accum_count = input_vector_exprs
                             .len()
@@ -1491,14 +1475,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let sum_helper = self.require_x86_f32_sum_helper(vector_size);
                         let horizontal_max_helper =
                             self.require_x86_f32_horizontal_max_helper(vector_size);
-                        let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let denom_tensor = arguments[2].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
-                        let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
-                        let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
-                        let denom_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
-                        let max_expr = self.c_index(max_buffer, &max_iexpr, None);
-                        let denom_expr = self.c_index(denom_buffer, &denom_iexpr, None);
+                        let max_expr = self.c_value_arg(&arguments[1]);
+                        let denom_expr = self.c_value_arg(&arguments[2]);
 
                         let accum_count = input_vector_exprs
                             .len()
@@ -1620,20 +1598,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let exp_helper = self.require_x86_f32_exp_helper(vector_size);
                         let sum_helper = self.require_x86_f32_sum_helper(vector_size);
 
-                        let input_tensor = arguments[0].backing_tensor().unwrap();
-                        let input_buffer = self.name_env.get(&input_tensor.identifier()).unwrap();
-                        let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
-                        let max_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
-                        let max_expr = self.c_index(max_buffer, &max_iexpr, None);
-                        let denom_tensor = arguments[2].backing_tensor().unwrap();
-                        let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
-                        let denom_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
-                        let output_tensor = arguments[3].backing_tensor().unwrap();
-                        let output_buffer = self.name_env.get(&output_tensor.identifier()).unwrap();
-                        let input_base_expr = zero_points(arguments[0].make_buffer_indexing_expr());
-                        let output_base_expr =
-                            zero_points(arguments[3].make_buffer_indexing_expr());
+                        let (input_buffer, input_base_expr) = self.c_arg_parts(&arguments[0]);
+                        let max_expr = self.c_value_arg(&arguments[1]);
+                        let denom_expr = self.c_value_arg(&arguments[2]);
+                        let (output_buffer, output_base_expr) = self.c_arg_parts(&arguments[3]);
                         let volume = arguments[0].spec().volume().get();
                         let vector_count = volume / vector_size.get();
                         let accum_count = usize::try_from(vector_count)
@@ -1686,8 +1654,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         };
 
                         if !input_buffer.needs_unroll() && !output_buffer.needs_unroll() {
-                            let in_ptr = self.c_index_ptr(input_buffer, &input_base_expr, None);
-                            let out_ptr = self.c_index_ptr(output_buffer, &output_base_expr, None);
+                            let in_ptr = self.c_index_ptr(&input_buffer, &input_base_expr, None);
+                            let out_ptr = self.c_index_ptr(&output_buffer, &output_base_expr, None);
                             let offset_var = self.namer.fresh_name();
                             let step_size = vector_size.get() * u32::try_from(accum_count).unwrap();
                             debug_assert_eq!(volume % step_size, 0);
@@ -1718,9 +1686,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
                                 let input_iexpr = input_base_expr.clone() + offset;
                                 let output_iexpr = output_base_expr.clone() + offset;
-                                let input_ptr = self.c_index_ptr(input_buffer, &input_iexpr, None);
+                                let input_ptr = self.c_index_ptr(&input_buffer, &input_iexpr, None);
                                 let output_ptr =
-                                    self.c_index_ptr(output_buffer, &output_iexpr, None);
+                                    self.c_index_ptr(&output_buffer, &output_iexpr, None);
                                 let unscaled_vector_name = self.namer.fresh_name();
                                 emit_unscaled_vector(
                                     w,
@@ -1749,7 +1717,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             w,
                             "{}{} += {sum_helper}({});",
                             indent(depth),
-                            self.c_index(denom_buffer, &denom_iexpr, None),
+                            denom_expr,
                             reduced_accum_names[0],
                         )?;
                         Ok(())
@@ -1765,24 +1733,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vtype = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size)
                             .native_type_name;
 
-                        let input_tensor = arguments[0].backing_tensor().unwrap();
-                        let input_buffer = self.name_env.get(&input_tensor.identifier()).unwrap();
-                        let max_tensor = arguments[1].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
-                        let denominator_tensor = arguments[2].backing_tensor().unwrap();
-                        let denominator_buffer =
-                            self.name_env.get(&denominator_tensor.identifier()).unwrap();
-                        let output_tensor = arguments[3].backing_tensor().unwrap();
-                        let output_buffer = self.name_env.get(&output_tensor.identifier()).unwrap();
-
-                        let inp_base_expr = zero_points(arguments[0].make_buffer_indexing_expr());
-                        let max_expr = zero_points(arguments[1].make_buffer_indexing_expr());
-                        let denominator_expr =
-                            zero_points(arguments[2].make_buffer_indexing_expr());
-                        let out_base_expr = zero_points(arguments[3].make_buffer_indexing_expr());
-
-                        let max_expr = self.c_index(max_buffer, &max_expr, None);
-                        let denom_expr = self.c_index(denominator_buffer, &denominator_expr, None);
+                        let (input_buffer, inp_base_expr) = self.c_arg_parts(&arguments[0]);
+                        let max_expr = self.c_value_arg(&arguments[1]);
+                        let denom_expr = self.c_value_arg(&arguments[2]);
+                        let (output_buffer, out_base_expr) = self.c_arg_parts(&arguments[3]);
                         let reciprocal_vec = self.namer.fresh_name();
                         writeln!(
                             w,
@@ -1805,11 +1759,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let out_vec = self.namer.fresh_name();
                         let input_ptr = format!(
                             "{} + {loop_iter_name}",
-                            self.c_index_ptr(input_buffer, &inp_base_expr, None)
+                            self.c_index_ptr(&input_buffer, &inp_base_expr, None)
                         );
                         let output_ptr = format!(
                             "{} + {loop_iter_name}",
-                            self.c_index_ptr(output_buffer, &out_base_expr, None)
+                            self.c_index_ptr(&output_buffer, &out_base_expr, None)
                         );
                         writeln!(w, "{0}{vtype} {1};", indent(depth + 1), input_vec)?;
                         writeln!(
@@ -1845,9 +1799,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     Some(CpuKernel::ValueMax) => {
                         self.headers.emit_math_include = true;
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         writeln!(
                             w,
                             "{}{} = fmaxf({}, {});",
@@ -1868,10 +1820,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         writeln!(w, "{}/* VectorMax */", indent(depth))?;
 
-                        let out_tensor = arguments[1].backing_tensor().unwrap();
-                        let out_buffer = self.name_env.get(&out_tensor.identifier()).unwrap();
-                        let out_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
-                        let out_expr = self.c_index(out_buffer, &out_iexpr, None);
+                        let out_expr = self.c_value_arg(&arguments[1]);
 
                         let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
 
@@ -1905,11 +1854,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         self.headers.emit_math_include = true;
 
-                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                            0 => self.c_index_ptr(a, b, None),
-                            1 => self.c_index(a, b, None),
-                            _ => unreachable!(),
-                        });
+                        let exprs = [
+                            self.c_ptr_arg(&arguments[0]),
+                            self.c_value_arg(&arguments[1]),
+                        ];
 
                         let horizontal_max_helper =
                             self.require_x86_f32_horizontal_max_helper(vector_size);
@@ -1996,9 +1944,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     Some(CpuKernel::MultAdd) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         writeln!(
                             w,
                             "{}{} += {} * {};  /* MultAdd */",
@@ -2014,9 +1960,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             .flat_map(|arg| arg.spec().shape())
                             .all(|d| d.get() == 1);
                         if is_scalar {
-                            let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                                self.c_index(a, b, None)
-                            });
+                            let exprs = self.c_value_args(arguments);
                             return writeln!(w, "{}{} = {};", indent(depth), exprs[1], exprs[0]);
                         }
 
@@ -2037,18 +1981,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_count = first_spec.volume().get() / vector_size.get();
 
                         for vector_idx in 0..vector_count {
+                            let elem_offset =
+                                i32::try_from(vector_size.get() * vector_idx).unwrap();
                             let exprs = arguments
                                 .iter()
-                                .map(|arg| {
-                                    let backing_tensor = arg.backing_tensor().unwrap();
-                                    let buffer =
-                                        self.name_env.get(&backing_tensor.identifier()).unwrap();
-                                    let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
-                                    buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                                    buffer_indexing_expr +=
-                                        i32::try_from(vector_size.get() * vector_idx).unwrap();
-                                    self.c_index_ptr(buffer, &buffer_indexing_expr, None)
-                                })
+                                .map(|arg| self.c_ptr_arg_add(arg, elem_offset))
                                 .collect::<Vec<_>>();
 
                             writeln!(
@@ -2063,9 +2000,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     Some(CpuKernel::CastBf16F32) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         writeln!(w, "{}{} = (float){};", indent(depth), exprs[1], exprs[0])
                     }
                     Some(CpuKernel::VectorCastBf16F32) => {
@@ -2073,31 +2008,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             i32::try_from(arguments[1].spec().vector_size().unwrap().get())
                                 .unwrap();
 
-                        let lhs_tensor = arguments[0].backing_tensor().unwrap();
-                        let lhs_buffer = self.name_env.get(&lhs_tensor.identifier()).unwrap();
-                        let rhs_tensor = arguments[1].backing_tensor().unwrap();
-                        let rhs_buffer = self.name_env.get(&rhs_tensor.identifier()).unwrap();
-
-                        let lhs_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
-                        let rhs0_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
-                        let rhs1_iexpr =
-                            zero_points(arguments[1].make_buffer_indexing_expr() + vector_size);
                         self.headers.emit_cvtbf16_fp32 = true;
                         writeln!(
                             w,
                             "{}cvtbf16_fp32_256({}, &{}, &{});",
                             indent(depth),
-                            self.c_index_vec(lhs_buffer, &lhs_iexpr, None),
-                            self.c_index_vec(rhs_buffer, &rhs0_iexpr, None),
-                            self.c_index_vec(rhs_buffer, &rhs1_iexpr, None)
+                            self.c_vec_arg(&arguments[0]),
+                            self.c_vec_arg(&arguments[1]),
+                            self.c_vec_arg_add(&arguments[1], vector_size)
                         )
                     }
                     Some(CpuKernel::MemsetZero) => {
                         debug_assert_eq!(arguments.len(), 1);
-                        let arg_tensor = arguments[0].backing_tensor().unwrap();
-                        let arg_buffer = self.name_env.get(&arg_tensor.identifier()).unwrap();
-                        let arg_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
-                        let arg_expr = self.c_index_ptr(arg_buffer, &arg_iexpr, None);
+                        let arg_expr = self.c_ptr_arg(&arguments[0]);
                         writeln!(
                             w,
                             "{}memset((void *)({arg_expr}), 0, {});",
@@ -2110,9 +2033,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         | CpuKernel::VectorNegInf
                         | CpuKernel::VectorMin),
                     ) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |_, a, b| {
-                            self.c_index_vec(a, b, None)
-                        });
+                        let exprs = self.c_vec_args(arguments);
                         let dtype = arguments[0].spec().dtype();
                         let volume = arguments[0].spec().volume();
                         let vtype = get_vector(Tgt::vec_types(), dtype, volume);
@@ -2140,8 +2061,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         | CpuKernel::ValueNegInf
                         | CpuKernel::ValueMin),
                     ) => {
-                        let exprs = self
-                            .param_args_to_c_indices(arguments, |_, a, b| self.c_index(a, b, None));
+                        let exprs = self.c_value_args(arguments);
                         match cpu_kernel {
                             CpuKernel::ValueZero => {
                                 writeln!(w, "{}{} = 0;  /* ValueZero */", indent(depth), exprs[0],)
@@ -2181,23 +2101,20 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         debug_assert_eq!(volume % vector_size, 0);
                         let vector_count = volume / vector_size;
                         for vector_idx in 0..vector_count {
-                            let exprs =
-                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                                    idx if idx == scalar_idx => self.c_index(a, b, None),
-                                    idx if idx == broadcast_idx => self.c_index_vec(
-                                        a,
-                                        &(b.clone()
-                                            + i32::try_from(vector_idx * vector_size).unwrap()),
-                                        None,
-                                    ),
-                                    2 => self.c_index_vec(
-                                        a,
-                                        &(b.clone()
-                                            + i32::try_from(vector_idx * vector_size).unwrap()),
-                                        None,
-                                    ),
-                                    _ => unreachable!(),
-                                });
+                            let vector_offset = i32::try_from(vector_idx * vector_size).unwrap();
+                            let exprs = arguments
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, arg)| {
+                                    if idx == scalar_idx {
+                                        self.c_value_arg(arg)
+                                    } else if idx == broadcast_idx || idx == 2 {
+                                        self.c_vec_arg_add(arg, vector_offset)
+                                    } else {
+                                        unreachable!()
+                                    }
+                                })
+                                .collect::<Vec<_>>();
                             writeln!(
                                 w,
                                 "{}{} += {} * {}; /* BroadcastVecMultAdd */",
@@ -2225,26 +2142,16 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             );
 
                             if Tgt::target_id() == TargetId::Avx512 {
-                                let scalar_tensor = arguments[0].backing_tensor().unwrap();
-                                let scalar_buffer =
-                                    self.name_env.get(&scalar_tensor.identifier()).unwrap();
-                                let scalar_base_expr =
-                                    zero_points(arguments[0].make_buffer_indexing_expr());
-                                let scalar_ptr =
-                                    self.c_index_ptr(scalar_buffer, &scalar_base_expr, None);
+                                let scalar_ptr = self.c_ptr_arg(&arguments[0]);
 
-                                let broadcast_tensor = arguments[1].backing_tensor().unwrap();
-                                let broadcast_buffer =
-                                    self.name_env.get(&broadcast_tensor.identifier()).unwrap();
-                                let broadcast_base_expr =
-                                    zero_points(arguments[1].make_buffer_indexing_expr())
-                                        + vector_offset;
+                                let (broadcast_buffer, broadcast_base_expr) =
+                                    self.c_arg_parts_add(&arguments[1], vector_offset);
                                 let broadcast_ptr =
-                                    self.c_index_ptr(broadcast_buffer, &broadcast_base_expr, None);
+                                    self.c_index_ptr(&broadcast_buffer, &broadcast_base_expr, None);
                                 let broadcast_vec_expr =
-                                    if matches!(broadcast_buffer, CBuffer::RegVars { .. }) {
+                                    if matches!(&broadcast_buffer, CBuffer::RegVars { .. }) {
                                         Some(self.c_index_vec(
-                                            broadcast_buffer,
+                                            &broadcast_buffer,
                                             &broadcast_base_expr,
                                             None,
                                         ))
@@ -2252,14 +2159,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                         None
                                     };
 
-                                let output_tensor = arguments[2].backing_tensor().unwrap();
-                                let output_buffer =
-                                    self.name_env.get(&output_tensor.identifier()).unwrap();
-                                let output_base_expr =
-                                    zero_points(arguments[2].make_buffer_indexing_expr())
-                                        + vector_offset;
-                                let output_expr =
-                                    self.c_index_vec(output_buffer, &output_base_expr, None);
+                                let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
 
                                 // TODO: Don't inline `short` below.
                                 let scalar_name = self.namer.fresh_name();
@@ -2284,14 +2184,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                                 self.headers.vector_type_defs.insert(vfc);
                             } else {
-                                let exprs =
-                                    self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                                        0 => self.c_index_ptr(a, b, None),
-                                        1 | 2 => {
-                                            self.c_index_vec(a, &(b.clone() + vector_offset), None)
-                                        }
-                                        _ => unreachable!(),
-                                    });
+                                let exprs = [
+                                    self.c_ptr_arg(&arguments[0]),
+                                    self.c_vec_arg_add(&arguments[1], vector_offset),
+                                    self.c_vec_arg_add(&arguments[2], vector_offset),
+                                ];
 
                                 let even_name = self.namer.fresh_name();
                                 let odd_name = self.namer.fresh_name();
@@ -2383,17 +2280,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_count = volume / vector_size;
 
                         for vector_idx in 0..vector_count {
-                            let exprs =
-                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                                    0 => self.c_index_ptr(a, b, None),
-                                    1 | 2 => self.c_index_vec(
-                                        a,
-                                        &(b.clone()
-                                            + i32::try_from(vector_idx * vector_size).unwrap()),
-                                        None,
-                                    ),
-                                    _ => unreachable!(),
-                                });
+                            let vector_offset = i32::try_from(vector_idx * vector_size).unwrap();
+                            let exprs = [
+                                self.c_ptr_arg(&arguments[0]),
+                                self.c_vec_arg_add(&arguments[1], vector_offset),
+                                self.c_vec_arg_add(&arguments[2], vector_offset),
+                            ];
 
                             // TODO: Lift the broadcast out of this loop.
                             let broadcast_name = self.namer.fresh_name();
@@ -2431,11 +2323,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     Some(CpuKernel::DotProductLoop) => {
                         self.headers.emit_sum8 = true;
 
-                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                            0 | 1 => self.c_index_ptr(a, b, None),
-                            2 => self.c_index(a, b, None),
-                            _ => unreachable!(),
-                        });
+                        let exprs = [
+                            self.c_ptr_arg(&arguments[0]),
+                            self.c_ptr_arg(&arguments[1]),
+                            self.c_value_arg(&arguments[2]),
+                        ];
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE, 0);
@@ -2518,11 +2410,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     Some(CpuKernel::DotProductLoopBf16Bf16F32) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                            0 | 1 => self.c_index_ptr(a, b, None),
-                            2 => self.c_index(a, b, None),
-                            _ => unreachable!(),
-                        });
+                        let exprs = [
+                            self.c_ptr_arg(&arguments[0]),
+                            self.c_ptr_arg(&arguments[1]),
+                            self.c_value_arg(&arguments[2]),
+                        ];
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
@@ -2638,11 +2530,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     Some(CpuKernel::DotProductLoopF32Bf16F32) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                            0 | 1 => self.c_index_ptr(a, b, None),
-                            2 => self.c_index(a, b, None),
-                            _ => unreachable!(),
-                        });
+                        let exprs = [
+                            self.c_ptr_arg(&arguments[0]),
+                            self.c_ptr_arg(&arguments[1]),
+                            self.c_value_arg(&arguments[2]),
+                        ];
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
@@ -2757,11 +2649,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     Some(CpuKernel::DotProductLoopF32InterleavedBf16F32) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                            0 | 1 => self.c_index_ptr(a, b, None),
-                            2 => self.c_index(a, b, None),
-                            _ => unreachable!(),
-                        });
+                        let exprs = [
+                            self.c_ptr_arg(&arguments[0]),
+                            self.c_ptr_arg(&arguments[1]),
+                            self.c_value_arg(&arguments[2]),
+                        ];
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
@@ -2899,15 +2791,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             (&arguments[1], 16),
                         ]
                         .into_iter()
-                        .map(|(arg, idx)| {
-                            let buffer = self
-                                .name_env
-                                .get(&arg.backing_tensor().unwrap().identifier())
-                                .unwrap();
-                            let buffer_indexing_expr =
-                                zero_points(arg.make_buffer_indexing_expr()) + idx;
-                            self.c_index_vec(buffer, &buffer_indexing_expr, None)
-                        })
+                        .map(|(arg, idx)| self.c_vec_arg_add(arg, idx))
                         .collect::<Vec<_>>()
                         .try_into()
                         .unwrap();
@@ -2939,15 +2823,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             (&arguments[1], 32),
                         ]
                         .into_iter()
-                        .map(|(arg, idx)| {
-                            let buffer = self
-                                .name_env
-                                .get(&arg.backing_tensor().unwrap().identifier())
-                                .unwrap();
-                            let buffer_indexing_expr =
-                                zero_points(arg.make_buffer_indexing_expr()) + idx;
-                            self.c_index_vec(buffer, &buffer_indexing_expr, None)
-                        })
+                        .map(|(arg, idx)| self.c_vec_arg_add(arg, idx))
                         .collect::<Vec<_>>()
                         .try_into()
                         .unwrap();
@@ -3004,18 +2880,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )
                     }
                     Some(CpuKernel::VectorInterleaveBf16F32) => {
-                        let lhs_tensor = arguments[0].backing_tensor().unwrap();
-                        let lhs_buffer = self.name_env.get(&lhs_tensor.identifier()).unwrap();
-                        let rhs_tensor = arguments[1].backing_tensor().unwrap();
-                        let rhs_buffer = self.name_env.get(&rhs_tensor.identifier()).unwrap();
-
-                        let lhs_iexpr = zero_points(arguments[0].make_buffer_indexing_expr());
-                        let rhs0_iexpr = zero_points(arguments[1].make_buffer_indexing_expr());
-                        let rhs1_iexpr = zero_points(arguments[1].make_buffer_indexing_expr() + 8);
-
-                        let src_name = self.c_index_vec(lhs_buffer, &lhs_iexpr, None);
-                        let even_name = self.c_index_vec(rhs_buffer, &rhs0_iexpr, None);
-                        let odd_name = self.c_index_vec(rhs_buffer, &rhs1_iexpr, None);
+                        let src_name = self.c_vec_arg(&arguments[0]);
+                        let even_name = self.c_vec_arg(&arguments[1]);
+                        let odd_name = self.c_vec_arg_add(&arguments[1], 8);
 
                         let (shift_fn, _, _, _) = vec_func_names(16);
 
@@ -3048,18 +2915,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         debug_assert_eq!(volume % vector_size.get(), 0);
                         let vector_count = volume / vector_size.get();
                         for vector_idx in 0..vector_count {
-                            let exprs =
-                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                                    0 => self.c_index(a, b, None),
-                                    1 => self.c_index_vec(
-                                        a,
-                                        &(b.clone()
-                                            + i32::try_from(vector_idx * vector_size.get())
-                                                .unwrap()),
-                                        None,
-                                    ),
-                                    _ => unreachable!(),
-                                });
+                            let vector_offset =
+                                i32::try_from(vector_idx * vector_size.get()).unwrap();
+                            let exprs = [
+                                self.c_value_arg(&arguments[0]),
+                                self.c_vec_arg_add(&arguments[1], vector_offset),
+                            ];
                             writeln!(
                                 w,
                                 "{}{} = ({} - ({}){{}}); /* VecScalarAssign */",
@@ -3079,17 +2940,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         debug_assert_eq!(volume % vector_size.get(), 0);
                         let vector_count = volume / vector_size.get();
                         for vector_idx in 0..vector_count {
-                            let exprs =
-                                self.param_args_to_c_indices(arguments, |i, a, b| match i {
-                                    0..=2 => self.c_index_vec(
-                                        a,
-                                        &(b.clone()
-                                            + i32::try_from(vector_idx * vector_size.get())
-                                                .unwrap()),
-                                        None,
-                                    ),
-                                    _ => unreachable!(),
-                                });
+                            let vector_offset =
+                                i32::try_from(vector_idx * vector_size.get()).unwrap();
+                            let exprs = arguments
+                                .iter()
+                                .map(|arg| self.c_vec_arg_add(arg, vector_offset))
+                                .collect::<Vec<_>>();
                             writeln!(
                                 w,
                                 "{}{} = {} / {}; /* DivideVec */",
@@ -3102,9 +2958,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     Some(CpuKernel::ValueDivideVecScalar) => {
-                        let exprs = self.param_args_to_c_indices(arguments, |_i, a, b| {
-                            self.c_index(a, b, None)
-                        });
+                        let exprs = self.c_value_args(arguments);
                         writeln!(
                             w,
                             "{}{} = {} / {}; /* ValueDivideVecScalar */",
@@ -3139,12 +2993,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         debug_assert_eq!(volume % vector_size.get(), 0);
                         let vector_count = volume / vector_size.get();
 
-                        let input_tensor = arguments[0].backing_tensor().unwrap();
-                        let denom_tensor = arguments[1].backing_tensor().unwrap();
-                        let out_tensor = arguments[2].backing_tensor().unwrap();
-                        let input_buffer = self.name_env.get(&input_tensor.identifier()).unwrap();
-                        let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
-                        let out_buffer = self.name_env.get(&out_tensor.identifier()).unwrap();
+                        let (input_buffer, in_expr) = self.c_arg_parts(&arguments[0]);
+                        let (denom_buffer, _) = self.c_arg_parts(&arguments[1]);
+                        let (out_buffer, out_expr) = self.c_arg_parts(&arguments[2]);
 
                         let reciprocal_vec = self.namer.fresh_name();
                         let denom_expr =
@@ -3163,16 +3014,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}{1} {reciprocal_vec} = (1.0f / ({2})) - ({1}){{}};",
                             indent(depth),
                             vector_type.name,
-                            self.c_index(denom_buffer, &denom_expr, None),
+                            self.c_index(&denom_buffer, &denom_expr, None),
                         )?;
 
                         let vector_temp = self.namer.fresh_name();
                         writeln!(w, "{}{} {vector_temp};", indent(depth), vector_type.name)?;
                         if !input_buffer.needs_unroll() && !out_buffer.needs_unroll() {
-                            let in_expr = zero_points(arguments[0].make_buffer_indexing_expr());
-                            let out_expr = zero_points(arguments[2].make_buffer_indexing_expr());
-                            let in_ptr = self.c_index_ptr(input_buffer, &in_expr, None);
-                            let out_ptr = self.c_index_ptr(out_buffer, &out_expr, None);
+                            let in_ptr = self.c_index_ptr(&input_buffer, &in_expr, None);
+                            let out_ptr = self.c_index_ptr(&out_buffer, &out_expr, None);
                             let offset_var = self.namer.fresh_name();
                             writeln!(
                                 w,
@@ -3195,22 +3044,20 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         } else {
                             for vector_idx in 0..vector_count {
                                 let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
-                                let in_expr =
-                                    zero_points(arguments[0].make_buffer_indexing_expr()) + offset;
-                                let out_expr =
-                                    zero_points(arguments[2].make_buffer_indexing_expr()) + offset;
+                                let in_expr = in_expr.clone() + offset;
+                                let out_expr = out_expr.clone() + offset;
                                 writeln!(
                                     w,
                                     "{}__builtin_memcpy(&{vector_temp}, {}, sizeof({vector_temp}));",
                                     indent(depth),
-                                    self.c_index_ptr(input_buffer, &in_expr, None),
+                                    self.c_index_ptr(&input_buffer, &in_expr, None),
                                 )?;
                                 writeln!(w, "{}{vector_temp} *= {reciprocal_vec};", indent(depth),)?;
                                 writeln!(
                                     w,
                                     "{}__builtin_memcpy({}, &{vector_temp}, sizeof({vector_temp}));",
                                     indent(depth),
-                                    self.c_index_ptr(out_buffer, &out_expr, None),
+                                    self.c_index_ptr(&out_buffer, &out_expr, None),
                                 )?;
                             }
                         }
@@ -3411,22 +3258,126 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
-    fn param_args_to_c_indices<A, F>(&self, arguments: &[A], f: F) -> Vec<String>
+    /// Returns the C buffer and zero-based indexing expression for `arg`.
+    ///
+    /// This helper performs the common codegen lookup from view to backing tensor, then to the
+    /// tensor's named C buffer, and finally to the flattened buffer indexing expression. It also
+    /// zeroes point variables. For example, an argument at logical index `i` produces the parts
+    /// that lower to C expressions such as `buf[i]` or `buf + i`.
+    fn c_arg_parts<A>(&self, arg: &A) -> (CBuffer, NonAffineExpr<BufferVar>)
     where
         A: View<Tgt = Tgt>,
-        F: Fn(usize, &CBuffer, &NonAffineExpr<BufferVar>) -> String,
     {
-        arguments
-            .iter()
-            .enumerate()
-            .map(|(idx, arg)| {
-                let backing_tensor = arg.backing_tensor().unwrap();
-                let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
-                let mut buffer_indexing_expr = arg.make_buffer_indexing_expr();
-                buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                f(idx, buffer, &buffer_indexing_expr)
-            })
-            .collect()
+        self.c_arg_parts_add(arg, 0)
+    }
+
+    /// Returns the C buffer and indexing expression for `arg` plus `elem_offset` elements.
+    ///
+    /// Like [`Self::c_arg_parts`], but adds `elem_offset` to the flattened element index. For
+    /// example, an argument at logical index `i` with `elem_offset == 8` produces the parts that
+    /// lower to C expressions such as `buf[i + 8]` or `buf + i + 8`.
+    fn c_arg_parts_add<A>(&self, arg: &A, elem_offset: i32) -> (CBuffer, NonAffineExpr<BufferVar>)
+    where
+        A: View<Tgt = Tgt>,
+    {
+        let backing_tensor = arg.backing_tensor().unwrap();
+        let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
+        let expr = zero_points(arg.make_buffer_indexing_expr()) + elem_offset;
+        (buffer.clone(), expr)
+    }
+
+    /// Returns a C lvalue expression for `arg`.
+    ///
+    /// Use this helper when emitted C should read or write the value itself. For normal memory
+    /// buffers it returns expressions such as `buf[i]`; for register-backed buffers it returns a
+    /// register variable or lane expression such as `v012` or `v012[1]`.
+    fn c_value_arg<A>(&self, arg: &A) -> String
+    where
+        A: View<Tgt = Tgt>,
+    {
+        self.c_value_arg_add(arg, 0)
+    }
+
+    /// Returns a C lvalue expression for `arg` plus `elem_offset` elements.
+    ///
+    /// Like [`Self::c_value_arg`], but adds `elem_offset` to the flattened element index. For
+    /// example, an argument at logical index `i` with `elem_offset == 8` can lower to `buf[i + 8]`.
+    fn c_value_arg_add<A>(&self, arg: &A, elem_offset: i32) -> String
+    where
+        A: View<Tgt = Tgt>,
+    {
+        let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
+        self.c_index(&buffer, &expr, None)
+    }
+
+    /// Returns C lvalue expressions for each argument.
+    ///
+    /// Like [`Self::c_value_arg`], but maps over a full argument list.
+    fn c_value_args<A>(&self, arguments: &[A]) -> Vec<String>
+    where
+        A: View<Tgt = Tgt>,
+    {
+        arguments.iter().map(|arg| self.c_value_arg(arg)).collect()
+    }
+
+    /// Returns a C pointer expression for `arg`.
+    ///
+    /// Use this helper when emitted C should pass an address or perform pointer arithmetic. For
+    /// heap, workspace, and pointer-backed buffers it returns expressions such as `buf + i`; for
+    /// stack or register-backed buffers it returns address expressions such as `&buf[i]` or
+    /// `&v012[1]`.
+    fn c_ptr_arg<A>(&self, arg: &A) -> String
+    where
+        A: View<Tgt = Tgt>,
+    {
+        self.c_ptr_arg_add(arg, 0)
+    }
+
+    /// Returns a C pointer expression for `arg` plus `elem_offset` elements.
+    ///
+    /// Like [`Self::c_ptr_arg`], but adds `elem_offset` to the flattened element index. For
+    /// example, an argument at logical index `i` with `elem_offset == 8` can lower to `buf + i + 8`
+    /// or `&buf[i + 8]`.
+    fn c_ptr_arg_add<A>(&self, arg: &A, elem_offset: i32) -> String
+    where
+        A: View<Tgt = Tgt>,
+    {
+        let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
+        self.c_index_ptr(&buffer, &expr, None)
+    }
+
+    /// Returns a C vector-register expression for `arg`.
+    ///
+    /// Use this helper when emitted C should name the vector register that stores the argument.
+    /// The expression must point at the start of a register vector; otherwise [`Self::c_index_vec`]
+    /// panics. It returns expressions such as `v012`, not memory expressions such as `buf[i]`.
+    fn c_vec_arg<A>(&self, arg: &A) -> String
+    where
+        A: View<Tgt = Tgt>,
+    {
+        self.c_vec_arg_add(arg, 0)
+    }
+
+    /// Returns a C vector-register expression for `arg` plus `elem_offset` elements.
+    ///
+    /// Like [`Self::c_vec_arg`], but adds `elem_offset` to the flattened element index before
+    /// selecting the vector register.
+    fn c_vec_arg_add<A>(&self, arg: &A, elem_offset: i32) -> String
+    where
+        A: View<Tgt = Tgt>,
+    {
+        let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
+        self.c_index_vec(&buffer, &expr, None)
+    }
+
+    /// Returns C vector-register expressions for each argument.
+    ///
+    /// Like [`Self::c_vec_arg`], but maps over a full argument list.
+    fn c_vec_args<A>(&self, arguments: &[A]) -> Vec<String>
+    where
+        A: View<Tgt = Tgt>,
+    {
+        arguments.iter().map(|arg| self.c_vec_arg(arg)).collect()
     }
 
     /// Lowers [BufferVar]s from index expressions to corresponding C loop iterator names.
@@ -3615,12 +3566,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let vector_count = vector_volume / vector_size.get();
         (0..vector_count)
             .map(|vector_idx| {
-                let backing_tensor = tensor.backing_tensor().unwrap();
-                let buffer = self.name_env.get(&backing_tensor.identifier()).unwrap();
-                let mut buffer_indexing_expr = tensor.make_buffer_indexing_expr();
-                buffer_indexing_expr = zero_points(buffer_indexing_expr);
-                buffer_indexing_expr += i32::try_from(vector_size.get() * vector_idx).unwrap();
-                self.c_index_vec(buffer, &buffer_indexing_expr, None)
+                let elem_offset = i32::try_from(vector_size.get() * vector_idx).unwrap();
+                self.c_vec_arg_add(tensor, elem_offset)
             })
             .collect()
     }
