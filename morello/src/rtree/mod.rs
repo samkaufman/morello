@@ -553,7 +553,8 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
         let insert_high = padded_pt::<D>(high);
         let insert_envelope = AABB::from_bounds(insert_low.clone(), insert_high.clone());
         let mut uncovered = vec![(insert_low.clone(), insert_high.clone())];
-        let mut intersecting_values = Vec::new();
+        let mut all_intersections_match = true;
+        let mut all_intersections_equal = true;
 
         for candidate in self.locate_in_envelope_intersecting(&insert_envelope) {
             if cover_pred(&candidate.value) {
@@ -562,14 +563,16 @@ impl<const D: usize, T> RTreeGeneric<T> for RTree<RTreeRect<D, T>> {
                     return RegionScanResult::Covered;
                 }
             }
-            intersecting_values.push(&candidate.value);
+            if all_intersections_match {
+                if !intersect_pred(&candidate.value) {
+                    all_intersections_match = false;
+                } else if all_intersections_equal && !equal_pred(&candidate.value) {
+                    all_intersections_equal = false;
+                }
+            }
         }
 
-        if intersecting_values
-            .iter()
-            .all(|value| intersect_pred(value))
-        {
-            let all_intersections_equal = intersecting_values.iter().all(|value| equal_pred(value));
+        if all_intersections_match {
             RegionScanResult::AllIntersectionsMatched {
                 all_intersections_equal,
             }
@@ -1101,7 +1104,13 @@ where
             return VisitLeafControl::Keep;
         }
 
-        match classify_merge_candidate(&self.bottom, &self.top, candidate) {
+        match classify_merge_candidate(
+            &self.bottom,
+            &self.top,
+            self.envelope.lower(),
+            self.envelope.upper(),
+            candidate,
+        ) {
             MergeCandidateClass::ContainsInsert => {
                 self.skip_insert = true;
                 VisitLeafControl::Stop
@@ -1318,6 +1327,8 @@ enum MergeCandidateClass {
 fn classify_merge_candidate<const D: usize, T>(
     insert_bottom: &RTreePt<D>,
     insert_top: &RTreePt<D>,
+    insert_expanded_bottom: &RTreePt<D>,
+    insert_expanded_top: &RTreePt<D>,
     candidate: &RTreeRect<D, T>,
 ) -> MergeCandidateClass {
     let mut candidate_contains_insert = true;
@@ -1328,11 +1339,13 @@ fn classify_merge_candidate<const D: usize, T>(
     for dim in 0..D {
         let insert_bottom_val = insert_bottom.arr[dim];
         let insert_top_val = insert_top.arr[dim];
+        let insert_expanded_bottom_val = insert_expanded_bottom.arr[dim];
+        let insert_expanded_top_val = insert_expanded_top.arr[dim];
         let candidate_bottom_val = candidate.bottom.arr[dim];
         let candidate_top_val = candidate.top.arr[dim];
 
-        if candidate_top_val < insert_bottom_val.saturating_sub(1)
-            || candidate_bottom_val > insert_top_val.saturating_add(1)
+        if candidate_top_val < insert_expanded_bottom_val
+            || candidate_bottom_val > insert_expanded_top_val
         {
             return MergeCandidateClass::Irrelevant;
         }
