@@ -533,6 +533,10 @@ impl PartialEq for MemVec {
         if self.0.len() != other.0.len() {
             return false;
         }
+        // The decoded comparison below would also return true, but raw equality is cheaper.
+        if self.0 == other.0 {
+            return true;
+        }
         self.0.iter().zip(&other.0).all(|(a, b)| {
             if (a & 0x80) == (b & 0x80) {
                 a == b
