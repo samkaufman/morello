@@ -1370,6 +1370,18 @@ fn classify_merge_candidate<const D: usize, T>(
         {
             intersects = false;
         }
+
+        // Containment and intersection only move from possible to impossible. If even perfect
+        // matches in the remaining dimensions cannot make a rectangular merge possible, the final
+        // class must be Irrelevant; returning now avoids scanning the rest of this hot path.
+        let remaining_dimensions = D - dim - 1;
+        if !candidate_contains_insert
+            && !insert_contains_candidate
+            && !intersects
+            && matching_dimensions + remaining_dimensions < D - 1
+        {
+            return MergeCandidateClass::Irrelevant;
+        }
     }
 
     if candidate_contains_insert {
