@@ -9,6 +9,10 @@ use crate::{
 };
 use std::{iter, mem::replace};
 
+/// Sort actions so that fewer-dependency actions are visited first. (This was empirically faster
+/// on small workloads, but the reason was not investigated.)
+const SORT_ACTIONS_BY_DEPENDENCY_COUNT: bool = true;
+
 /// In-progress synthesis of a [Spec]. (Essentially a coroutine.)
 #[derive(Debug)]
 pub struct SpecTask<Tgt: Target>(SpecTaskState<Tgt>);
@@ -85,6 +89,13 @@ impl<Tgt: Target> SpecTask<Tgt> {
                 Err(ApplyError::NotApplicable(_)) => {}
                 Err(ApplyError::SpecNotCanonical) => panic!(),
             };
+        }
+
+        if SORT_ACTIONS_BY_DEPENDENCY_COUNT {
+            partial_impls.sort_by_key(|p| match p {
+                WorkingPartialImpl::Constructing { subspec_costs, .. } => subspec_costs.len(),
+                _ => 0,
+            });
         }
 
         if partial_impls_incomplete == 0 {
