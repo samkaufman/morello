@@ -9,7 +9,8 @@ use crate::views::{Tile, View, ViewE};
 use itertools::Itertools;
 use std::fmt::{self, Debug};
 
-const PAR_TILE_OVERHEAD: MainCost = 45_000; // rough cycle estimate
+// Charge once for launching and joining a fork-join parallel tile loop.
+const PAR_TILE_OVERHEAD: MainCost = 300_000;
 
 /// An Impl representing a loop over a set of zipped [`Tile`]s.
 ///
