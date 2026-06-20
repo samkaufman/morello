@@ -23,7 +23,7 @@ where
 
     fn start(&self, node: &Self::Node) -> Self::Task {
         debug_assert!(node.is_canonical());
-        SpecTask::start(node.clone())
+        SpecTask::start(node)
     }
 
     fn next_request_batch(

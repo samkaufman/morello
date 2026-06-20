@@ -52,7 +52,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
     /// This evaluates all actions that can be completed without child [Spec] dependencies
     /// immediately. If any applicable actions need child costs, they will be exposed through
     /// [Self::next_request_batch].
-    pub fn start(goal: Spec<Tgt>) -> Self
+    pub fn start(goal: &Spec<Tgt>) -> Self
     where
         Tgt: Target,
         Tgt::Memory: CanonicalBimap,
