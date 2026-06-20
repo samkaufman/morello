@@ -93,8 +93,9 @@ pub struct LayoutBimap {
 
 #[cfg(test)]
 #[derive(Default)]
-pub struct LayoutArbRankBounds {
+pub struct LayoutArbParams {
     tensor_shape: Option<Shape>,
+    valid_only: bool,
 }
 
 impl PhysDim {
@@ -145,10 +146,18 @@ impl PhysDim {
 }
 
 #[cfg(test)]
-impl LayoutArbRankBounds {
-    pub fn for_shape(shape: &[DimSize]) -> LayoutArbRankBounds {
-        LayoutArbRankBounds {
+impl LayoutArbParams {
+    pub fn for_shape(shape: &[DimSize]) -> LayoutArbParams {
+        LayoutArbParams {
             tensor_shape: Some(shape.into()),
+            valid_only: false,
+        }
+    }
+
+    pub fn valid_for_shape(shape: &[DimSize]) -> LayoutArbParams {
+        LayoutArbParams {
+            tensor_shape: Some(shape.into()),
+            valid_only: true,
         }
     }
 }
@@ -874,7 +883,7 @@ impl Layout {
 
 #[cfg(test)]
 impl proptest::arbitrary::Arbitrary for Layout {
-    type Parameters = LayoutArbRankBounds;
+    type Parameters = LayoutArbParams;
     type Strategy = proptest::strategy::BoxedStrategy<Layout>;
 
     fn arbitrary_with(args: Self::Parameters) -> Self::Strategy {
@@ -884,22 +893,23 @@ impl proptest::arbitrary::Arbitrary for Layout {
         };
 
         let tensor_shape = args.tensor_shape;
-        let nonone_dims: Vec<u8> = tensor_shape
+        let logical_dims: Vec<u8> = tensor_shape
             .as_ref()
             .map_or_else(|| 1..5, |s| 0..u8::try_from(s.len()).unwrap())
             .collect();
+        let subset_logical_dims = logical_dims.clone();
 
         let packed_st =
             (MIN_PACKING_SIZE..=8u32).prop_map(|s| PhysDim::Packed(s.try_into().unwrap()));
         let interleaved_st = (1..=4u32).prop_map(|s| PhysDim::OddEven((s * 2).try_into().unwrap()));
         let non_dynamic_st = prop_oneof![packed_st, interleaved_st];
 
-        let base = Just(nonone_dims.clone())
+        let valid_layouts = Just(logical_dims.clone())
             .prop_shuffle()
             .prop_map(|dims| Layout::new(dims.into_iter().map(|d| (d, PhysDim::Dynamic)).collect()))
             .prop_flat_map(move |dynamic_only_layout| {
                 let last_logical_dim = dynamic_only_layout.dims.last().map(|(dim, _)| *dim);
-                let available_dims: Vec<u8> = nonone_dims
+                let available_dims: Vec<u8> = logical_dims
                     .iter()
                     .copied()
                     .filter(|&d| Some(d) != last_logical_dim)
@@ -944,8 +954,27 @@ impl proptest::arbitrary::Arbitrary for Layout {
                         && layout.applies_to_shape(shape)
                 })
             });
+
+        if args.valid_only {
+            return valid_layouts.boxed();
+        }
+
+        let all_dynamic_subsets =
+            proptest::collection::vec(proptest::bool::ANY, subset_logical_dims.len()).prop_map(
+                move |included_dims| {
+                    Layout::new(
+                        subset_logical_dims
+                            .iter()
+                            .copied()
+                            .zip(included_dims)
+                            .filter_map(|(dim, include)| include.then_some((dim, PhysDim::Dynamic)))
+                            .collect(),
+                    )
+                },
+            );
+
         // TODO: Add non-Dynamic dimensions too.
-        base.boxed()
+        prop_oneof![3 => valid_layouts, 1 => all_dynamic_subsets].boxed()
     }
 }
 
@@ -1765,7 +1794,7 @@ mod tests {
     proptest! {
         #[test]
         fn test_layout_arbitrary_for_shape_always_applies_to_shape(
-            (shape, layout) in arb_shape_and_same_rank_layout()
+            (shape, layout) in arb_shape_and_valid_same_rank_layout()
         ) {
             prop_assert!(layout.applies_to_shape(&shape));
         }
@@ -1785,7 +1814,7 @@ mod tests {
 
         #[test]
         fn test_expand_physical_shape_matches_physical_size_for_tensor_layouts(
-            (shape, layout) in arb_shape_and_same_rank_layout()
+            (shape, layout) in arb_shape_and_valid_same_rank_layout()
         ) {
             let physical_rank = layout.dims.len();
 
@@ -1807,7 +1836,7 @@ mod tests {
 
         #[test]
         fn test_physical_shape_raises_error_on_some_dim_when_expansion_does(
-            (shape, layout) in arb_shape_and_same_rank_layout()
+            (shape, layout) in arb_shape_and_valid_same_rank_layout()
         ) {
             let physical_rank = layout.dims.len();
 
@@ -1831,7 +1860,7 @@ mod tests {
         #[test]
         #[should_panic]
         fn test_physical_size_panics_on_oob_dim(
-            (shape, layout) in arb_shape_and_same_rank_layout()
+            (shape, layout) in arb_shape_and_valid_same_rank_layout()
         ) {
             let physical_shape = layout.expand_physical_shape(&shape).unwrap();
             let rank = u8::try_from(physical_shape.len()).unwrap();
@@ -1948,7 +1977,7 @@ mod tests {
 
         #[test]
         fn test_update_for_tiling_is_idempotent(
-            (shape, layout) in arb_shape_and_same_rank_layout(),
+            (shape, layout) in arb_shape_and_valid_same_rank_layout(),
             same_size in any::<bool>()
         ) {
             // First, get a smaller tile shape for testing tiling
@@ -1974,7 +2003,7 @@ mod tests {
 
         #[test]
         fn test_update_for_tiling_returns_no_consecutive_dimensions(
-            (shape, layout) in arb_shape_and_same_rank_layout()
+            (shape, layout) in arb_shape_and_valid_same_rank_layout()
         ) {
             let result = layout.update_for_tiling(&shape, &shape);
             prop_assume!(result.is_ok());
@@ -1996,7 +2025,7 @@ mod tests {
 
         #[test]
         fn test_canonicalized_layouts_have_no_oversize_physdims(
-            (shape, layout) in arb_shape_and_same_rank_layout()
+            (shape, layout) in arb_shape_and_valid_same_rank_layout()
         ) {
             let canonicalized = layout.canonicalize(&shape).unwrap();
             for &(logical_dim, phys_dim) in &canonicalized.dims {
@@ -2226,13 +2255,25 @@ mod tests {
         assert_eq!(original_layout, layout);
     }
 
+    fn arb_shape_and_valid_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
+        proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
+            let shape = shape
+                .into_iter()
+                .map(|x| DimSize::new(x).unwrap())
+                .collect::<Vec<_>>();
+            let bounds = LayoutArbParams::valid_for_shape(&shape);
+            let all_layouts = any_with::<Layout>(bounds);
+            (Just(Shape::from(shape)), all_layouts)
+        })
+    }
+
     fn arb_shape_and_same_rank_layout() -> impl Strategy<Value = (Shape, Layout)> {
         proptest::collection::vec(1..=16u32, 1..=3).prop_flat_map(|shape| {
             let shape = shape
                 .into_iter()
                 .map(|x| DimSize::new(x).unwrap())
                 .collect::<Vec<_>>();
-            let bounds = LayoutArbRankBounds::for_shape(&shape);
+            let bounds = LayoutArbParams::for_shape(&shape);
             let all_layouts = any_with::<Layout>(bounds);
             (Just(Shape::from(shape)), all_layouts)
         })

@@ -656,12 +656,12 @@ fn arb_tensorspecaux<Tgt: Target>(
     max_shape: &[DimSize],
     dtype: Dtype,
 ) -> impl proptest::strategy::Strategy<Value = TensorSpecAux<Tgt>> {
-    use crate::layout::LayoutArbRankBounds;
+    use crate::layout::LayoutArbParams;
     use proptest::prelude::*;
     use proptest::sample::select;
 
     (
-        any_with::<Layout>(LayoutArbRankBounds::for_shape(max_shape)),
+        any_with::<Layout>(LayoutArbParams::valid_for_shape(max_shape)),
         select(Tgt::memories().to_vec()),
     )
         .prop_flat_map(move |(layout, memory)| {
