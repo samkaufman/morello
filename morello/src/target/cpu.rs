@@ -11,6 +11,7 @@ use crate::layout;
 use crate::layout::{batched_col_major, col_major, nhwc, row_major, Layout, PhysDim};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::scheduling::broadcast_first::BroadcastFirst;
+use crate::scheduling::parallel_softmax::ParallelSplitSoftmaxDenominatorAndMax;
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::to_accum::ToAccum;
@@ -22,7 +23,7 @@ use crate::search::ImplReducer;
 use crate::shape;
 use crate::spatial_action_solver::fallback::FallbackSpatialActionSolver;
 use crate::spatial_action_solver::SpatialSolver;
-use crate::spec::{FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+use crate::spec::{dim_range, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Kernel, Memory, Target, TargetId, MEMORY_COUNT};
 use crate::tensorspec::gen_vector_sizes_opt;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
@@ -39,6 +40,8 @@ use std::iter::{self, once};
 const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
 const SCALAR_EXPF_COST: MainCost = 6 * INST_COST;
+const SOFTMAX_OFFLINE_REWRITES_ENABLED: bool = !cfg!(feature = "softmax-disable-offline-rewrites");
+const SOFTMAX_ONLINE_REWRITES_ENABLED: bool = !cfg!(feature = "softmax-disable-online-rewrites");
 
 #[cfg(feature = "drop-rf")]
 const CPU_MEMORIES: [CpuMemory; MEMORY_COUNT] = [CpuMemory::VRF, CpuMemory::L1, CpuMemory::GL];
@@ -123,10 +126,30 @@ pub enum CpuKernel {
     VectorDeinterleaveF32Bf16,
     ValueSoftmaxComplete,
     ValueSoftmaxDenominatorAndMax,
+    /// Merges one partial softmax maximum/denominator pair into the accumulated result.
+    ///
+    /// ```c
+    /// float new_max = fmaxf(out_max, part_max);
+    /// out_denom = out_denom * expf(out_max - new_max)
+    ///           + part_denom * expf(part_max - new_max);
+    /// out_max = new_max;
+    /// ```
+    ValueSoftmaxDenominatorAndMaxFromParts,
     ValueSoftmaxDenominator,
     ValueSoftmaxDenominatorAndUnscaledFromMax,
     VectorSoftmaxDenominator,
     VectorSoftmaxDenominatorAndMax,
+    /// Merges vectorized partial softmax maximum/denominator pairs into the accumulated result.
+    ///
+    /// ```c
+    /// float part_max = horizontal_max(part_maxes);
+    /// float part_denom = horizontal_sum(part_denoms * exp(part_maxes - part_max));
+    /// float new_max = fmaxf(out_max, part_max);
+    /// out_denom = out_denom * expf(out_max - new_max)
+    ///           + part_denom * expf(part_max - new_max);
+    /// out_max = new_max;
+    /// ```
+    VectorSoftmaxDenominatorAndMaxFromParts,
     VectorSoftmaxComplete,
     VectorSoftmaxDenominatorAndUnscaledF32,
     ValueMax,
@@ -493,6 +516,17 @@ impl<T: CpuTarget> Target for T {
                         &[]
                     }
                 }
+                PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum, .. } => {
+                    if *accum {
+                        const SOFTMAX_DENOMINATOR_AND_MAX_FROM_PARTS_KERNELS: [CpuKernel; 2] = [
+                            CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts,
+                            CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts,
+                        ];
+                        &SOFTMAX_DENOMINATOR_AND_MAX_FROM_PARTS_KERNELS
+                    } else {
+                        &[]
+                    }
+                }
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => &[],
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => {
                     const SOFTMAX_DENOMINATOR_AND_UNSCALED_FROM_MAX_KERNELS: [CpuKernel; 2] = [
@@ -591,19 +625,60 @@ impl<T: CpuTarget> Target for T {
             LogicalSpec::Primitive(
                 PrimitiveBasics {
                     typ,
-                    spec_shape: _,
+                    spec_shape,
                     dtypes: _,
                 },
                 _primitive_aux,
                 _serial_only,
             ) => match typ {
-                PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. } => Box::new(
-                    iter.chain(once(Action::ToMaxAndDenominator(
-                        ToMaxAndDenominator::default(),
-                    )))
-                    .chain(once(ToAccum::default().into())),
-                ),
+                PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                    scan_dim,
+                    accum: false,
+                } => {
+                    let mut online_actions = Vec::new();
+                    if SOFTMAX_ONLINE_REWRITES_ENABLED {
+                        online_actions.push(ToAccum::default().into());
+                        if !spec.serial_only() {
+                            let scan_dim_us = usize::from(*scan_dim);
+                            if scan_dim_us < spec_shape.len()
+                                && spec_shape[scan_dim_us].get() >= 4_096
+                            {
+                                let partials_level: <Self as Target>::Memory = CpuMemory::L1.into();
+                                for k in dim_range(spec_shape[scan_dim_us], false, Self::TILE_SCALE)
+                                    .filter(|k| k.get() >= 64)
+                                {
+                                    let mut partial_shape = spec_shape.clone();
+                                    partial_shape[scan_dim_us] = DimSize::new(
+                                        spec_shape[scan_dim_us].get().div_ceil(k.get()),
+                                    )
+                                    .unwrap();
+                                    online_actions.push(
+                                        ParallelSplitSoftmaxDenominatorAndMax {
+                                            k,
+                                            partials_level,
+                                            partials_layout: row_major(&partial_shape),
+                                            partials_vector_size: None,
+                                        }
+                                        .into(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Box::new(
+                        iter.chain(SOFTMAX_OFFLINE_REWRITES_ENABLED.then_some(
+                            Action::ToMaxAndDenominator(ToMaxAndDenominator::default()),
+                        ))
+                        .chain(online_actions),
+                    )
+                }
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: true, .. } => {
+                    Box::new(iter.chain(split_actions(spec, Self::TILE_SCALE)))
+                }
+                PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum: false, .. } => {
+                    Box::new(iter.chain(once(ToAccum::default().into())))
+                }
+                PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum: true, .. } => {
                     Box::new(iter.chain(split_actions(spec, Self::TILE_SCALE)))
                 }
                 PrimitiveSpecType::Matmul { accum }
@@ -677,17 +752,22 @@ impl<T: CpuTarget> Target for T {
                                                     alt_level.vector_bytes(),
                                                 )
                                                 .for_each(|alt_vector_size| {
-                                                    softmax_actions.push(Action::ToSoftmaxParts(
-                                                        ToSoftmaxParts {
-                                                            denominator_level: denom_level,
-                                                            denominator_layout: denom_layout
-                                                                .clone(),
-                                                            denominator_vector_size,
-                                                            exps_level: alt_level,
-                                                            exps_layout: alt_layout.clone(),
-                                                            exps_vector_size: alt_vector_size,
-                                                        },
-                                                    ));
+                                                    if SOFTMAX_OFFLINE_REWRITES_ENABLED {
+                                                        softmax_actions.push(
+                                                            Action::ToSoftmaxParts(
+                                                                ToSoftmaxParts {
+                                                                    denominator_level: denom_level,
+                                                                    denominator_layout:
+                                                                        denom_layout.clone(),
+                                                                    denominator_vector_size,
+                                                                    exps_level: alt_level,
+                                                                    exps_layout: alt_layout.clone(),
+                                                                    exps_vector_size:
+                                                                        alt_vector_size,
+                                                                },
+                                                            ),
+                                                        );
+                                                    }
                                                     softmax_actions.push(
                                                         Action::ToSoftmaxPartsRecompute(
                                                             ToSoftmaxPartsRecompute {
@@ -775,8 +855,10 @@ impl CpuKernel {
     pub fn argument_count(&self) -> u8 {
         match self {
             CpuKernel::ValueSoftmaxComplete
+            | CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts
             | CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax
             | CpuKernel::VectorSoftmaxComplete
+            | CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts
             | CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => 4,
             CpuKernel::MultAdd
             | CpuKernel::ValueSoftmaxDenominatorAndMax
@@ -1078,6 +1160,31 @@ impl CpuKernel {
                 }
                 true
             }
+            CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts => {
+                debug_assert_eq!(operands.len(), 4);
+                if !matches!(
+                    typ,
+                    PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum: true, .. }
+                ) {
+                    return false;
+                }
+                if operands
+                    .iter()
+                    .flat_map(|o| o.shape())
+                    .any(|d| d.get() != 1)
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                    if !is_rf_or_l1_memory(o.memory()) {
+                        return false;
+                    }
+                }
+                true
+            }
             CpuKernel::VectorSoftmaxComplete => {
                 debug_assert_eq!(operands.len(), 4);
                 if !matches!(typ, PrimitiveSpecType::SoftmaxComplete { .. }) {
@@ -1157,6 +1264,54 @@ impl CpuKernel {
                     return false;
                 }
                 if !operands[0].volume().get().is_multiple_of(vector_size.get()) {
+                    return false;
+                }
+                true
+            }
+            CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts => {
+                debug_assert_eq!(operands.len(), 4);
+                if !x86_vector_helpers_available::<Tgt>() {
+                    return false;
+                }
+                let PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts {
+                    accum: true,
+                    scan_dim,
+                } = *typ
+                else {
+                    return false;
+                };
+
+                for operand in &operands[..2] {
+                    for (dim, size) in operand.shape().iter().enumerate() {
+                        if dim != usize::from(scan_dim) && size.get() != 1 {
+                            return false;
+                        }
+                    }
+                }
+                for operand in &operands[2..] {
+                    if operand.shape().iter().any(|d| d.get() != 1) {
+                        return false;
+                    }
+                }
+                if operands[0].memory() != CpuMemory::VRF
+                    || operands[1].memory() != CpuMemory::VRF
+                    || !is_rf_or_l1_memory(operands[2].memory())
+                    || !is_rf_or_l1_memory(operands[3].memory())
+                {
+                    return false;
+                }
+                for o in &operands {
+                    if o.dtype() != Dtype::Float32 {
+                        return false;
+                    }
+                }
+                let Some(vector_size) = operands[0].vector_size() else {
+                    return false;
+                };
+                if operands[1].vector_size() != Some(vector_size) {
+                    return false;
+                }
+                if !matches!(vector_size.get(), 4 | 8 | 16) {
                     return false;
                 }
                 true
@@ -1856,7 +2011,8 @@ impl CpuKernel {
                     }
                 }))
             }
-            CpuKernel::VectorSoftmaxDenominatorAndMax => {
+            CpuKernel::VectorSoftmaxDenominatorAndMax
+            | CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts => {
                 MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
                     if memory.vector_rf() {
                         // Max accumulators, denominator accumulators, one temporary for
@@ -2023,7 +2179,7 @@ impl CpuKernel {
                 PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + io_cost
             }
             CpuKernel::VectorSoftmaxDenominatorAndMax => {
-                const PER_VECTOR_COST: MainCost = 4 * INST_COST;
+                const PER_VECTOR_COST: MainCost = 8 * INST_COST;
                 const FINAL_REDUCTION_COST: MainCost = 8 * INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = parameters[0].spec().vector_size().unwrap().get();
@@ -2035,9 +2191,35 @@ impl CpuKernel {
                     .sum::<MainCost>();
                 PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + 2 * SCALAR_EXPF_COST + io_cost
             }
+            CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts => {
+                const PER_VECTOR_COST: MainCost = 10 * INST_COST;
+                const FINAL_REDUCTION_COST: MainCost = 8 * INST_COST;
+                let value_cnt = parameters[0].spec().volume().get();
+                let vector_size = parameters[0].spec().vector_size().unwrap().get();
+                debug_assert_eq!(
+                    parameters[1].spec().vector_size().unwrap().get(),
+                    vector_size
+                );
+                debug_assert_eq!(value_cnt % vector_size, 0);
+                let vector_cnt = value_cnt / vector_size;
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
+                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + 2 * SCALAR_EXPF_COST + io_cost
+            }
             CpuKernel::ValueSoftmaxDenominatorAndMax => {
                 // Updates the running max and denominator with two scalar `expf` rescalings.
                 INST_COST * 6
+                    + 2 * SCALAR_EXPF_COST
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
+            }
+            CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts => {
+                // Updates the running max and denominator from one partial max/denominator pair.
+                INST_COST * 7
                     + 2 * SCALAR_EXPF_COST
                     + parameters
                         .iter()

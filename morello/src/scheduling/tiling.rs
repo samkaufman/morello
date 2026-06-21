@@ -327,46 +327,46 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                             rhs.shape()[2]
                         ]);
 
-                        let mut boundary_body_logicalspec = spec.0.clone();
                         let boundary_component_parameter_shapes = vec![vec![
                             boundary_lhs_tiling.shape().clone(),
                             boundary_rhs_tiling.shape().clone(),
                             operands[2].shape().into(),
                         ]];
+                        let mut boundary_logical_spec = spec.0.clone();
                         update_component_shapes(
-                            &mut boundary_body_logicalspec,
+                            &mut boundary_logical_spec,
                             &boundary_component_parameter_shapes,
                         )?;
-                        boundary_body_logicalspec
-                            .canonicalize()
-                            .map_err(spec_canonicalize_to_apply_err)?;
-
-                        let boundary_spec = Spec(boundary_body_logicalspec, spec.1.clone());
-                        let boundary_body = SpecApp::new(
-                            boundary_spec,
+                        let boundary_body = spec_app_with_argument_overrides(
+                            Spec(boundary_logical_spec, spec.1.clone()),
                             [
-                                ViewE::BoundaryTile(convert_tile_to_boundarytile(
-                                    boundary_lhs_tiling
-                                        .apply_main(Param::new(0, operands[0].clone()))
-                                        .map(|v| v.boxed_viewe())
-                                        .map_err(tile_to_apply_err)?,
-                                    nz!(4usize), // 1 << 2
-                                    operands[0].shape(),
-                                    &[Some(0), Some(1), None],
-                                )),
-                                ViewE::BoundaryTile(convert_tile_to_boundarytile(
-                                    boundary_rhs_tiling
-                                        .apply_main(Param::new(1, operands[1].clone()))
-                                        .map(|v| v.boxed_viewe())
-                                        .map_err(tile_to_apply_err)?,
-                                    nz!(4usize), // 1 << 2
-                                    operands[1].shape(),
-                                    &[Some(0), None, Some(2)],
-                                )),
-                                ViewE::Param(Param::new(2, operands[2].clone())),
+                                (
+                                    0,
+                                    ViewE::BoundaryTile(convert_tile_to_boundarytile(
+                                        boundary_lhs_tiling
+                                            .apply_main(Param::new(0, operands[0].clone()))
+                                            .map(|v| v.boxed_viewe())
+                                            .map_err(tile_to_apply_err)?,
+                                        nz!(4usize), // 1 << 2
+                                        operands[0].shape(),
+                                        &[Some(0), Some(1), None],
+                                    )),
+                                ),
+                                (
+                                    1,
+                                    ViewE::BoundaryTile(convert_tile_to_boundarytile(
+                                        boundary_rhs_tiling
+                                            .apply_main(Param::new(1, operands[1].clone()))
+                                            .map(|v| v.boxed_viewe())
+                                            .map_err(tile_to_apply_err)?,
+                                        nz!(4usize), // 1 << 2
+                                        operands[1].shape(),
+                                        &[Some(0), None, Some(2)],
+                                    )),
+                                ),
                             ],
-                        );
-                        boundary_bodies.push(boundary_body.into());
+                        )?;
+                        boundary_bodies.push(boundary_body);
                     }
 
                     let bodies: Vec<_> = once(main_body.into()).chain(boundary_bodies).collect();
@@ -391,6 +391,13 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                 } => {
                     let operands = logical_spec.parameters();
                     split_tiled_reduction_parameters(spec, &operands, &[0, 3], *dim, self.k)
+                }
+                PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts {
+                    scan_dim: dim,
+                    accum: true,
+                } => {
+                    let operands = logical_spec.parameters();
+                    split_tiled_reduction_parameters(spec, &operands, &[0, 1], *dim, self.k)
                 }
                 _ => Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
                     "Split only applies to supported accumulating reductions",
@@ -665,29 +672,22 @@ fn split_tiled_reduction_parameters<Tgt: Target>(
             })
             .collect();
 
-        // Create the boundary spec directly because boundary regions do not need LoopTiles.
-        let mut boundary_body_logicalspec = spec.0.clone();
-        update_component_shapes(&mut boundary_body_logicalspec, &[boundary_new_shapes])?;
-        let mut boundary_spec = Spec(boundary_body_logicalspec, spec.1.clone());
-        boundary_spec
-            .canonicalize()
-            .map_err(spec_canonicalize_to_apply_err)?;
-        let boundary_args = operands
-            .iter()
-            .enumerate()
-            .map(|(i, operand)| {
+        let boundary_arg_overrides = (0..operands.len())
+            .filter_map(|i| {
                 boundary_tile_sets
                     .iter()
                     .find_map(|(parameter_index, boundary_tiles)| {
                         (*parameter_index == i)
-                            .then(|| ViewE::from(boundary_tiles[boundary_idx].clone()))
-                    })
-                    .unwrap_or_else(|| {
-                        ViewE::Param(Param::new(u8::try_from(i).unwrap(), operand.clone()))
+                            .then(|| (i, ViewE::from(boundary_tiles[boundary_idx].clone())))
                     })
             })
             .collect::<Vec<_>>();
-        bodies.push(SpecApp::new(boundary_spec, boundary_args).into());
+        let mut boundary_logical_spec = spec.0.clone();
+        update_component_shapes(&mut boundary_logical_spec, &[boundary_new_shapes])?;
+        bodies.push(spec_app_with_argument_overrides(
+            Spec(boundary_logical_spec, spec.1.clone()),
+            boundary_arg_overrides,
+        )?);
     }
 
     Ok(ImplNode::Loop(Loop {
@@ -696,6 +696,25 @@ fn split_tiled_reduction_parameters<Tgt: Target>(
         parallel: false,
         spec: Some(spec.clone()),
     }))
+}
+
+pub(crate) fn spec_app_with_argument_overrides<Tgt: Target>(
+    mut spec: Spec<Tgt>,
+    arg_overrides: impl IntoIterator<Item = (usize, ViewE<Tgt>)>,
+) -> Result<ImplNode<Tgt>, ApplyError> {
+    spec.canonicalize()
+        .map_err(spec_canonicalize_to_apply_err)?;
+    let mut args = spec
+        .0
+        .parameters()
+        .into_iter()
+        .enumerate()
+        .map(|(i, operand)| ViewE::Param(Param::new(u8::try_from(i).unwrap(), operand)))
+        .collect::<Vec<_>>();
+    for (idx, arg) in arg_overrides {
+        args[idx] = arg;
+    }
+    Ok(SpecApp::new(spec, args).into())
 }
 
 /// A `TileOut` special case for [SoftmaxDenominatorAndUnscaledFromMax].

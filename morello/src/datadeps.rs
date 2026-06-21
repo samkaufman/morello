@@ -47,6 +47,11 @@ pub enum SpecKey {
         scan_dim: u8,
         dtypes: [Dtype; 3],
     },
+    SoftmaxDenominatorAndMaxFromParts {
+        rank: u8,
+        scan_dim: u8,
+        dtypes: [Dtype; 4],
+    },
     SoftmaxDenominatorAndUnscaled {
         rank: u8,
         scan_dim: u8,
@@ -106,6 +111,9 @@ impl SpecKey {
                 rank: _, dtypes, ..
             } => Box::new(dtypes.iter().copied()),
             SpecKey::SoftmaxDenominatorAndMax {
+                rank: _, dtypes, ..
+            } => Box::new(dtypes.iter().copied()),
+            SpecKey::SoftmaxDenominatorAndMaxFromParts {
                 rank: _, dtypes, ..
             } => Box::new(dtypes.iter().copied()),
             SpecKey::SoftmaxDenominatorAndUnscaled {

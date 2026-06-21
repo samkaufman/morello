@@ -12,6 +12,9 @@ db-inspection = []
 verification = ["dep:ndarray", "dep:ndarray-conv"]
 l2-speed-gl = []
 drop-rf = []
+# Experimental gates for comparing softmax synthesis families.
+softmax-disable-offline-rewrites = []
+softmax-disable-online-rewrites = []
 
 [dependencies]
 atty = "0.2"

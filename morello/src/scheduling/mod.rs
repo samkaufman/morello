@@ -15,6 +15,7 @@ use std::fmt::Display;
 use broadcast_first::BroadcastFirst;
 use bufferize::Bufferize;
 use moves::Move;
+use parallel_softmax::ParallelSplitSoftmaxDenominatorAndMax;
 use select::Select;
 use spatial_split::SpatialSplit;
 use tiling::{Split, SplitSoftmaxDenominatorAndMax, TileOut};
@@ -26,6 +27,7 @@ use to_softmax_parts::{ToSoftmaxParts, ToSoftmaxPartsRecompute};
 pub mod broadcast_first;
 pub mod bufferize;
 pub mod moves;
+pub mod parallel_softmax;
 pub mod select;
 pub mod spatial_split;
 pub mod tiling;
@@ -127,6 +129,8 @@ action_dispatch! {
     (ToMaxAndDenominator, ToMaxAndDenominator),
     /// Splits an SoftmaxDenominatorAndMaxAccum over its scan dimension.
     (SplitSoftmaxDenominatorAndMax, SplitSoftmaxDenominatorAndMax),
+    /// Rewrites to compute softmax denominator/max in parallel.
+    (ParallelSplitSoftmaxDenominatorAndMax, ParallelSplitSoftmaxDenominatorAndMax<Tgt>),
     /// Rewrites a SoftmaxDenominatorAndUnscaled into a Max followed by
     /// SoftmaxDenominatorAndUnscaledFromMax.
     (ToMaxAndUnscaled, ToMaxAndUnscaled<Tgt>),

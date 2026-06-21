@@ -10,6 +10,7 @@ use crate::layout::LayoutBuilder;
 use crate::scheduling::broadcast_first::BroadcastFirst;
 use crate::scheduling::bufferize::Bufferize;
 use crate::scheduling::moves::Move;
+use crate::scheduling::parallel_softmax::ParallelSplitSoftmaxDenominatorAndMax;
 use crate::scheduling::select::Select;
 use crate::scheduling::spatial_split::SpatialSplit;
 use crate::scheduling::tiling::{Split, TileOut};
@@ -81,6 +82,13 @@ pub trait SchedulingSugar<Tgt: Target> {
         denominator_level: impl Into<Tgt::Memory>,
         denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<u32>,
+    ) -> ImplNode<Tgt>;
+    fn parallel_split(
+        &self,
+        k: u32,
+        partials_level: impl Into<Tgt::Memory>,
+        partials_layout: impl LayoutBuilder,
+        partials_vector_size: Option<u32>,
     ) -> ImplNode<Tgt>;
     fn to_max_and_denominator(&self) -> ImplNode<Tgt>;
     fn to_max_and_unscaled(
@@ -298,6 +306,46 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
                 denominator_vector_size: denominator_vector_size.map(|v| {
                     v.try_into()
                         .expect("denominator vector size should not be zero")
+                }),
+            }),
+        )
+    }
+
+    fn parallel_split(
+        &self,
+        k: u32,
+        partials_level: impl Into<Tgt::Memory>,
+        partials_layout: impl LayoutBuilder,
+        partials_vector_size: Option<u32>,
+    ) -> ImplNode<Tgt> {
+        let LogicalSpec::Primitive(
+            PrimitiveBasics {
+                typ:
+                    PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                        scan_dim,
+                        accum: false,
+                    },
+                spec_shape,
+                ..
+            },
+            ..,
+        ) = &self.0
+        else {
+            panic!("Not a non-accumulating SoftmaxDenominatorAndMax");
+        };
+        let k = DimSize::new(k).expect("split size should not be zero");
+        let mut partial_shape = spec_shape.clone();
+        partial_shape[usize::from(*scan_dim)] =
+            DimSize::new(spec_shape[usize::from(*scan_dim)].get().div_ceil(k.get())).unwrap();
+        apply_unwrap(
+            self,
+            Action::ParallelSplitSoftmaxDenominatorAndMax(ParallelSplitSoftmaxDenominatorAndMax {
+                k,
+                partials_level: partials_level.into(),
+                partials_layout: partials_layout.build(&partial_shape),
+                partials_vector_size: partials_vector_size.map(|v| {
+                    v.try_into()
+                        .expect("partials vector size should not be zero")
                 }),
             }),
         )
@@ -558,6 +606,18 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
                 denominator_layout,
                 denominator_vector_size,
             )
+        })
+    }
+
+    fn parallel_split(
+        &self,
+        k: u32,
+        partials_level: impl Into<Tgt::Memory>,
+        partials_layout: impl LayoutBuilder,
+        partials_vector_size: Option<u32>,
+    ) -> ImplNode<Tgt> {
+        self.apply_to_default_leaf(|spec| {
+            spec.parallel_split(k, partials_level, partials_layout, partials_vector_size)
         })
     }
 

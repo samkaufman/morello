@@ -148,6 +148,10 @@ pub fn split_actions<Tgt: Target>(
             scan_dim: dim,
             accum: true,
         }
+        | PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts {
+            scan_dim: dim,
+            accum: true,
+        }
         | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
             scan_dim: dim,
             accum: true,
@@ -214,6 +218,17 @@ pub fn split_actions<Tgt: Target>(
             tile_shape[scan_dim_idx] = k;
             (operands[0].is_valid_tile_shape(&tile_shape, false)
                 && operands[3].is_valid_tile_shape(&tile_shape, false))
+            .then_some(Action::Split(Split { k }))
+        }
+        PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts {
+            scan_dim: dim,
+            accum: true,
+        } => {
+            let scan_dim_idx = usize::from(*dim);
+            let mut tile_shape = spec_shape.clone();
+            tile_shape[scan_dim_idx] = k;
+            (operands[0].is_valid_tile_shape(&tile_shape, false)
+                && operands[1].is_valid_tile_shape(&tile_shape, false))
             .then_some(Action::Split(Split { k }))
         }
         PrimitiveSpecType::SoftmaxDenominatorAndMax {

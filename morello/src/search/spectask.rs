@@ -64,7 +64,7 @@ impl<Tgt: Target> SpecTask<Tgt> {
         let mut partial_impls_incomplete = 0;
 
         for (action_num, action) in Tgt::actions(&goal.0).enumerate() {
-            match action.top_down_solver(&goal) {
+            match action.top_down_solver(goal) {
                 Ok(solver) => {
                     let subspec_count = solver.subspec_count();
                     max_children = max_children.max(subspec_count);

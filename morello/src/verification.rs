@@ -184,6 +184,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 }
                 PrimitiveSpecType::SoftmaxComplete { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominatorAndMax { .. } => todo!(),
+                PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominator { .. } => todo!(),

@@ -1949,6 +1949,14 @@ fn table_dir_path(root: &Path, table_key: &TableKey) -> path::PathBuf {
             .join(format!("SoftmaxDenominatorAndMax{}", rank))
             .join(scan_dim.to_string())
             .join(dtypes.iter().map(|d| d.to_string()).join("_")),
+        SpecKey::SoftmaxDenominatorAndMaxFromParts {
+            rank,
+            scan_dim,
+            dtypes,
+        } => root
+            .join(format!("SoftmaxDenominatorAndMaxFromParts{}", rank))
+            .join(scan_dim.to_string())
+            .join(dtypes.iter().map(|d| d.to_string()).join("_")),
         SpecKey::SoftmaxDenominatorAndUnscaled {
             rank,
             scan_dim,

@@ -1375,6 +1375,29 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )?;
                         writeln!(w, "{}{} = {new_max_name};", indent(depth), exprs[1])
                     }
+                    Some(CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts) => {
+                        self.headers.emit_math_include = true;
+                        let exprs = self.c_value_args(arguments);
+                        let old_max_name = self.namer.fresh_name();
+                        let new_max_name = self.namer.fresh_name();
+                        writeln!(w, "{}float {old_max_name} = {};", indent(depth), exprs[2],)?;
+                        writeln!(
+                            w,
+                            "{}float {new_max_name} = fmaxf({old_max_name}, {});",
+                            indent(depth),
+                            exprs[0],
+                        )?;
+                        writeln!(
+                            w,
+                            "{}{} = {} * expf({old_max_name} - {new_max_name}) + {} * expf({} - {new_max_name});",
+                            indent(depth),
+                            exprs[3],
+                            exprs[3],
+                            exprs[1],
+                            exprs[0],
+                        )?;
+                        writeln!(w, "{}{} = {new_max_name};", indent(depth), exprs[2])
+                    }
                     Some(CpuKernel::ValueSoftmaxDenominator) => {
                         self.headers.emit_math_include = true;
                         let exprs = self.c_value_args(arguments);
@@ -1548,6 +1571,144 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 indent(depth),
                                 denom_accum_names[i % accum_count],
                                 input_vector_name,
+                            )?;
+                        }
+                        let mut reduced_denom_accum_names = denom_accum_names;
+                        while reduced_denom_accum_names.len() > 1 {
+                            let mut next_round =
+                                Vec::with_capacity(reduced_denom_accum_names.len().div_ceil(2));
+                            for pair in reduced_denom_accum_names.chunks(2) {
+                                if pair.len() == 2 {
+                                    writeln!(w, "{}{} += {};", indent(depth), pair[0], pair[1])?;
+                                }
+                                next_round.push(pair[0].clone());
+                            }
+                            reduced_denom_accum_names = next_round;
+                        }
+                        let chunk_denom_name = self.namer.fresh_name();
+                        writeln!(
+                            w,
+                            "{}float {chunk_denom_name} = {sum_helper}({});",
+                            indent(depth),
+                            reduced_denom_accum_names[0],
+                        )?;
+
+                        let old_max_name = self.namer.fresh_name();
+                        let new_max_name = self.namer.fresh_name();
+                        writeln!(w, "{}float {old_max_name} = {max_expr};", indent(depth),)?;
+                        writeln!(
+                            w,
+                            "{}float {new_max_name} = fmaxf({old_max_name}, {chunk_max_name});",
+                            indent(depth),
+                        )?;
+                        writeln!(
+                            w,
+                            "{}{denom_expr} = {denom_expr} * expf({old_max_name} - {new_max_name}) + {chunk_denom_name} * expf({chunk_max_name} - {new_max_name});",
+                            indent(depth),
+                        )?;
+                        writeln!(w, "{}{max_expr} = {new_max_name};", indent(depth))
+                    }
+                    Some(CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts) => {
+                        writeln!(
+                            w,
+                            "{}/* VectorSoftmaxDenominatorAndMaxFromParts */",
+                            indent(depth)
+                        )?;
+                        self.headers.emit_math_include = true;
+
+                        let max_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
+                        let denom_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[1]);
+                        debug_assert_eq!(max_vector_exprs.len(), denom_vector_exprs.len());
+                        let vector_size = arguments[0].spec().vector_size().unwrap();
+                        let vector_type =
+                            get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
+                        self.headers.vector_type_defs.insert(vector_type);
+                        let exp_helper = self.require_x86_f32_exp_helper(vector_size);
+                        let sum_helper = self.require_x86_f32_sum_helper(vector_size);
+                        let horizontal_max_helper =
+                            self.require_x86_f32_horizontal_max_helper(vector_size);
+                        let max_tensor = arguments[2].backing_tensor().unwrap();
+                        let denom_tensor = arguments[3].backing_tensor().unwrap();
+                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
+                        let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
+                        let max_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
+                        let denom_iexpr = zero_points(arguments[3].make_buffer_indexing_expr());
+                        let max_expr = self.c_index(max_buffer, &max_iexpr, None);
+                        let denom_expr = self.c_index(denom_buffer, &denom_iexpr, None);
+
+                        let accum_count = max_vector_exprs
+                            .len()
+                            .min(usize::try_from(VECTOR_ACCUM_COUNT).unwrap());
+                        debug_assert_ne!(accum_count, 0);
+                        let max_accum_names = (0..accum_count)
+                            .map(|_| self.namer.fresh_name())
+                            .collect::<Vec<_>>();
+                        let denom_accum_names = (0..accum_count)
+                            .map(|_| self.namer.fresh_name())
+                            .collect::<Vec<_>>();
+                        for accum_name in &max_accum_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {accum_name} = (-INFINITY) - ({1}){{}};",
+                                indent(depth),
+                                vector_type.name,
+                            )?;
+                        }
+                        for (i, max_vector_name) in max_vector_exprs.iter().enumerate() {
+                            writeln!(
+                                w,
+                                "{}{} = __builtin_elementwise_max({}, {});",
+                                indent(depth),
+                                max_accum_names[i % accum_count],
+                                max_accum_names[i % accum_count],
+                                max_vector_name,
+                            )?;
+                        }
+                        let mut reduced_max_accum_names = max_accum_names;
+                        while reduced_max_accum_names.len() > 1 {
+                            let mut next_round =
+                                Vec::with_capacity(reduced_max_accum_names.len().div_ceil(2));
+                            for pair in reduced_max_accum_names.chunks(2) {
+                                if pair.len() == 2 {
+                                    writeln!(
+                                        w,
+                                        "{}{} = __builtin_elementwise_max({}, {});",
+                                        indent(depth),
+                                        pair[0],
+                                        pair[0],
+                                        pair[1],
+                                    )?;
+                                }
+                                next_round.push(pair[0].clone());
+                            }
+                            reduced_max_accum_names = next_round;
+                        }
+                        let chunk_max_name = self.namer.fresh_name();
+                        writeln!(
+                            w,
+                            "{}float {chunk_max_name} = {horizontal_max_helper}({});",
+                            indent(depth),
+                            reduced_max_accum_names[0],
+                        )?;
+
+                        for accum_name in &denom_accum_names {
+                            writeln!(
+                                w,
+                                "{0}{1} {accum_name} = ({1}){{}};",
+                                indent(depth),
+                                vector_type.name,
+                            )?;
+                        }
+                        for (i, (max_vector_name, denom_vector_name)) in
+                            max_vector_exprs.iter().zip(&denom_vector_exprs).enumerate()
+                        {
+                            writeln!(
+                                w,
+                                "{}{} += {} * {exp_helper}({} - {chunk_max_name});",
+                                indent(depth),
+                                denom_accum_names[i % accum_count],
+                                denom_vector_name,
+                                max_vector_name,
                             )?;
                         }
                         let mut reduced_denom_accum_names = denom_accum_names;
@@ -3677,8 +3838,8 @@ fn bf16_even_lanes_expr(
     }
 }
 
-/// Compute (axis, full_steps, total_steps) for each Spec axis where with at
-/// least 2 steps.
+/// Computes (axis, full_steps, total_steps) for each Spec axis with at least 2
+/// steps.
 fn get_axis_steps<Tgt: Target>(l: &Loop<Tgt>) -> Vec<(u8, u32, u32)> {
     let mut axis_steps = Vec::new();
 
@@ -3823,7 +3984,16 @@ fn emit_load_input_value<W: Write>(out: &mut W, idx: usize, dtype: Dtype) -> fmt
 mod tests {
     use super::*;
     use crate::codegen::c_utils::CName;
+    use crate::codegen::CodeGen;
+    use crate::common::{DimSize, Dtype};
     use crate::expr::{AffineForm, NonAffine, Term};
+    use crate::layout::row_major;
+    use crate::scheduling::parallel_softmax::ParallelSplitSoftmaxDenominatorAndMax;
+    use crate::scheduling::ActionT;
+    use crate::shape;
+    use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
+    use crate::target::{Avx2Target, CpuMemory, CpuTarget};
+    use crate::tensorspec::TensorSpecAux;
 
     #[test]
     fn test_expr_zero_emitted() {
@@ -3873,6 +4043,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parallel_loop_codegen_omits_unit_axes_from_openmp_collapse() {
+        let spec = softmax_denominator_and_max_spec(1, 64);
+        let partial_shape = shape![1, 16];
+        let implementation = ParallelSplitSoftmaxDenominatorAndMax {
+            k: DimSize::new(4).unwrap(),
+            partials_level: CpuMemory::L1,
+            partials_layout: row_major(&partial_shape),
+            partials_vector_size: None,
+        }
+        .apply(&spec)
+        .expect("parallel split should apply");
+
+        let mut source = String::new();
+        implementation
+            .emit(false, None, &mut source)
+            .expect("codegen should succeed");
+
+        assert!(source.contains("#pragma omp parallel for collapse(1)"));
+    }
+
+    #[test]
     fn test_interleave_vector_halves_shuffle_indices_8() {
         assert_eq!(
             interleave_vector_halves_shuffle_indices(8),
@@ -3886,5 +4077,33 @@ mod tests {
             interleave_vector_halves_shuffle_indices(16),
             "0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15"
         );
+    }
+
+    fn softmax_denominator_and_max_spec(rows: u32, cols: u32) -> Spec<Avx2Target> {
+        let shape = shape![rows, cols];
+        let basics = PrimitiveBasics {
+            typ: PrimitiveSpecType::SoftmaxDenominatorAndMax {
+                scan_dim: 1,
+                accum: false,
+            },
+            spec_shape: shape.clone(),
+            dtypes: vec![Dtype::Float32; 3],
+        };
+        let auxes = basics
+            .parameter_shapes()
+            .into_iter()
+            .map(|shape| TensorSpecAux {
+                memory: CpuMemory::GL,
+                layout: row_major(&shape),
+                vector_size: None,
+            })
+            .collect();
+        let mut spec = Spec(
+            LogicalSpec::Primitive(basics, auxes, false),
+            <Avx2Target as CpuTarget>::max_mem(),
+        );
+        spec.canonicalize()
+            .expect("softmax denominator/max spec should canonicalize");
+        spec
     }
 }

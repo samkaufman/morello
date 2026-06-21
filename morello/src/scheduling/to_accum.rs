@@ -24,6 +24,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToAccum {
                 | PrimitiveSpecType::Conv { accum }
                 | PrimitiveSpecType::Max { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum, .. }
+                | PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
                 | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. },
             ..
