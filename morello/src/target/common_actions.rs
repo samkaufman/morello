@@ -310,6 +310,7 @@ pub fn move_actions<Tgt: Target>(
         let i = u8::try_from(i).unwrap();
         let operand_dtype = operand.dtype();
         let destination_layouts = Tgt::move_destination_layouts(operand.shape(), operand_dtype);
+        let destination_memories = Tgt::possible_destination_memories(operand.memory());
         let mut contains_source_layout = false;
 
         for layout in &destination_layouts {
@@ -317,7 +318,7 @@ pub fn move_actions<Tgt: Target>(
             if !contains_source_layout && layout == operand.layout() {
                 contains_source_layout = true;
             }
-            for memory in Tgt::possible_destination_memories(operand.memory()) {
+            for &memory in &destination_memories {
                 for &destination_dtype in
                     iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
                 {
@@ -346,7 +347,7 @@ pub fn move_actions<Tgt: Target>(
         // into cache.
         let original_layout = operand.layout();
         if !contains_source_layout {
-            for memory in Tgt::possible_destination_memories(operand.memory()) {
+            for &memory in &destination_memories {
                 if !memory.is_addressed() {
                     // This is a cache memory, generate a move with the original layout
                     for &destination_dtype in
