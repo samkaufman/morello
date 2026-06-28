@@ -189,7 +189,7 @@ impl CBuffer {
         }
     }
 
-    /// Emit a loop that initializes buffer values with `rand()`.
+    /// Emits a loop that initializes buffer values with random values.
     fn emit_rand_init<W: fmt::Write>(
         &self,
         w: &mut W,
@@ -204,20 +204,49 @@ impl CBuffer {
             indent(depth),
             size,
         )?;
-        // Special-base bf16 to mitigate the need for rtlib support for bf16 truncation,
-        // which is a partial workaround for a Clang issue:
-        //   https://github.com/llvm/llvm-project/pull/84192
-        if dtype == Dtype::Bfloat16 {
-            writeln!(w, "{}float fv = (float)rand();", indent(depth + 1))?;
-            writeln!(w, "{}{}[idx] = *(__bf16 *)(&fv);", indent(depth + 1), name)?;
-        } else {
-            writeln!(
-                w,
-                "{}{}[idx] = ({})rand();",
-                indent(depth + 1),
-                name,
-                c_type(dtype)
-            )?;
+        match dtype {
+            Dtype::Float32 => {
+                // Start from the f32 bit pattern for 1.0 and randomize only the mantissa bits.
+                // This keeps benchmark inputs in [1, 2) and avoids denormals, infinities, NaNs,
+                // signed zero, and softmax exp underflow.
+                writeln!(
+                    w,
+                    "{}uint32_t bits = 0x3f800000u | ((uint32_t)rand() & 0x007fffffu);",
+                    indent(depth + 1)
+                )?;
+                writeln!(
+                    w,
+                    "{}__builtin_memcpy(&{}[idx], &bits, sizeof(bits));",
+                    indent(depth + 1),
+                    name
+                )?;
+            }
+            Dtype::Bfloat16 => {
+                // Start from the bf16 bit pattern for 1.0 and randomize only the mantissa bits.
+                // Special-case bf16 to mitigate the need for rtlib support for bf16 truncation,
+                // which is a partial workaround for a Clang issue:
+                //   https://github.com/llvm/llvm-project/pull/84192
+                writeln!(
+                    w,
+                    "{}uint16_t bits = (uint16_t)(0x3f80u | (rand() & 0x007fu));",
+                    indent(depth + 1)
+                )?;
+                writeln!(
+                    w,
+                    "{}__builtin_memcpy(&{}[idx], &bits, sizeof(bits));",
+                    indent(depth + 1),
+                    name
+                )?;
+            }
+            _ => {
+                writeln!(
+                    w,
+                    "{}{}[idx] = ({})rand();",
+                    indent(depth + 1),
+                    name,
+                    c_type(dtype)
+                )?;
+            }
         }
         writeln!(w, "{}}}", indent(depth))
     }
