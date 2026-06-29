@@ -2102,10 +2102,9 @@ impl CpuKernel {
                     .sum::<MainCost>();
                 INST_COST + io_cost
             }
-            CpuKernel::VectorMax | CpuKernel::VecScalarAssign | CpuKernel::DivideVec => {
-                // TODO: Measure throughput!
+            CpuKernel::VectorMax | CpuKernel::VecScalarAssign => {
                 let vidx = match self {
-                    CpuKernel::VectorMax | CpuKernel::DivideVec => 0,
+                    CpuKernel::VectorMax => 0,
                     CpuKernel::VecScalarAssign => 1,
                     _ => unreachable!(),
                 };
@@ -2116,6 +2115,23 @@ impl CpuKernel {
                     .map(|p| move_cost(p.spec()))
                     .sum::<MainCost>();
                 INST_COST * (vector_cnt + 1) + io_cost
+            }
+            CpuKernel::DivideVec => {
+                let input_spec = parameters[0].spec();
+                let vector_size = input_spec.vector_size().unwrap().get();
+                let value_cnt = input_spec.volume().get();
+                let io_cost = parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>();
+                debug_assert_eq!(input_spec.dtype(), Dtype::Float32);
+                debug_assert!(value_cnt.is_multiple_of(vector_size));
+                let vector_cnt = value_cnt / vector_size;
+                let cost_per_vector = match <P::Tgt as CpuTarget>::target_id() {
+                    TargetId::Avx512 => 5 * vector_size.div_ceil(16),
+                    TargetId::Avx2 | TargetId::Arm => 6 * vector_size.div_ceil(4),
+                };
+                cost_per_vector * vector_cnt + io_cost
             }
             CpuKernel::ValueDivideVecScalar => {
                 // TODO: Measure throughput.
