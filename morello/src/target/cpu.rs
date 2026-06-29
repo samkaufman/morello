@@ -2250,6 +2250,16 @@ impl CpuKernel {
                         .map(|p| move_cost(p.spec()))
                         .sum::<MainCost>()
             }
+            CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax => {
+                // Accumulates one scalar exponential into the denominator. The unscaled variant
+                // also writes that exponential to the unscaled output.
+                INST_COST * 3
+                    + SCALAR_EXPF_COST
+                    + parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
+            }
             CpuKernel::VectorSoftmaxDenominator => {
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = parameters[0].spec().vector_size().unwrap().get();
@@ -2269,26 +2279,15 @@ impl CpuKernel {
                     .sum::<MainCost>();
                 compute_cost + io_cost
             }
-            CpuKernel::ValueSoftmaxDenominator
-            | CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax => {
-                // Accumulates one scalar exponential into the denominator. The unscaled variant
-                // also writes that exponential to the unscaled output.
-                INST_COST * 3
-                    + SCALAR_EXPF_COST
-                    + parameters
-                        .iter()
-                        .map(|p| move_cost(p.spec()))
-                        .sum::<MainCost>()
+            CpuKernel::ValueSoftmaxDenominator => {
+                // Hot RF/L1 scalar traffic overlaps with the scalar exponential throughput.
+                const SCALAR_SOFTMAX_DENOMINATOR_F32_COST: MainCost = 23;
+                SCALAR_SOFTMAX_DENOMINATOR_F32_COST
             }
             CpuKernel::ValueSoftmaxComplete => {
-                // Computes one scalar exponential, divides by the denominator, and writes one
-                // output value.
-                INST_COST * 4
-                    + SCALAR_EXPF_COST
-                    + parameters
-                        .iter()
-                        .map(|p| move_cost(p.spec()))
-                        .sum::<MainCost>()
+                // Hot RF/L1 scalar traffic overlaps with the scalar exponential throughput.
+                const SCALAR_SOFTMAX_COMPLETE_F32_COST: MainCost = 26;
+                SCALAR_SOFTMAX_COMPLETE_F32_COST
             }
             CpuKernel::VectorSoftmaxComplete => {
                 // Setup once:
