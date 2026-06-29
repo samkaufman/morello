@@ -2251,17 +2251,23 @@ impl CpuKernel {
                         .sum::<MainCost>()
             }
             CpuKernel::VectorSoftmaxDenominator => {
-                const PER_VECTOR_COST: MainCost = 6 * INST_COST;
-                const FINAL_REDUCTION_COST: MainCost = 2 * INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = parameters[0].spec().vector_size().unwrap().get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
+                let compute_cost = match <P::Tgt as CpuTarget>::target_id() {
+                    TargetId::Avx512 => 15 * vector_size.div_ceil(16) * vector_cnt,
+                    TargetId::Avx2 | TargetId::Arm => match vector_size {
+                        4 => 30 + 14 * vector_cnt.saturating_sub(1),
+                        8 => 48 * vector_cnt,
+                        size => 48 * size.div_ceil(8) * vector_cnt,
+                    },
+                };
                 let io_cost = parameters
                     .iter()
                     .map(|p| move_cost(p.spec()))
                     .sum::<MainCost>();
-                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + io_cost
+                compute_cost + io_cost
             }
             CpuKernel::ValueSoftmaxDenominator
             | CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax => {
