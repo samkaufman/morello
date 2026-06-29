@@ -2305,14 +2305,23 @@ impl CpuKernel {
             }
             CpuKernel::MultAdd => {
                 let compute_cost = match parameters[0].spec().dtype() {
-                    Dtype::Bfloat16 => 6 * INST_COST,
-                    Dtype::Float32 => INST_COST, // RThroughput = .5
+                    Dtype::Bfloat16 => match <P::Tgt as CpuTarget>::target_id() {
+                        // AVX-512 BF16 lowers through scalar unpacking, f32 FMA, and
+                        // `vcvtneps2bf16`.
+                        TargetId::Avx512 => 6 * INST_COST,
+                        // AVX2 scalarizes through f32 FMA and __truncsfbf2.
+                        TargetId::Avx2 | TargetId::Arm => 30 * INST_COST,
+                    },
+                    Dtype::Float32 => 1,
                     Dtype::Uint8
                     | Dtype::Sint8
                     | Dtype::Uint16
                     | Dtype::Sint16
                     | Dtype::Uint32
-                    | Dtype::Sint32 => 2 * INST_COST, // RThroughput = 1
+                    | Dtype::Sint32 => match <P::Tgt as CpuTarget>::target_id() {
+                        TargetId::Avx512 => 1,
+                        TargetId::Avx2 | TargetId::Arm => 2,
+                    },
                 };
                 compute_cost
                     + parameters
