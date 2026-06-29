@@ -2665,8 +2665,9 @@ pub(crate) fn softmax_vector_size<Tgt: Target>(
     input: &TensorSpec<Tgt>,
     output: &TensorSpec<Tgt>,
 ) -> Option<DimSize> {
-    debug_assert_eq!(input.volume(), output.volume());
-    debug_assert_eq!(input.dtype(), output.dtype());
+    if input.volume() != output.volume() || input.dtype() != output.dtype() {
+        return None;
+    }
     let volume = input.volume().get();
     let dtype = input.dtype();
     let mut explicit = None;
