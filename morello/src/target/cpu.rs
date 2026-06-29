@@ -1602,8 +1602,11 @@ impl CpuKernel {
                 debug_assert_eq!(operands.len(), 3);
 
                 if operands[0].dtype() != operands[1].dtype()
-                    || operands[0].dtype() != operands[1].dtype()
+                    || operands[0].dtype() != operands[2].dtype()
                 {
+                    return false;
+                }
+                if operands[0].dtype() != Dtype::Float32 {
                     return false;
                 }
 
