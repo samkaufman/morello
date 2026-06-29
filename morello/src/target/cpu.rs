@@ -2291,17 +2291,24 @@ impl CpuKernel {
                 //
                 // Per output vector, the vector exponential dominates the fused exp/scale/store
                 // body. Hot-L1 input and output traffic overlaps with that vector-exp work.
-                const RECIPROCAL_SETUP_COST: MainCost = 2 * INST_COST;
-                const VECTOR_EXPF_AND_SCALE_COST: MainCost = 6 * INST_COST;
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = softmax_vector_size(parameters[0].spec(), parameters[3].spec())
                     .unwrap()
                     .get();
                 debug_assert!(value_cnt.is_multiple_of(vector_size));
                 let vector_cnt = value_cnt / vector_size;
-                RECIPROCAL_SETUP_COST
-                    + VECTOR_EXPF_AND_SCALE_COST * vector_cnt
-                    + slower_than_l1_io_cost(parameters)
+                let (reciprocal_setup_cost, per_vector) = match <P::Tgt as CpuTarget>::target_id() {
+                    TargetId::Avx512 => (6, 15 * vector_size.div_ceil(16)),
+                    TargetId::Avx2 | TargetId::Arm => {
+                        let per_vector = match vector_size {
+                            4 => 18,
+                            8 => 36,
+                            size => 36 * size.div_ceil(8),
+                        };
+                        (2, per_vector)
+                    }
+                };
+                reciprocal_setup_cost + per_vector * vector_cnt
             }
             CpuKernel::MultAdd => {
                 let compute_cost = match parameters[0].spec().dtype() {
