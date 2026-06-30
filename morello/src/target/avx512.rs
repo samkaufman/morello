@@ -92,6 +92,10 @@ impl CpuTarget for Avx512Target {
         TargetId::Avx512
     }
 
+    fn processors() -> u8 {
+        24
+    }
+
     fn vec_types() -> &'static [VecType] {
         &X86_AVX512_VEC_TYPES
     }

@@ -339,15 +339,7 @@ pub fn arb_canonical_spec<Tgt: Target>(
 ) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>> {
     use proptest::prelude::*;
 
-    any_with::<Spec<Tgt>>((max_size, max_memory)).prop_filter_map(
-        "Must be possible to canonicalize Spec",
-        |mut s| {
-            if s.canonicalize().is_err() {
-                return None;
-            }
-            Some(s)
-        },
-    )
+    arb_canonical_spec_from_logical(any_with::<LogicalSpec<Tgt>>(max_size.into()), max_memory)
 }
 
 #[cfg(test)]
@@ -355,6 +347,21 @@ pub fn arb_canonical_primitive_spec<Tgt: Target>(
     max_size: Option<DimSize>,
     max_memory: Option<u64>,
 ) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>> {
+    arb_canonical_spec_from_logical(
+        arb_canonical_primitive_logical_spec::<Tgt>(max_size),
+        max_memory,
+    )
+}
+
+#[cfg(test)]
+pub fn arb_canonical_spec_from_logical<Tgt, LogicalSpecStrategy>(
+    logical_specs: LogicalSpecStrategy,
+    max_memory: Option<u64>,
+) -> impl proptest::strategy::Strategy<Value = Spec<Tgt>>
+where
+    Tgt: Target,
+    LogicalSpecStrategy: proptest::strategy::Strategy<Value = LogicalSpec<Tgt>>,
+{
     use crate::memorylimits::arb_memorylimits;
     use proptest::prelude::*;
 
@@ -364,10 +371,7 @@ pub fn arb_canonical_primitive_spec<Tgt: Target>(
         max_memory_limits = max_memory_limits.map(|v| v.min(lower_max));
     }
 
-    (
-        arb_canonical_primitive_logical_spec::<Tgt>(max_size),
-        arb_memorylimits::<Tgt>(&max_memory_limits),
-    )
+    (logical_specs, arb_memorylimits::<Tgt>(&max_memory_limits))
         .prop_map(|(logical_spec, mem_limits)| Spec(logical_spec, mem_limits))
         .prop_filter_map("Must be possible to canonicalize Spec", |mut s| {
             if s.canonicalize().is_err() {
@@ -3696,7 +3700,7 @@ mod tests {
         assert_eq!(s.0, expected_ls);
         assert_eq!(
             s.1,
-            MemoryLimits::Standard(MemVec::new_mixed([8, 8, 8, 4], [true, true, false, false]))
+            MemoryLimits::Standard(MemVec::new_mixed([8, 8, 4, 2], [true, true, false, false]))
         );
     }
 
@@ -3712,7 +3716,7 @@ mod tests {
         assert_eq!(s.0, expected_ls);
         assert_eq!(
             s.1,
-            MemoryLimits::Standard(MemVec::new_mixed([16, 8, 4], [true, false, false]))
+            MemoryLimits::Standard(MemVec::new_mixed([16, 4, 2], [true, false, false]))
         );
     }
 

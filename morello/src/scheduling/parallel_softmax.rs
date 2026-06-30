@@ -357,7 +357,6 @@ mod tests {
     use crate::common::Dtype;
     use crate::imp::ImplNode;
     use crate::layout::row_major;
-    use crate::scheduling::Action;
     use crate::shape;
     use crate::target::{Avx2Target, CpuMemory, CpuTarget};
     use crate::tensorspec::TensorSpecAux;
@@ -395,8 +394,11 @@ mod tests {
         assert_eq!(loop_impl.bodies.len(), 1);
     }
 
+    #[cfg(not(feature = "softmax-disable-online-rewrites"))]
     #[test]
     fn test_target_generates_non_exact_parallel_split_actions() {
+        use crate::scheduling::Action;
+
         let actions =
             Avx2Target::actions(&softmax_denominator_and_max_spec(4_097).0).collect::<Vec<_>>();
         assert!(actions.iter().any(|action| {

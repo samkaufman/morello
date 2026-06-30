@@ -1544,7 +1544,10 @@ mod tests {
     use crate::layout::{row_major, Layout, PhysDim};
     use crate::scheduling::{Action, ActionT, ApplyError, NotApplicableReason};
     use crate::spec::Spec;
-    use crate::spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
+    use crate::spec::{
+        arb_canonical_spec, arb_canonical_spec_from_logical, LogicalSpec, PrimitiveBasics,
+        PrimitiveSpecType,
+    };
     use crate::target::{
         Avx2Target,
         CpuMemory::{self, GL},
@@ -2084,17 +2087,7 @@ mod tests {
 
         #[test]
         fn test_split_with_multiple_k_produces_no_boundaries(
-            (spec, action) in arb_canonical_spec::<Avx2Target>(Some(nz!(16u32)), None)
-                .prop_filter_map("Must be Matmul with accum", |spec| {
-                    match &spec.0 {
-                        LogicalSpec::Primitive(PrimitiveBasics {
-                            typ: PrimitiveSpecType::Matmul { accum: true },
-                            ..
-                        }, ..) => Some(spec),
-                        _ => None
-                    }
-                })
-                .prop_filter("Matmul must have k > 1", |s| s.0.parameter_shape(0)[2].get() > 1)
+            (spec, action) in arb_canonical_matmulaccum()
                 .prop_flat_map(|spec| {
                     let operands = spec.0.parameters();
                     let k_dim_size = operands[0].shape()[2].get();
@@ -2775,6 +2768,40 @@ mod tests {
 
                 (Just(spec), prop::strategy::Union::new(strategies))
             })
+    }
+
+    fn arb_canonical_matmulaccum() -> impl Strategy<Value = Spec<Avx2Target>> {
+        let logical_specs = (
+            1u32..=16,
+            1u32..=32,
+            2u32..=32,
+            1u32..=32,
+            proptest::collection::vec(any::<Dtype>(), 3),
+        )
+            .prop_flat_map(|(b, m, k, n, dtypes)| {
+                let basics = PrimitiveBasics {
+                    typ: PrimitiveSpecType::Matmul { accum: true },
+                    spec_shape: shape![b, m, k, n],
+                    dtypes,
+                };
+                let auxes_strategy = basics
+                    .parameter_shapes()
+                    .into_iter()
+                    .zip(basics.dtypes.iter().copied())
+                    .map(|(shape, dtype)| {
+                        any_with::<TensorSpecAux<Avx2Target>>((
+                            TensorSpecArbMaxShape(shape),
+                            Some(dtype),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                (Just(basics), auxes_strategy, any::<bool>())
+            })
+            .prop_map(|(basics, auxes, serial_only)| {
+                LogicalSpec::Primitive(basics, auxes, serial_only)
+            });
+
+        arb_canonical_spec_from_logical(logical_specs, None)
     }
 
     fn arb_canonical_spec_and_multi_boundary_tile_shape(

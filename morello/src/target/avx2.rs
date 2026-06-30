@@ -26,6 +26,10 @@ impl CpuTarget for Avx2Target {
         TargetId::Avx2
     }
 
+    fn processors() -> u8 {
+        16
+    }
+
     fn vec_types() -> &'static [VecType] {
         &X86_AVX2_VEC_TYPES
     }

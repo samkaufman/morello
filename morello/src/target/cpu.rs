@@ -39,7 +39,8 @@ use std::iter::{self, once};
 
 const INST_COST: MainCost = 1;
 const ASSIGN_INST_COST: MainCost = 1;
-const SCALAR_EXPF_COST: MainCost = 6 * INST_COST;
+/// Estimated reciprocal throughput of scalar libm `expf` calls on AVX2 and AVX-512.
+const SCALAR_EXPF_COST: MainCost = 17;
 const SOFTMAX_OFFLINE_REWRITES_ENABLED: bool = !cfg!(feature = "softmax-disable-offline-rewrites");
 const SOFTMAX_ONLINE_REWRITES_ENABLED: bool = !cfg!(feature = "softmax-disable-online-rewrites");
 
@@ -60,6 +61,7 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
     type Memory: Memory + From<CpuMemory> + Into<CpuMemory> + PartialEq<CpuMemory>;
     const TILE_SCALE: TileScale = TileScale::PowerOfTwo;
     fn max_mem() -> MemoryLimits;
+    fn processors() -> u8;
     fn target_id() -> TargetId;
     fn vec_types() -> &'static [VecType];
     fn target_specific_kernels(_spec: &LogicalSpec<Self>) -> Vec<Self::Kernel> {
@@ -283,7 +285,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn line_size() -> u32 {
-        32
+        64
     }
 
     fn max_mem() -> MemoryLimits {
@@ -291,7 +293,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn processors() -> u8 {
-        32
+        <Self as CpuTarget>::processors()
     }
 
     fn default_memory() -> Self::Memory {

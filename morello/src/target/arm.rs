@@ -122,6 +122,10 @@ impl CpuTarget for ArmTarget {
         TargetId::Arm
     }
 
+    fn processors() -> u8 {
+        8
+    }
+
     fn vec_types() -> &'static [VecType] {
         &ARM_VEC_TYPES
     }

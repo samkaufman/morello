@@ -2498,14 +2498,14 @@ mod tests {
     fn test_estimate_cache_lines_row_major_f32() {
         let layout = row_major(&shape![128, 16]);
         let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![128, 16], Dtype::Float32);
-        assert_eq!(lines, 256);
+        assert_eq!(lines, 128);
     }
 
     #[test]
     fn test_estimate_cache_lines_row_major_u8() {
         let layout = row_major(&shape![64, 64]);
         let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![64, 64], Dtype::Uint8);
-        assert_eq!(lines, 128);
+        assert_eq!(lines, 64);
     }
 
     #[test]
@@ -2514,8 +2514,8 @@ mod tests {
         layout.set_contig(1);
         let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![6, 128], Dtype::Float32);
         assert_eq!(
-            lines, 96,
-            "6x128 f32 w/ contig=1 is 96 lines (6 * 128 * 4 = 3072 bytes / 32 = 96)"
+            lines, 48,
+            "6x128 f32 w/ contig=1 is 48 lines (6 * 128 * 4 = 3072 bytes / 64 = 48)"
         );
     }
 
@@ -2524,14 +2524,14 @@ mod tests {
         let layout = layout![2, 1, 2 p(16)];
         let lines =
             layout.estimate_cache_lines::<Avx2Target>(&shape![1, 128, 2048], Dtype::Float32);
-        assert_eq!(lines, 32_768);
+        assert_eq!(lines, 16_384);
     }
 
     #[test]
     fn test_estimate_cache_lines_partial_line() {
         let layout = row_major(&shape![3, 3]);
         let lines = layout.estimate_cache_lines::<Avx2Target>(&shape![3, 3], Dtype::Float32);
-        assert_eq!(lines, 2);
+        assert_eq!(lines, 1);
     }
 
     #[test]
