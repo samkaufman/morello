@@ -37,8 +37,6 @@ use std::cmp::Ordering;
 use std::fmt::{Debug, Display};
 use std::iter::{self, once};
 
-const INST_COST: MainCost = 1;
-const ASSIGN_INST_COST: MainCost = 1;
 /// Estimated reciprocal throughput of scalar libm `expf` calls on AVX2 and AVX-512.
 const SCALAR_EXPF_COST: MainCost = 17;
 const SOFTMAX_OFFLINE_REWRITES_ENABLED: bool = !cfg!(feature = "softmax-disable-offline-rewrites");
@@ -2054,7 +2052,7 @@ impl CpuKernel {
                 let volume = out_spec.volume().get();
                 debug_assert_eq!(volume % vector_size, 0);
                 let vector_count = volume / vector_size;
-                let mut cost = INST_COST * ((vector_count * 2) + 1);
+                let mut cost = (vector_count * 2) + 1;
 
                 // TwoVecBroadcastVecMultAdd takes an input from L1.
                 if matches!(self, CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) {
@@ -2072,20 +2070,20 @@ impl CpuKernel {
                 // TODO: Measure throughput! This is a rough estimate.
                 let value_cnt = parameters[0].spec().shape()[2].get();
                 let d = DOT_PRODUCT_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
-                8 * INST_COST * value_cnt / d + move_cost(parameters[2].spec())
+                8 * value_cnt / d + move_cost(parameters[2].spec())
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 // TODO: Measure throughput! This is a rough estimate.
                 let value_cnt = parameters[0].spec().shape()[2].get();
                 let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
-                (12 * INST_COST * value_cnt) / d + move_cost(parameters[2].spec())
+                (12 * value_cnt) / d + move_cost(parameters[2].spec())
             }
             CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
                 // RThroughput = 8 or 16
                 let value_cnt = parameters[0].spec().shape()[2].get();
                 let d = DOT_PRODUCT_BF16_STRIP_SIZE.get() * VECTOR_ACCUM_COUNT;
-                let mut cost = 16 * INST_COST * value_cnt;
+                let mut cost = 16 * value_cnt;
                 if self == &CpuKernel::DotProductLoopF32Bf16F32 {
                     cost *= 2;
                 }
@@ -2102,7 +2100,7 @@ impl CpuKernel {
                     .iter()
                     .map(|p| move_cost(p.spec()))
                     .sum::<MainCost>();
-                INST_COST + io_cost
+                io_cost + 1
             }
             CpuKernel::VectorMax | CpuKernel::VecScalarAssign => {
                 let vidx = match self {
@@ -2116,7 +2114,7 @@ impl CpuKernel {
                     .iter()
                     .map(|p| move_cost(p.spec()))
                     .sum::<MainCost>();
-                INST_COST * (vector_cnt + 1) + io_cost
+                (vector_cnt + 1) + io_cost
             }
             CpuKernel::DivideVec => {
                 let input_spec = parameters[0].spec();
@@ -2137,11 +2135,11 @@ impl CpuKernel {
             }
             CpuKernel::ValueDivideVecScalar => {
                 // TODO: Measure throughput.
-                INST_COST
-                    + parameters
-                        .iter()
-                        .map(|p| move_cost(p.spec()))
-                        .sum::<MainCost>()
+                parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>()
+                    + 1
             }
             CpuKernel::VectorMaxLoop => {
                 let value_cnt = parameters[0].spec().volume().get();
@@ -2150,14 +2148,14 @@ impl CpuKernel {
                 let vector_cnt = value_cnt / vector_size.get();
                 // Hot-L1 throughput is limited by vector max/reduction and shuffle ports. The
                 // vector loads and scalar output update overlap with that work.
-                let vector_max_cost = (vector_cnt + accum_count + 3).div_ceil(2) * INST_COST;
+                let vector_max_cost = (vector_cnt + accum_count + 3).div_ceil(2);
                 let horizontal_tail_cost = match vector_size.get() {
-                    4 => 4 * INST_COST,
-                    8 => 5 * INST_COST,
-                    16 => 6 * INST_COST,
+                    4 => 4,
+                    8 => 5,
+                    16 => 6,
                     _ => unreachable!("unsupported VectorMaxLoop width"),
                 };
-                let l1_io_cost = (vector_cnt.div_ceil(2) + 1) * INST_COST;
+                let l1_io_cost = vector_cnt.div_ceil(2) + 1;
                 vector_max_cost.max(horizontal_tail_cost).max(l1_io_cost)
                     + slower_than_l1_io_cost(parameters)
             }
@@ -2169,8 +2167,8 @@ impl CpuKernel {
                 // Per output vector, the hot-cache loop loads one vector, multiplies by the
                 // reciprocal, and stores one vector. Throughput is store-port limited for AVX2
                 // once the vector count exceeds the scalar divide throughput.
-                const RECIPROCAL_SETUP_COST: MainCost = 3 * INST_COST;
-                const PER_VECTOR_COST: MainCost = INST_COST;
+                const RECIPROCAL_SETUP_COST: MainCost = 3;
+                const PER_VECTOR_COST: MainCost = 1;
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = divide_vec_scalar_reciprocal_vector_size(
                     parameters[0].spec(),
@@ -2297,8 +2295,7 @@ impl CpuKernel {
             CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax => {
                 // Accumulates one scalar exponential into the denominator. The unscaled variant
                 // also writes that exponential to the unscaled output.
-                INST_COST * 3
-                    + SCALAR_EXPF_COST
+                3 + SCALAR_EXPF_COST
                     + parameters
                         .iter()
                         .map(|p| move_cost(p.spec()))
@@ -2364,9 +2361,9 @@ impl CpuKernel {
                     Dtype::Bfloat16 => match <P::Tgt as CpuTarget>::target_id() {
                         // AVX-512 BF16 lowers through scalar unpacking, f32 FMA, and
                         // `vcvtneps2bf16`.
-                        TargetId::Avx512 => 6 * INST_COST,
+                        TargetId::Avx512 => 6,
                         // AVX2 scalarizes through f32 FMA and __truncsfbf2.
-                        TargetId::Avx2 | TargetId::Arm => 30 * INST_COST,
+                        TargetId::Avx2 | TargetId::Arm => 30,
                     },
                     Dtype::Float32 => 1,
                     Dtype::Uint8
@@ -2387,42 +2384,41 @@ impl CpuKernel {
             }
             CpuKernel::CastBf16F32 => {
                 // RThroughput = 2
-                4 * INST_COST
-                    + parameters
-                        .iter()
-                        .map(|p| move_cost(p.spec()))
-                        .sum::<MainCost>()
+                4 + parameters
+                    .iter()
+                    .map(|p| move_cost(p.spec()))
+                    .sum::<MainCost>()
             }
-            CpuKernel::VectorCastBf16F32 => 6 * INST_COST, // RThroughput = 3
-            CpuKernel::PhysicalTransposeByte128 => ASSIGN_INST_COST * 2,
-            CpuKernel::PhysicalTransposeByte256 => ASSIGN_INST_COST * 4,
+            CpuKernel::VectorCastBf16F32 => 6, // RThroughput = 3
+            CpuKernel::PhysicalTransposeByte128 => 2,
+            CpuKernel::PhysicalTransposeByte256 => 4,
             CpuKernel::Assign => {
                 let is_scalar = parameters
                     .iter()
                     .flat_map(|parameter| parameter.spec().shape())
                     .all(|d| d.get() == 1);
                 if is_scalar {
-                    ASSIGN_INST_COST
-                        + parameters
-                            .iter()
-                            .map(|p| move_cost(p.spec()))
-                            .sum::<MainCost>()
+                    parameters
+                        .iter()
+                        .map(|p| move_cost(p.spec()))
+                        .sum::<MainCost>()
+                        + 1
                 } else {
                     let vector_value_count = parameters[0]
                         .spec()
                         .vector_size()
                         .unwrap_or_else(|| parameters[1].spec().vector_size().unwrap());
                     let vec_count = parameters[0].spec().volume().get() / vector_value_count.get();
-                    ASSIGN_INST_COST * vec_count
+                    vec_count
                 }
             }
-            CpuKernel::MemsetZero => ASSIGN_INST_COST,
+            CpuKernel::MemsetZero => 1,
             CpuKernel::VectorZero | CpuKernel::VectorNegInf | CpuKernel::VectorMin => {
                 debug_assert_eq!(
                     parameters[0].spec().volume().get(),
                     parameters[0].spec().vector_size().unwrap().get(),
                 );
-                INST_COST
+                1
             }
         }
     }
@@ -3505,7 +3501,7 @@ mod tests {
         let parameter0: Param<Avx2Target> = Param::new(0, arg0);
         let parameter1: Param<Avx2Target> = Param::new(1, arg1);
         let cost = CpuKernel::Assign.main_cost(&[parameter0, parameter1]);
-        assert_eq!(cost, 8 * ASSIGN_INST_COST);
+        assert_eq!(cost, 8);
     }
 
     fn assert_unique_layouts(layouts: &[Layout]) {
