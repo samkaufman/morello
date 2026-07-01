@@ -2204,53 +2204,95 @@ impl CpuKernel {
                     .sum::<MainCost>();
                 compute_cost + io_cost
             }
-            CpuKernel::VectorSoftmaxDenominatorAndMax => {
-                const PER_VECTOR_COST: MainCost = 8 * INST_COST;
-                const FINAL_REDUCTION_COST: MainCost = 8 * INST_COST;
+            CpuKernel::VectorSoftmaxDenominatorAndMax
+            | CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts => {
                 let value_cnt = parameters[0].spec().volume().get();
                 let vector_size = parameters[0].spec().vector_size().unwrap().get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
+                debug_assert_ne!(vector_cnt, 0);
+
+                let mut compute_cost = match <P::Tgt as CpuTarget>::target_id() {
+                    TargetId::Avx512 => 128 + 15 * vector_size.div_ceil(16) * vector_cnt,
+                    TargetId::Avx2 | TargetId::Arm => {
+                        32 + match vector_size {
+                            4 => 16 + 14 * vector_cnt,
+                            8 => 48 * vector_cnt,
+                            size => 48 * size.div_ceil(8) * vector_cnt,
+                        }
+                    }
+                };
+
+                // Extra multiply present only in FromParts:
+                //
+                // ```
+                // part_denom_vec * exp_vec(part_max_vec - chunk_max)
+                // ```
+                //
+                // Non-FromParts has part_denom_vec = 1, so: no multiply.
+                if matches!(self, CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts) {
+                    compute_cost += vector_cnt;
+                }
+
+                compute_cost += 2 * SCALAR_EXPF_COST;
+
+                // Fixed tail for reducing vector accumulators down to scalar chunk summaries:
+                //
+                //   float chunk_max = horizontal_max(reduced_max_accum);
+                //   float chunk_denom = horizontal_sum(reduced_denom_accum);
+                //
+                // The vector-body terms below model the repeated vector work; this models the
+                // small fixed finalization/scalarization part.
+                compute_cost += 8;
+
                 let io_cost = parameters
                     .iter()
                     .map(|p| move_cost(p.spec()))
                     .sum::<MainCost>();
-                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + 2 * SCALAR_EXPF_COST + io_cost
+                compute_cost + io_cost
             }
-            CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts => {
-                const PER_VECTOR_COST: MainCost = 10 * INST_COST;
-                const FINAL_REDUCTION_COST: MainCost = 8 * INST_COST;
-                let value_cnt = parameters[0].spec().volume().get();
-                let vector_size = parameters[0].spec().vector_size().unwrap().get();
-                debug_assert_eq!(
-                    parameters[1].spec().vector_size().unwrap().get(),
-                    vector_size
-                );
-                debug_assert_eq!(value_cnt % vector_size, 0);
-                let vector_cnt = value_cnt / vector_size;
-                let io_cost = parameters
+            CpuKernel::ValueSoftmaxDenominatorAndMax
+            | CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts => {
+                // Begin with the overhead for one scalar online-softmax merge. This corresponds to
+                // the non-`expf` work in this scalar C block:
+                //
+                // ```c
+                // float old_max = max;
+                // float new_max = fmaxf(old_max, value_max);
+                // denom = denom * expf(old_max - new_max) + value_denom * expf(value_max - new_max);
+                // max = new_max;
+                // ```
+                let mut cost = match <P::Tgt as CpuTarget>::target_id() {
+                    TargetId::Avx2 => 0,
+                    TargetId::Avx512 => 128,
+                    // Arm has no calibrated extra online-softmax merge overhead yet, so it uses only the base
+                    // scalar instruction and `expf` costs.
+                    TargetId::Arm => 0,
+                };
+
+                // Model the running max and denominator with two scalar `expf` rescalings.
+                cost += 2 * SCALAR_EXPF_COST;
+
+                // Model the cost of moving data into registers.
+                cost += parameters
                     .iter()
                     .map(|p| move_cost(p.spec()))
                     .sum::<MainCost>();
-                PER_VECTOR_COST * vector_cnt + FINAL_REDUCTION_COST + 2 * SCALAR_EXPF_COST + io_cost
-            }
-            CpuKernel::ValueSoftmaxDenominatorAndMax => {
-                // Updates the running max and denominator with two scalar `expf` rescalings.
-                INST_COST * 6
-                    + 2 * SCALAR_EXPF_COST
-                    + parameters
-                        .iter()
-                        .map(|p| move_cost(p.spec()))
-                        .sum::<MainCost>()
-            }
-            CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts => {
-                // Updates the running max and denominator from one partial max/denominator pair.
-                INST_COST * 7
-                    + 2 * SCALAR_EXPF_COST
-                    + parameters
-                        .iter()
-                        .map(|p| move_cost(p.spec()))
-                        .sum::<MainCost>()
+
+                // Model the common scalar merge work around the two expf calls:
+                //   old_max local/copy or equivalent register move,
+                //   fmaxf(old_max, value_max),
+                //   old_max - new_max,
+                //   value_max - new_max,
+                //   denom * expf(old_max - new_max), and
+                //   add of the two denominator contributions.
+                cost += 6;
+                if matches!(self, CpuKernel::ValueSoftmaxDenominatorAndMaxFromParts) {
+                    // ValueSoftmaxDenominatorAndMaxFromParts is the same as
+                    // ValueSoftmaxDenominatorAndMax but for a single, additional scalar multiply.
+                    cost += 1;
+                }
+                cost
             }
             CpuKernel::ValueSoftmaxDenominatorAndUnscaledFromMax => {
                 // Accumulates one scalar exponential into the denominator. The unscaled variant
