@@ -3,14 +3,18 @@ use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::MemoryAllocation;
 use crate::nameenv::NameEnv;
 use crate::spec::Spec;
-use crate::target::Target;
+use crate::target::{Target, TargetId};
 use crate::tensorspec::TensorSpec;
 use crate::views::{Tile, View, ViewE};
 use itertools::Itertools;
 use std::fmt::{self, Debug};
 
-// Charge once for launching and joining a fork-join parallel tile loop.
-const PAR_TILE_OVERHEAD: MainCost = 300_000;
+const AVX512_PAR_TILE_SETUP_OVERHEAD: MainCost = 850_000;
+const AVX512_PAR_TILE_ITER_OVERHEAD: MainCost = 60;
+const AVX2_PAR_TILE_SETUP_OVERHEAD: MainCost = 230_000;
+const AVX2_PAR_TILE_ITER_OVERHEAD: MainCost = 60;
+const ARM_PAR_TILE_SETUP_OVERHEAD: MainCost = 230_000; // untuned
+const ARM_PAR_TILE_ITER_OVERHEAD: MainCost = 60;
 
 /// An Impl representing a loop over a set of zipped [`Tile`]s.
 ///
@@ -207,27 +211,32 @@ pub(crate) fn compute_loop_main_cost<Tgt: Target>(
 ) -> MainCost {
     debug_assert!(!body_costs.is_empty());
 
-    // Initialize total with the main region's cost.
-    let mut total = {
-        let mut full_iterations = 1u32;
-        for &(_, full_steps) in dims {
-            full_iterations = full_iterations
-                .checked_mul(full_steps)
-                .expect("number of full iterations doesn't overflow");
-        }
-        if parallel {
-            full_iterations = full_iterations.div_ceil(u32::from(Tgt::processors()))
-        }
-        body_costs[0].saturating_mul(full_iterations)
+    let mut iterations = 1u32;
+    for &(_, full_steps) in dims {
+        iterations = iterations
+            .checked_mul(full_steps)
+            .expect("number of full iterations doesn't overflow");
+    }
+    if parallel {
+        iterations = iterations.div_ceil(u32::from(Tgt::processors()));
     };
 
-    // Add boundary region costs (each boundary region is executed exactly once)
+    let mut total = body_costs[0].saturating_mul(iterations); // main body
     for &cost in &body_costs[1..] {
         total = total.saturating_add(cost);
     }
 
     if parallel {
-        total = total.saturating_add(PAR_TILE_OVERHEAD);
+        let parallel_loop_cost = match Tgt::target_id() {
+            TargetId::Avx512 => {
+                AVX512_PAR_TILE_SETUP_OVERHEAD + AVX512_PAR_TILE_ITER_OVERHEAD * iterations
+            }
+            TargetId::Avx2 => {
+                AVX2_PAR_TILE_SETUP_OVERHEAD + AVX2_PAR_TILE_ITER_OVERHEAD * iterations
+            }
+            TargetId::Arm => ARM_PAR_TILE_SETUP_OVERHEAD + ARM_PAR_TILE_ITER_OVERHEAD * iterations,
+        };
+        total = total.saturating_add(parallel_loop_cost);
     }
     total
 }
@@ -267,7 +276,10 @@ mod tests {
         // Single axis, parallel. Boundary has 1 step.
         let procs = u32::from(Avx2Target::processors());
         let cost = compute_loop_main_cost::<Avx2Target>(&[(9, 8)], true, &[5, 5]);
-        let expected = 5 * 8u32.div_ceil(procs) + 5 + PAR_TILE_OVERHEAD;
+        let worker_iterations = 8u32.div_ceil(procs);
+        let expected = (AVX2_PAR_TILE_ITER_OVERHEAD + 5) * worker_iterations
+            + 5
+            + AVX2_PAR_TILE_SETUP_OVERHEAD;
         assert_eq!(cost, expected);
     }
 
