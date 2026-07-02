@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "morello"
 
 [features]
-default = ["verification"]
+default = ["verification", "drop-rf"]
 drop-rf = ["morello/drop-rf"]
 verification = ["morello/verification"]
 
