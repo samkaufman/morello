@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["drop-rf"]
 db-stats = ["morello/db-stats"]
 drop-rf = ["morello/drop-rf"]
 
