@@ -676,7 +676,9 @@ impl<T: CpuTarget> Target for T {
                     Box::new(iter.chain(split_actions(spec, Self::TILE_SCALE)))
                 }
                 PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum: false, .. } => {
-                    Box::new(iter.chain(once(ToAccum::default().into())))
+                    Box::new(iter.chain(
+                        SOFTMAX_ONLINE_REWRITES_ENABLED.then_some(ToAccum::default().into()),
+                    ))
                 }
                 PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum: true, .. } => {
                     Box::new(iter.chain(split_actions(spec, Self::TILE_SCALE)))
@@ -752,22 +754,17 @@ impl<T: CpuTarget> Target for T {
                                                     alt_level.vector_bytes(),
                                                 )
                                                 .for_each(|alt_vector_size| {
-                                                    if SOFTMAX_OFFLINE_REWRITES_ENABLED {
-                                                        softmax_actions.push(
-                                                            Action::ToSoftmaxParts(
-                                                                ToSoftmaxParts {
-                                                                    denominator_level: denom_level,
-                                                                    denominator_layout:
-                                                                        denom_layout.clone(),
-                                                                    denominator_vector_size,
-                                                                    exps_level: alt_level,
-                                                                    exps_layout: alt_layout.clone(),
-                                                                    exps_vector_size:
-                                                                        alt_vector_size,
-                                                                },
-                                                            ),
-                                                        );
-                                                    }
+                                                    softmax_actions.push(Action::ToSoftmaxParts(
+                                                        ToSoftmaxParts {
+                                                            denominator_level: denom_level,
+                                                            denominator_layout: denom_layout
+                                                                .clone(),
+                                                            denominator_vector_size,
+                                                            exps_level: alt_level,
+                                                            exps_layout: alt_layout.clone(),
+                                                            exps_vector_size: alt_vector_size,
+                                                        },
+                                                    ));
                                                     softmax_actions.push(
                                                         Action::ToSoftmaxPartsRecompute(
                                                             ToSoftmaxPartsRecompute {
@@ -793,23 +790,25 @@ impl<T: CpuTarget> Target for T {
                 }
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => {
                     let mut unscaled_actions = Vec::new();
-                    if let LogicalSpec::Primitive(basics, _, _) = spec {
-                        let spec_shape = &basics.spec_shape;
-                        let dtype = basics.dtypes[0];
+                    if SOFTMAX_OFFLINE_REWRITES_ENABLED {
+                        if let LogicalSpec::Primitive(basics, _, _) = spec {
+                            let spec_shape = &basics.spec_shape;
+                            let dtype = basics.dtypes[0];
 
-                        for memory in Self::memories() {
-                            for layout in Self::move_destination_layouts(spec_shape, dtype) {
-                                gen_vector_sizes_opt(dtype, memory.vector_bytes()).for_each(
-                                    |vector_size| {
-                                        unscaled_actions.push(Action::ToMaxAndUnscaled(
-                                            ToMaxAndUnscaled {
-                                                max_level: memory,
-                                                max_layout: layout.clone(),
-                                                max_vector_size: vector_size,
-                                            },
-                                        ));
-                                    },
-                                );
+                            for memory in Self::memories() {
+                                for layout in Self::move_destination_layouts(spec_shape, dtype) {
+                                    gen_vector_sizes_opt(dtype, memory.vector_bytes()).for_each(
+                                        |vector_size| {
+                                            unscaled_actions.push(Action::ToMaxAndUnscaled(
+                                                ToMaxAndUnscaled {
+                                                    max_level: memory,
+                                                    max_layout: layout.clone(),
+                                                    max_vector_size: vector_size,
+                                                },
+                                            ));
+                                        },
+                                    );
+                                }
                             }
                         }
                     }

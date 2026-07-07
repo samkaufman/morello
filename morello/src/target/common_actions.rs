@@ -238,11 +238,11 @@ pub fn split_actions<Tgt: Target>(
             let scan_dim_idx = usize::from(*scan_dim);
             let mut tile_shape = spec_shape.clone();
             tile_shape[scan_dim_idx] = k;
-            operands[0]
-                .is_valid_tile_shape(&tile_shape, false)
-                .then_some(Action::SplitSoftmaxDenominatorAndMax(
-                    SplitSoftmaxDenominatorAndMax { k },
-                ))
+            (!cfg!(feature = "softmax-disable-online-rewrites")
+                && operands[0].is_valid_tile_shape(&tile_shape, false))
+            .then_some(Action::SplitSoftmaxDenominatorAndMax(
+                SplitSoftmaxDenominatorAndMax { k },
+            ))
         }
         _ => unreachable!(),
     })
