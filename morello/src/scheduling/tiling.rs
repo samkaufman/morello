@@ -1368,7 +1368,7 @@ fn fuse_matmul_compose<Tgt: Target>(
         tail_body_specapp.0 .0.serial_only()
     );
 
-    let mut final_tiles = Vec::with_capacity(tail_tiles.len() + 1);
+    let mut final_tiles = Vec::with_capacity(tail_tiles.len());
     final_tiles.push({
         let mut rhs_tile = head_tiles
             .into_iter()
@@ -1381,10 +1381,14 @@ fn fuse_matmul_compose<Tgt: Target>(
     });
 
     let tail_output_index = tail_body_specapp.0 .0.unique_output_index().unwrap();
-    final_tiles.extend(tail_tiles.into_iter().map(|mut tile| {
+    final_tiles.extend(tail_tiles.into_iter().filter_map(|mut tile| {
         let parameter_index_usize = usize::from(tile.parameter_index);
+        // The tail output is internal to the fused Compose.
+        if parameter_index_usize == tail_output_index {
+            return None;
+        }
         reindex_loop_tile_param(&mut tile, (parameter_index_usize + 1).try_into().unwrap());
-        tile
+        Some(tile)
     }));
 
     // Destructure the head Matmul SpecApp
@@ -1421,23 +1425,18 @@ fn fuse_matmul_compose<Tgt: Target>(
     final_operand_auxes.extend(tail_operand_auxes_updated);
     final_operand_auxes.push(output_aux);
 
+    let output_arg = head_args.swap_remove(2);
     let rhs_arg = head_args.swap_remove(1);
     drop(head_args); // order is messed up; dropping for safety
 
-    let output_parent_view = match tail_args.remove(tail_output_index) {
-        ViewE::Tile(tile) => *tile.view,
-        other => other,
-    };
+    tail_args.remove(tail_output_index);
     let final_param_index = u8::try_from(tail_args.len() + 1).unwrap();
     let final_args: Vec<_> = once(reindex_view_param(rhs_arg, 0))
         .chain(tail_args.into_iter().enumerate().map(|(i, arg)| {
             let new_param_index = u8::try_from(i + 1).unwrap();
             reindex_view_param(arg, new_param_index)
         }))
-        .chain(once(reindex_view_param(
-            output_parent_view,
-            final_param_index,
-        )))
+        .chain(once(reindex_view_param(output_arg, final_param_index)))
         .collect();
 
     let mut final_spec = Spec(
@@ -2279,11 +2278,46 @@ mod tests {
         spec
     }
 
+    fn split_vector_output_matmul_compose() -> Loop<Avx2Target> {
+        let spec = vector_output_matmul_compose(4);
+        let ImplNode::Loop(loop_impl) = Split { k: nz!(1u32) }
+            .apply(&spec)
+            .expect("splitting should not constrain the internal value to the output vector width")
+        else {
+            panic!("expected Split to produce a Loop");
+        };
+        loop_impl
+    }
+
     #[test]
     fn test_can_split_compose_with_vector_output() {
         Split { k: nz!(1u32) }
             .apply(&vector_output_matmul_compose(4))
             .unwrap();
+    }
+
+    #[test]
+    fn test_fuse_matmul_compose_tiles_only_reduction_inputs() {
+        let loop_impl = split_vector_output_matmul_compose();
+        assert_eq!(
+            loop_impl
+                .tiles
+                .iter()
+                .map(|tile| tile.parameter_index)
+                .collect::<Vec<_>>(),
+            [0, 2],
+            "Split should tile input 0 (consumer RHS) and input 2 (producer RHS), but not input 1 (producer LHS) or input 3 (consumer output)",
+        );
+    }
+
+    #[test]
+    fn test_fuse_matmul_compose_preserves_consumer_output_spec() {
+        let expected_output = vector_output_matmul_compose(4).0.unique_output().unwrap();
+        let loop_impl = split_vector_output_matmul_compose();
+        let [ImplNode::SpecApp(SpecApp(_, arguments))] = &loop_impl.bodies[..] else {
+            panic!("expected the loop body to contain the split Compose");
+        };
+        assert_eq!(arguments[3].spec(), &expected_output);
     }
 
     /// Test that Split fails on Compose containing MatmulAccum and Move.
