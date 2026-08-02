@@ -23,7 +23,7 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
     fn apply_unchecked_canon(&self, spec: &Spec<Tgt>) -> Result<ImplNode<Tgt>, ApplyError> {
         let head = match &spec.0 {
             LogicalSpec::Primitive(basics, ..) => basics,
-            LogicalSpec::Compose { components: _, .. } => todo!("Add support for Compose"),
+            LogicalSpec::Compose { .. } => todo!("Add support for Compose"),
         };
 
         let PrimitiveBasics {

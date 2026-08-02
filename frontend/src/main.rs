@@ -338,7 +338,7 @@ where
         Ok(a) => a,
         Err(e) => {
             if let BuildError::CompilerFailed { ref stderr, .. } = e {
-                eprintln!("Compiler stderr:\n\n{}", &stderr);
+                eprintln!("Compiler stderr:\n\n{}", stderr);
             }
             return Err(e.into());
         }

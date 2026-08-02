@@ -425,7 +425,7 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
     ) -> ImplNode<Tgt> {
         let head_shape = match &self.0 {
             LogicalSpec::Primitive(basics, ..) => &basics.spec_shape,
-            LogicalSpec::Compose { components: _, .. } => todo!("Add support for Compose"),
+            LogicalSpec::Compose { .. } => todo!("Add support for Compose"),
         };
         let broadcast_layout = layout.build(head_shape);
         let action = Action::BroadcastFirst(BroadcastFirst {
