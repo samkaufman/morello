@@ -1312,9 +1312,9 @@ fn split_head_matmul_specs<Tgt: Target>(
 
     let lhs_shape = head_component.parameter_shape(0);
     let lhs_aux = TensorSpecAux {
-        memory: output_aux.memory,
+        memory: Tgt::default_memory(),
         layout: row_major(&lhs_shape),
-        vector_size: output_aux.vector_size,
+        vector_size: None,
     };
 
     tail_operand_auxes.push(lhs_aux.clone());
@@ -2226,6 +2226,64 @@ mod tests {
         };
         assert!(subspec.is_canonical());
         assert_eq!(subspec, &expected_compose_spec);
+    }
+
+    /// With `k = 4`, builds:
+    ///
+    /// ```
+    /// (Compose((MatmulAccum, Matmul), [
+    ///     (1×4×32, f32, GL), (1×2×1, f32, GL), (1×1×4, f32, GL),
+    ///     out=(1×2×32, f32, VRF, 8)
+    /// ], serial), [16, 16, 1024, 33554432])
+    /// ```
+    fn vector_output_matmul_compose(k: u32) -> Spec<Avx2Target> {
+        let k = DimSize::new(k).unwrap();
+        let consumer = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: true },
+            spec_shape: smallvec![nz!(1u32), nz!(2u32), k, nz!(32u32)],
+            dtypes: vec![Dtype::Float32; 3],
+        };
+        let producer = PrimitiveBasics {
+            typ: PrimitiveSpecType::Matmul { accum: false },
+            spec_shape: smallvec![nz!(1u32), nz!(2u32), nz!(1u32), k],
+            dtypes: vec![Dtype::Float32; 3],
+        };
+        let operand_shapes = [
+            smallvec![nz!(1u32), k, nz!(32u32)],
+            shape![1, 2, 1],
+            smallvec![nz!(1u32), nz!(1u32), k],
+            shape![1, 2, 32],
+        ];
+        let mut operand_auxes = operand_shapes
+            .iter()
+            .map(|shape| TensorSpecAux {
+                memory: GL,
+                layout: row_major(shape),
+                vector_size: None,
+            })
+            .collect::<Vec<_>>();
+        operand_auxes[3] = TensorSpecAux {
+            memory: CpuMemory::VRF,
+            layout: row_major(&operand_shapes[3]),
+            vector_size: Some(nz!(8u32)),
+        };
+        let mut spec = Spec(
+            LogicalSpec::Compose {
+                components: vec![consumer, producer],
+                operand_auxes,
+                serial_only: true,
+            },
+            Avx2Target::max_mem(),
+        );
+        spec.canonicalize().unwrap();
+        spec
+    }
+
+    #[test]
+    fn test_can_split_compose_with_vector_output() {
+        Split { k: nz!(1u32) }
+            .apply(&vector_output_matmul_compose(4))
+            .unwrap();
     }
 
     /// Test that Split fails on Compose containing MatmulAccum and Move.
