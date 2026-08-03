@@ -13,12 +13,22 @@ env:
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [1, 2, 3, 4]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal --no-self-update
-      - run: cargo install cargo-all-features
-      - run: cargo build-all-features
+      - run: cargo install cargo-all-features --version 1.12.0 --locked
+      - name: Build feature chunk ${{ matrix.chunk }}/4
+        run: >-
+          cargo all-features
+          --n-chunks 4
+          --chunk ${{ matrix.chunk }}
+          --chunk-granularity feature
+          build
         env:
           RUSTFLAGS: --deny warnings
 
