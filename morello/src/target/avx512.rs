@@ -92,6 +92,19 @@ impl CpuTarget for Avx512Target {
         TargetId::Avx512
     }
 
+    fn memory_hit_cost(memory: Self::Memory) -> MainCost {
+        match memory.0 {
+            #[cfg(not(feature = "drop-rf"))]
+            CpuMemory::RF => 0,
+            CpuMemory::VRF => 0,
+            CpuMemory::L1 => 1,
+            #[cfg(feature = "l2-speed-gl")]
+            CpuMemory::GL => 2,
+            #[cfg(not(feature = "l2-speed-gl"))]
+            CpuMemory::GL => 20,
+        }
+    }
+
     fn processors() -> u8 {
         24
     }
@@ -416,10 +429,6 @@ impl Memory for Avx512Memory {
 
     fn can_parallel_tile(&self) -> bool {
         self.0.can_parallel_tile()
-    }
-
-    fn cache_hit_cost(&self) -> MainCost {
-        self.0.cache_hit_cost()
     }
 
     fn vector_bytes(&self) -> &'static [u32] {

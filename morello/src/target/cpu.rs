@@ -58,6 +58,7 @@ pub trait CpuTarget: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'st
     type Kernel: Kernel<Tgt = Self> + From<CpuKernel>;
     type Memory: Memory + From<CpuMemory> + Into<CpuMemory> + PartialEq<CpuMemory>;
     const TILE_SCALE: TileScale = TileScale::PowerOfTwo;
+    fn memory_hit_cost(memory: Self::Memory) -> MainCost;
     fn max_mem() -> MemoryLimits;
     fn processors() -> u8;
     fn target_id() -> TargetId;
@@ -284,6 +285,10 @@ impl<T: CpuTarget> Target for T {
 
     fn line_size() -> u32 {
         64
+    }
+
+    fn cache_hit_cost(memory: Self::Memory) -> MainCost {
+        <Self as CpuTarget>::memory_hit_cost(memory)
     }
 
     fn max_mem() -> MemoryLimits {
@@ -2056,7 +2061,8 @@ impl CpuKernel {
                 // TwoVecBroadcastVecMultAdd takes an input from L1.
                 if matches!(self, CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) {
                     // TODO: Instead, call `move_cost`. Requires specializing kernel to X86/ARM.
-                    let mut l1_hit_cost = CpuMemory::L1.cache_hit_cost();
+                    let mut l1_hit_cost =
+                        <P::Tgt as CpuTarget>::memory_hit_cost(CpuMemory::L1.into());
                     if !parameters[0].spec().is_contiguous() {
                         l1_hit_cost *= 2;
                     }
@@ -2434,10 +2440,12 @@ impl CpuKernel {
 fn slower_than_l1_io_cost<P>(parameters: &[P]) -> MainCost
 where
     P: View,
+    P::Tgt: CpuTarget,
 {
+    let l1_hit_cost = <P::Tgt as CpuTarget>::memory_hit_cost(CpuMemory::L1.into());
     parameters
         .iter()
-        .filter(|p| p.spec().memory().cache_hit_cost() > CpuMemory::L1.cache_hit_cost())
+        .filter(|p| <P::Tgt as Target>::cache_hit_cost(p.spec().memory()) > l1_hit_cost)
         .map(|p| move_cost(p.spec()))
         .sum::<MainCost>()
 }
@@ -2543,19 +2551,6 @@ impl Memory for CpuMemory {
             CpuMemory::RF => false,
             CpuMemory::VRF => false,
             CpuMemory::GL | CpuMemory::L1 => true,
-        }
-    }
-
-    fn cache_hit_cost(&self) -> MainCost {
-        match &self {
-            #[cfg(not(feature = "drop-rf"))]
-            CpuMemory::RF => 0,
-            CpuMemory::VRF => 0,
-            CpuMemory::L1 => 2,
-            #[cfg(feature = "l2-speed-gl")]
-            CpuMemory::GL => 10,
-            #[cfg(not(feature = "l2-speed-gl"))]
-            CpuMemory::GL => 20,
         }
     }
 

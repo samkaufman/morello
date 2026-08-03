@@ -47,6 +47,7 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
     ) -> impl Iterator<Item = Self::SpatialSolver> + 's;
 
     fn line_size() -> u32;
+    fn cache_hit_cost(memory: Self::Memory) -> MainCost;
     fn max_mem() -> MemoryLimits;
     fn processors() -> u8;
     fn default_memory() -> Self::Memory;
@@ -81,7 +82,6 @@ pub trait Memory:
 {
     fn is_addressed(&self) -> bool;
     fn can_parallel_tile(&self) -> bool;
-    fn cache_hit_cost(&self) -> MainCost;
     fn vector_bytes(&self) -> &'static [u32];
     fn vector_rf(&self) -> bool {
         !self.vector_bytes().is_empty()

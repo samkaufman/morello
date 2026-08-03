@@ -154,7 +154,7 @@ impl<Tgt: Target> Impl<Tgt> for Alloc<Tgt> {
 }
 
 pub(crate) fn move_cost<Tgt: Target>(accessed: &TensorSpec<Tgt>) -> MainCost {
-    let hit_cost = accessed.memory().cache_hit_cost();
+    let hit_cost = Tgt::cache_hit_cost(accessed.memory());
     let mut cost = 0;
     if accessed.memory().has_layout() {
         let src_cache_lines = MainCost::from(

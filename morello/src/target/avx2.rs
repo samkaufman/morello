@@ -26,6 +26,19 @@ impl CpuTarget for Avx2Target {
         TargetId::Avx2
     }
 
+    fn memory_hit_cost(memory: Self::Memory) -> MainCost {
+        match memory {
+            #[cfg(not(feature = "drop-rf"))]
+            CpuMemory::RF => 0,
+            CpuMemory::VRF => 0,
+            CpuMemory::L1 => 2,
+            #[cfg(feature = "l2-speed-gl")]
+            CpuMemory::GL => 10,
+            #[cfg(not(feature = "l2-speed-gl"))]
+            CpuMemory::GL => 20,
+        }
+    }
+
     fn processors() -> u8 {
         16
     }
