@@ -67,12 +67,9 @@ pub trait SchedulingSugar<Tgt: Target> {
     fn to_accum(&self) -> ImplNode<Tgt>;
     fn to_softmax_parts(
         &self,
-        max_level: impl Into<Tgt::Memory>,
-        max_layout: impl LayoutBuilder,
-        max_vector_size: Option<u32>,
-        exps_level: impl Into<Tgt::Memory>,
-        exps_layout: impl LayoutBuilder,
-        exps_vector_size: Option<u32>,
+        denominator_level: impl Into<Tgt::Memory>,
+        denominator_layout: impl LayoutBuilder,
+        denominator_vector_size: Option<u32>,
     ) -> ImplNode<Tgt>;
     fn to_softmax_parts_recompute(
         &self,
@@ -259,12 +256,8 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
         denominator_level: impl Into<Tgt::Memory>,
         denominator_layout: impl LayoutBuilder,
         denominator_vector_size: Option<u32>,
-        exps_level: impl Into<Tgt::Memory>,
-        exps_layout: impl LayoutBuilder,
-        exps_vector_size: Option<u32>,
     ) -> ImplNode<Tgt> {
         let denominator_layout = denominator_layout.build(&self.0.parameter_shape(0));
-        let exps_layout = exps_layout.build(&self.0.parameter_shape(0));
         apply_unwrap(
             self,
             Action::ToSoftmaxParts(ToSoftmaxParts {
@@ -274,10 +267,6 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for Spec<Tgt> {
                     v.try_into()
                         .expect("denominator vector size should not be zero")
                 }),
-                exps_level: exps_level.into(),
-                exps_layout,
-                exps_vector_size: exps_vector_size
-                    .map(|v| v.try_into().expect("exps. vector size should not be zero")),
             }),
         )
     }
@@ -569,21 +558,15 @@ impl<Tgt: Target> SchedulingSugar<Tgt> for ImplNode<Tgt> {
 
     fn to_softmax_parts(
         &self,
-        max_level: impl Into<Tgt::Memory>,
-        max_layout: impl LayoutBuilder,
-        max_vector_size: Option<u32>,
-        exps_level: impl Into<Tgt::Memory>,
-        exps_layout: impl LayoutBuilder,
-        exps_vector_size: Option<u32>,
+        denominator_level: impl Into<Tgt::Memory>,
+        denominator_layout: impl LayoutBuilder,
+        denominator_vector_size: Option<u32>,
     ) -> ImplNode<Tgt> {
         self.apply_to_default_leaf(|spec| {
             spec.to_softmax_parts(
-                max_level,
-                max_layout,
-                max_vector_size,
-                exps_level,
-                exps_layout,
-                exps_vector_size,
+                denominator_level,
+                denominator_layout,
+                denominator_vector_size,
             )
         })
     }

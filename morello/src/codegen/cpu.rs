@@ -22,6 +22,7 @@ use crate::layout::BufferVar;
 use crate::opaque_symbol::OpaqueSymbol;
 use crate::pprint::{pprint_write, ImplPrintStyle};
 use crate::shape;
+use crate::spec::OperandDirection;
 use crate::target::{
     cpu::{
         broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, softmax_vector_size,
@@ -144,18 +145,24 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         let thread_extra_args = self.thread_style_extra_args();
         let parameter_count = top_arg_tensors.len();
         let fn_arg_count = parameter_count + thread_extra_args.len();
+        let parameter_directions = imp.spec().map(|spec| spec.0.operand_directions());
+        debug_assert!(parameter_directions
+            .as_ref()
+            .is_none_or(|d| d.len() == parameter_count));
 
         let mut operand_idx = 0;
         for tensor in top_arg_tensors {
+            // Use the Spec's operand directions when available. Without a Spec,
+            // conservatively allow every parameter to be written.
+            // TODO: It'd be better to do a quick analysis of the Impl.
+            let is_read_only = parameter_directions
+                .as_ref()
+                .is_some_and(|directions| directions[operand_idx] == OperandDirection::In);
             let parameter_name = self.namer.fresh_name();
             writeln!(
                 main_body_str,
                 "  {}{} *__restrict__ {}{}",
-                if operand_idx + 1 < parameter_count {
-                    "const "
-                } else {
-                    ""
-                },
+                if is_read_only { "const " } else { "" },
                 c_type(tensor.spec().dtype()),
                 parameter_name,
                 if operand_idx + 1 < fn_arg_count {
@@ -3096,7 +3103,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     Some(CpuKernel::DivideVec) => {
                         let vector_size = arguments[0].spec().vector_size().unwrap();
                         debug_assert_eq!(arguments[1].spec().vector_size(), Some(vector_size));
-                        debug_assert_eq!(arguments[2].spec().vector_size(), Some(vector_size));
                         let volume = arguments[1].spec().volume().get();
                         debug_assert_eq!(volume % vector_size.get(), 0);
                         let vector_count = volume / vector_size.get();
@@ -3111,7 +3117,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 w,
                                 "{}{} = {} / {}; /* DivideVec */",
                                 indent(depth),
-                                exprs[2],
+                                exprs[0],
                                 exprs[0],
                                 exprs[1]
                             )?;
@@ -3124,7 +3130,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             w,
                             "{}{} = {} / {}; /* ValueDivideVecScalar */",
                             indent(depth),
-                            exprs[2],
+                            exprs[0],
                             exprs[0],
                             exprs[1],
                         )
@@ -3142,11 +3148,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 .unwrap()
                         };
 
-                        let vector_size = divide_vec_scalar_reciprocal_vector_size::<Tgt>(
-                            arguments[0].spec(),
-                            arguments[2].spec(),
-                        )
-                        .unwrap();
+                        let vector_size =
+                            divide_vec_scalar_reciprocal_vector_size::<Tgt>(arguments[0].spec())
+                                .unwrap();
                         let vector_type =
                             get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
                         self.headers.vector_type_defs.insert(vector_type);
@@ -3154,9 +3158,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         debug_assert_eq!(volume % vector_size.get(), 0);
                         let vector_count = volume / vector_size.get();
 
-                        let (input_buffer, in_expr) = self.c_arg_parts(&arguments[0]);
+                        let (inout_buffer, inout_expr) = self.c_arg_parts(&arguments[0]);
                         let (denom_buffer, _) = self.c_arg_parts(&arguments[1]);
-                        let (out_buffer, out_expr) = self.c_arg_parts(&arguments[2]);
 
                         let reciprocal_vec = self.namer.fresh_name();
                         let denom_expr =
@@ -3180,9 +3183,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let vector_temp = self.namer.fresh_name();
                         writeln!(w, "{}{} {vector_temp};", indent(depth), vector_type.name)?;
-                        if !input_buffer.needs_unroll() && !out_buffer.needs_unroll() {
-                            let in_ptr = self.c_index_ptr(&input_buffer, &in_expr, None);
-                            let out_ptr = self.c_index_ptr(&out_buffer, &out_expr, None);
+                        if !inout_buffer.needs_unroll() {
+                            let inout_ptr = self.c_index_ptr(&inout_buffer, &inout_expr, None);
                             let offset_var = self.namer.fresh_name();
                             writeln!(
                                 w,
@@ -3192,33 +3194,32 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
                             writeln!(
                                 w,
-                                "{}__builtin_memcpy(&{vector_temp}, ({in_ptr}) + {offset_var}, sizeof({vector_temp}));",
+                                "{}__builtin_memcpy(&{vector_temp}, ({inout_ptr}) + {offset_var}, sizeof({vector_temp}));",
                                 indent(depth + 1),
                             )?;
                             writeln!(w, "{}{vector_temp} *= {reciprocal_vec};", indent(depth + 1),)?;
                             writeln!(
                                 w,
-                                "{}__builtin_memcpy(({out_ptr}) + {offset_var}, &{vector_temp}, sizeof({vector_temp}));",
+                                "{}__builtin_memcpy(({inout_ptr}) + {offset_var}, &{vector_temp}, sizeof({vector_temp}));",
                                 indent(depth + 1),
                             )?;
                             writeln!(w, "{}}}", indent(depth))?;
                         } else {
                             for vector_idx in 0..vector_count {
                                 let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
-                                let in_expr = in_expr.clone() + offset;
-                                let out_expr = out_expr.clone() + offset;
+                                let inout_expr = inout_expr.clone() + offset;
                                 writeln!(
                                     w,
                                     "{}__builtin_memcpy(&{vector_temp}, {}, sizeof({vector_temp}));",
                                     indent(depth),
-                                    self.c_index_ptr(&input_buffer, &in_expr, None),
+                                    self.c_index_ptr(&inout_buffer, &inout_expr, None),
                                 )?;
                                 writeln!(w, "{}{vector_temp} *= {reciprocal_vec};", indent(depth),)?;
                                 writeln!(
                                     w,
                                     "{}__builtin_memcpy({}, &{vector_temp}, sizeof({vector_temp}));",
                                     indent(depth),
-                                    self.c_index_ptr(&out_buffer, &out_expr, None),
+                                    self.c_index_ptr(&inout_buffer, &inout_expr, None),
                                 )?;
                             }
                         }

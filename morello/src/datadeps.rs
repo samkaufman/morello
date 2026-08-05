@@ -25,12 +25,12 @@ pub enum SpecKey {
     },
     DivideVec {
         rank: u8,
-        dtypes: [Dtype; 3],
+        dtypes: [Dtype; 2],
     },
     DivideVecScalar {
         rank: u8,
         scan_dim: u8,
-        dtypes: [Dtype; 3],
+        dtypes: [Dtype; 2],
     },
     Softmax {
         rank: u8,

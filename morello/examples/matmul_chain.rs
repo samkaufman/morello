@@ -163,7 +163,7 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let db = FilesDatabase::new::<Avx2Target>(None, Avx2Target::TILE_SCALE, 1, 10_000, 1);
 
     spec.tile_out(&[1, 1, 2048])
-        .to_softmax_parts(GL, row_major, None, GL, row_major, None)
+        .to_softmax_parts(GL, row_major, None)
         .subschedule(&[0], |subspec| {
             subspec.to_max_and_unscaled(GL, row_major, None)
         })

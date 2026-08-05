@@ -569,13 +569,9 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
                     PrimitiveBasics {
                         typ: PrimitiveSpecType::DivideVec,
                         spec_shape: size_cube.clone(),
-                        dtypes: vec![dtype; 3],
+                        dtypes: vec![dtype; 2],
                     },
-                    vec![
-                        taux_gl(&size_cube),
-                        taux_gl(&size_cube),
-                        taux_gl(&size_cube),
-                    ],
+                    vec![taux_gl(&size_cube), taux_gl(&size_cube)],
                     true,
                 ));
             }
@@ -641,13 +637,9 @@ fn goal_phases<Tgt: CpuTarget>(args: &Args) -> Vec<Vec<LogicalSpec<Tgt>>> {
                         PrimitiveBasics {
                             typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
                             spec_shape: numer_shape.clone(),
-                            dtypes: vec![dtype; 3],
+                            dtypes: vec![dtype; 2],
                         },
-                        vec![
-                            taux_gl(&numer_shape),
-                            taux_gl(&denom_shape),
-                            taux_gl(&numer_shape),
-                        ],
+                        vec![taux_gl(&numer_shape), taux_gl(&denom_shape)],
                         true,
                     ));
                 }

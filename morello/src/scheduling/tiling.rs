@@ -944,14 +944,12 @@ fn create_tile_out_boundary_regions<Tgt: Target>(
 
         let operands = spec.0.parameters();
         let mut boundary_tiles = Vec::<(u8, BoundaryTile<_>)>::new();
-        for (operand_idx, (original_input, (tiling, io_dim_bindings))) in operands
+        for ((operand_idx, original_input), (tiling, io_dim_bindings)) in operands
             .iter()
-            .zip(input_tilings_result.input_tilings.0)
             .enumerate()
+            .filter(|(operand_idx, _)| *operand_idx != output_index)
+            .zip(input_tilings_result.input_tilings.0)
         {
-            if operand_idx == output_index {
-                continue;
-            }
             if !original_input.is_valid_tile_shape(tiling.shape(), false) {
                 return Err(ApplyError::NotApplicable(
                     NotApplicableReason::TileShapeInvalid,
@@ -1037,12 +1035,12 @@ fn input_tiles_for_tile_out<Tgt: Target>(
     let output_tensor_rank = operands[output_idx].shape().len();
     let mut next_fresh_loop_dim = u8::try_from(output_tensor_rank).unwrap();
     let mut new_tiles = Vec::new();
-    for (operand_idx, (original_input, (tiling, axes_binding))) in
-        operands.iter().zip(tilings_and_bindings).enumerate()
+    for ((operand_idx, original_input), (tiling, axes_binding)) in operands
+        .iter()
+        .enumerate()
+        .filter(|(operand_idx, _)| *operand_idx != output_idx)
+        .zip(tilings_and_bindings)
     {
-        if operand_idx == output_idx {
-            continue;
-        }
         if !original_input.is_valid_tile_shape(tiling.shape(), parallel) {
             return Err(ApplyError::NotApplicable(
                 NotApplicableReason::TileShapeInvalid,
@@ -1528,8 +1526,8 @@ fn spec_canonicalize_to_apply_err(canon_error: CanonicalizeError) -> ApplyError 
         CanonicalizeError::TensorSpecAuxCanonicalizeError(_) => {
             ApplyError::NotApplicable(NotApplicableReason::TileShapeInvalid)
         }
-        CanonicalizeError::SideEffectingComponent => {
-            unreachable!("Compose-to-tile should not have side-effecting components")
+        CanonicalizeError::SideEffectingComponent | CanonicalizeError::InOutComposeHead => {
+            unreachable!("Compose-to-tile should only construct supported components")
         }
     }
 }

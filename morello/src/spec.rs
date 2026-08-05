@@ -71,10 +71,11 @@ pub enum PrimitiveSpecType {
         #[cfg_attr(test, proptest(strategy = "0..4u8"))]
         dim: u8,
     },
-    /// Divides the first argument by the second, elementwise, into the third argument.
+    /// Divides the first argument by the second elementwise, updating the first
+    /// argument in place.
     DivideVec,
-    /// Broadcasts a tensor (second argument) across `scan_dim`, dividing the first argument. Output
-    /// is in the third argument.
+    /// Broadcasts the second argument across `scan_dim` and divides the first argument
+    /// in place.
     ///
     /// Implementations of this Spec do not multiply by the reciprocal of the divisor. They divide
     /// directly for improved precision.
@@ -229,6 +230,8 @@ pub enum CanonicalizeError {
     TensorSpecAuxCanonicalizeError(tensorspec::CanonicalizeError),
     #[error("Non-head component of the Compose causes side effects")]
     SideEffectingComponent,
+    #[error("Compose does not support an InOut first input on its head component")]
+    InOutComposeHead,
 }
 
 #[cfg(test)]
@@ -503,13 +506,13 @@ impl PrimitiveBasics {
                 _ => panic!("Broadcast has only 2 parameters"),
             },
             PrimitiveSpecType::DivideVec => {
-                if idx > 3 {
-                    panic!("DivideVec has only 3 parameters")
+                if idx > 1 {
+                    panic!("DivideVec only accepts 2 parameters")
                 }
                 self.spec_shape.clone()
             }
             PrimitiveSpecType::DivideVecScalar { scan_dim } => match idx {
-                0 | 2 => self.spec_shape.clone(),
+                0 => self.spec_shape.clone(),
                 1 => {
                     let mut shape = self.spec_shape.clone();
                     shape[usize::from(scan_dim)] = nz!(1u32);
@@ -603,12 +606,12 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum, .. }
             | PrimitiveSpecType::SoftmaxDenominator { accum, .. }
             | PrimitiveSpecType::Max { accum, .. } => accum,
-            PrimitiveSpecType::Fill { .. } => true,
+            PrimitiveSpecType::Fill { .. }
+            | PrimitiveSpecType::DivideVec
+            | PrimitiveSpecType::DivideVecScalar { .. } => true,
             PrimitiveSpecType::OnePrefix
             | PrimitiveSpecType::Softmax { .. }
             | PrimitiveSpecType::SoftmaxComplete { .. }
-            | PrimitiveSpecType::DivideVec
-            | PrimitiveSpecType::DivideVecScalar { .. }
             | PrimitiveSpecType::Broadcast { .. }
             | PrimitiveSpecType::Move => false,
         }
@@ -679,9 +682,9 @@ impl PrimitiveBasics {
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { accum: false, .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { accum: false, .. }
-            | PrimitiveSpecType::Broadcast { dim: _ } => panic!("Not an accumulating Spec"),
-            PrimitiveSpecType::DivideVec => todo!(),
-            PrimitiveSpecType::DivideVecScalar { .. } => todo!(),
+            | PrimitiveSpecType::Broadcast { dim: _ }
+            | PrimitiveSpecType::DivideVec
+            | PrimitiveSpecType::DivideVecScalar { .. } => panic!("Not an accumulating Spec"),
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
         }
     }
@@ -861,10 +864,7 @@ impl PrimitiveBasics {
                     dtypes: _,
                 },
                 _,
-            ) => TilingInference(vec![
-                passthrough_tiling_tuple(smaller_output),
-                passthrough_tiling_tuple(smaller_output),
-            ]),
+            ) => TilingInference(vec![passthrough_tiling_tuple(smaller_output)]),
             (
                 PrimitiveBasics {
                     typ: PrimitiveSpecType::DivideVecScalar { scan_dim },
@@ -873,9 +873,8 @@ impl PrimitiveBasics {
                 },
                 _,
             ) => {
-                let input_tiling = passthrough_tiling_tuple(smaller_output);
                 let scalars_tiling = one_reduced_dimension_tiling_tuple(smaller_output, *scan_dim);
-                TilingInference(vec![input_tiling, scalars_tiling])
+                TilingInference(vec![scalars_tiling])
             }
             (
                 PrimitiveBasics {
@@ -1166,17 +1165,12 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::DivideVec => {
                 let numer = parameter_shapes.next().unwrap();
                 let denom = parameter_shapes.next().unwrap();
-                let out = parameter_shapes.next().unwrap();
-
                 assert_eq!(numer, denom);
-                assert_eq!(numer, out);
                 numer.into()
             }
             PrimitiveSpecType::DivideVecScalar { scan_dim } => {
                 let numer = parameter_shapes.next().unwrap();
                 let denom = parameter_shapes.next().unwrap();
-                let out = parameter_shapes.next().unwrap();
-                assert_eq!(numer, out);
                 assert!(
                     denom.iter().enumerate().all(|(i, &dim)| {
                         if i == usize::from(*scan_dim) {
@@ -1245,8 +1239,8 @@ impl PrimitiveSpecType {
             PrimitiveSpecType::Max { accum: false, .. } => &[In, Out],
             PrimitiveSpecType::Move => &[In, Out],
             PrimitiveSpecType::Fill { .. } => &[Out],
-            PrimitiveSpecType::DivideVec => &[In, In, Out],
-            PrimitiveSpecType::DivideVecScalar { .. } => &[In, In, Out],
+            PrimitiveSpecType::DivideVec => &[InOut, In],
+            PrimitiveSpecType::DivideVecScalar { .. } => &[InOut, In],
         }
     }
 
@@ -1342,12 +1336,12 @@ impl PrimitiveSpecType {
             | PrimitiveSpecType::SoftmaxComplete { .. }
             | PrimitiveSpecType::Move
             | PrimitiveSpecType::Fill { .. }
-            | PrimitiveSpecType::DivideVec
-            | PrimitiveSpecType::DivideVecScalar { .. } => {
+            | PrimitiveSpecType::DivideVec => {
                 // The shape and dtype match for moves and zero.
                 Some(Shape::from_slice(inputs[0]))
             }
             PrimitiveSpecType::Broadcast { .. }
+            | PrimitiveSpecType::DivideVecScalar { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMax { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndMaxFromParts { .. }
             | PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. }
@@ -1679,6 +1673,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         }
     }
 
+    /// Returns the scalar value with which the output parameter `index` should be
+    /// initialized.
+    ///
+    /// Returns `None` when the output is overwritten completely and needs no
+    /// initialization.
     pub(crate) fn initial_accumulating_value_for_output(&self, index: usize) -> Option<FillValue> {
         match self {
             LogicalSpec::Primitive(basics, _, _) => {
@@ -1753,6 +1752,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 operand_auxes,
                 serial_only: _,
             } => {
+                if components[0].typ.unique_output_index() == Some(0)
+                    && components[0].typ.operand_directions()[0] == OperandDirection::InOut
+                {
+                    return Err(CanonicalizeError::InOutComposeHead);
+                }
                 for tail_component in &components[1..] {
                     if tail_component.causes_side_effects() {
                         return Err(CanonicalizeError::SideEffectingComponent);
@@ -1845,6 +1849,11 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 operand_auxes,
                 ..
             } => {
+                if components[0].typ.unique_output_index() == Some(0)
+                    && components[0].typ.operand_directions()[0] == OperandDirection::InOut
+                {
+                    return false;
+                }
                 for tail_component in &components[1..] {
                     if tail_component.causes_side_effects() {
                         return false;

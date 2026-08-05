@@ -96,7 +96,6 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
             [
                 ViewE::from(Param::new(0, operands[0].clone())),
                 ViewE::from(broadcast_destination.clone()),
-                ViewE::from(Param::new(2, operands[2].clone())),
             ],
             spec.0.serial_only(),
             new_limits,

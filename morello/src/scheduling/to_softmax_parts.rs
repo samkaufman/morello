@@ -18,9 +18,6 @@ pub struct ToSoftmaxParts<Tgt: Target> {
     pub denominator_level: Tgt::Memory,
     pub denominator_layout: Layout,
     pub denominator_vector_size: Option<DimSize>,
-    pub exps_level: Tgt::Memory,
-    pub exps_layout: Layout,
-    pub exps_vector_size: Option<DimSize>,
 }
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -52,6 +49,11 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
                 "Not a Softmax",
             ))));
         };
+        if dtypes[0] != dtypes[1] {
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "Reusing the Softmax output requires matching input and output dtypes",
+            ))));
+        }
 
         let operands = spec.0.parameters();
 
@@ -63,26 +65,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             self.denominator_layout.clone(),
             self.denominator_vector_size,
         )?;
-        let mut exps_layout_contiguous = self.exps_layout.clone();
-        exps_layout_contiguous.set_contiguous_full();
-        let exps_tensor = Tensor::new(
-            TensorSpec::<Tgt>::new_canon_checked(
-                spec_shape.clone(),
-                dtypes[0],
-                self.exps_level,
-                exps_layout_contiguous,
-                self.exps_vector_size,
-            )
-            .map_err(|e| match e {
-                tensorspec::CanonicalizeError::VectorSizeInvalid => {
-                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
-                }
-                _ => ApplyError::NotApplicable(NotApplicableReason::Other(None)),
-            })?,
-        );
-
-        let lowered_limits =
-            softmax_child_limits(&spec.1, [denominator_tensor.spec(), exps_tensor.spec()])?;
+        let lowered_limits = softmax_child_limits(&spec.1, [denominator_tensor.spec()])?;
 
         let denom_app = ImplNode::from(SpecApp::new_primitive_app(
             PrimitiveSpecType::SoftmaxDenominatorAndUnscaled {
@@ -92,7 +75,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
             [
                 Param::new(0, operands[0].clone()).into(),
                 denominator_tensor.clone().into(),
-                exps_tensor.clone().into(),
+                Param::new(1, operands[1].clone()).into(),
             ],
             spec.0.serial_only(),
             lowered_limits.clone(),
@@ -102,9 +85,8 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
                 scan_dim: *scan_dim,
             },
             [
-                exps_tensor.clone().into(),
-                denominator_tensor.clone().into(),
                 Param::new(1, operands[1].clone()).into(),
+                denominator_tensor.clone().into(),
             ],
             spec.0.serial_only(),
             lowered_limits.clone(),
@@ -113,7 +95,7 @@ impl<Tgt: Target> ActionT<Tgt> for ToSoftmaxParts<Tgt> {
         Ok(ImplNode::Pipeline(Pipeline {
             stages: vec![denom_app, scale_app],
             wirings: vec![StageWiring {
-                intermediate_tensors: vec![Rc::new(denominator_tensor), Rc::new(exps_tensor)],
+                intermediate_tensors: vec![Rc::new(denominator_tensor)],
             }],
             spec: Some(spec.clone()),
         }))

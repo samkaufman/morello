@@ -162,12 +162,6 @@ pub enum CpuKernel {
     ValueDivideVecScalar,
     /// Lowers to an implementation of `DivideVecScalar` that computes `1 / denominator`
     /// once per reduced index and then multiplies vectors by that scalar reciprocal.
-    ///
-    /// This kernel applies when the first input and output have the same shape, the denominator
-    /// (second input) is all ones, and the shared input/output shape is all ones except for an
-    /// optional non-1 scan dimension. Additionally, the first input and output must either share
-    /// a VRF vector size or be contiguous addressed/cache tensors whose tile volume is divisible
-    /// by one of the target's vector widths. All parameters must have dtype `Float32`.
     DivideVecScalarReciprocal,
     Assign,
     MemsetZero,
@@ -747,11 +741,18 @@ impl<T: CpuTarget> Target for T {
                         let memories = Self::memories();
                         let layouts = Self::move_destination_layouts(spec_shape, dtype);
 
-                        // Fully fused loops using shared alt_level for both max and exps
                         for denom_level in memories {
                             for denom_layout in &layouts {
                                 gen_vector_sizes_opt(dtype, denom_level.vector_bytes()).for_each(
                                     |denominator_vector_size| {
+                                        softmax_actions.push(Action::ToSoftmaxParts(
+                                            ToSoftmaxParts {
+                                                denominator_level: denom_level,
+                                                denominator_layout: denom_layout.clone(),
+                                                denominator_vector_size,
+                                            },
+                                        ));
+
                                         for alt_level in memories {
                                             for alt_layout in &layouts {
                                                 gen_vector_sizes_opt(
@@ -759,17 +760,6 @@ impl<T: CpuTarget> Target for T {
                                                     alt_level.vector_bytes(),
                                                 )
                                                 .for_each(|alt_vector_size| {
-                                                    softmax_actions.push(Action::ToSoftmaxParts(
-                                                        ToSoftmaxParts {
-                                                            denominator_level: denom_level,
-                                                            denominator_layout: denom_layout
-                                                                .clone(),
-                                                            denominator_vector_size,
-                                                            exps_level: alt_level,
-                                                            exps_layout: alt_layout.clone(),
-                                                            exps_vector_size: alt_vector_size,
-                                                        },
-                                                    ));
                                                     softmax_actions.push(
                                                         Action::ToSoftmaxPartsRecompute(
                                                             ToSoftmaxPartsRecompute {
@@ -875,10 +865,7 @@ impl CpuKernel {
             | CpuKernel::DotProductLoop
             | CpuKernel::DotProductLoopF32Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
-            | CpuKernel::DotProductLoopBf16Bf16F32
-            | CpuKernel::DivideVec
-            | CpuKernel::ValueDivideVecScalar
-            | CpuKernel::DivideVecScalarReciprocal => 3,
+            | CpuKernel::DotProductLoopBf16Bf16F32 => 3,
             CpuKernel::OnePrefixNoOp
             | CpuKernel::PhysicalTransposeByte128
             | CpuKernel::PhysicalTransposeByte256
@@ -890,7 +877,10 @@ impl CpuKernel {
             | CpuKernel::Assign
             | CpuKernel::CastBf16F32
             | CpuKernel::VectorCastBf16F32
-            | CpuKernel::VecScalarAssign => 2,
+            | CpuKernel::VecScalarAssign
+            | CpuKernel::DivideVec
+            | CpuKernel::ValueDivideVecScalar
+            | CpuKernel::DivideVecScalarReciprocal => 2,
             CpuKernel::MemsetZero
             | CpuKernel::ValueZero
             | CpuKernel::VectorZero
@@ -1603,11 +1593,9 @@ impl CpuKernel {
                 let PrimitiveSpecType::DivideVec = *typ else {
                     return false;
                 };
-                debug_assert_eq!(operands.len(), 3);
+                debug_assert_eq!(operands.len(), 2);
 
-                if operands[0].dtype() != operands[1].dtype()
-                    || operands[0].dtype() != operands[2].dtype()
-                {
+                if operands[0].dtype() != operands[1].dtype() {
                     return false;
                 }
                 if operands[0].dtype() != Dtype::Float32 {
@@ -1620,28 +1608,15 @@ impl CpuKernel {
                 if operands[1].memory() != CpuMemory::VRF {
                     return false;
                 }
-                if operands[2].memory() != CpuMemory::VRF {
-                    return false;
-                }
-
                 if operands[0].vector_size() != operands[1].vector_size() {
                     return false;
                 }
-                if operands[0].vector_size() != operands[2].vector_size() {
-                    return false;
-                }
 
-                if !operands[0].is_contiguous()
-                    || !operands[1].is_contiguous()
-                    || !operands[2].is_contiguous()
-                {
+                if !operands[0].is_contiguous() || !operands[1].is_contiguous() {
                     return false;
                 }
 
                 if operands[0].shape() != operands[1].shape() {
-                    return false;
-                }
-                if operands[0].shape() != operands[2].shape() {
                     return false;
                 }
 
@@ -1651,13 +1626,10 @@ impl CpuKernel {
                 let PrimitiveSpecType::DivideVecScalar { scan_dim } = *typ else {
                     return false;
                 };
-                debug_assert_eq!(operands.len(), 3);
+                debug_assert_eq!(operands.len(), 2);
                 let scan_dim = usize::from(scan_dim);
 
-                if operands[0].dtype() != Dtype::Float32
-                    || operands[1].dtype() != Dtype::Float32
-                    || operands[2].dtype() != Dtype::Float32
-                {
+                if operands[0].dtype() != Dtype::Float32 || operands[1].dtype() != Dtype::Float32 {
                     return false;
                 }
 
@@ -1666,31 +1638,19 @@ impl CpuKernel {
                     && operands[0].memory() != CpuMemory::VRF)
                     || (operands[1].memory() != CpuMemory::GL
                         && !is_rf_or_l1_memory(operands[1].memory()))
-                    || (operands[2].memory() != CpuMemory::GL
-                        && operands[2].memory() != CpuMemory::L1
-                        && operands[2].memory() != CpuMemory::VRF)
                 {
                     return false;
                 }
 
-                if divide_vec_scalar_reciprocal_vector_size::<Tgt>(&operands[0], &operands[2])
-                    .is_none()
-                {
+                if divide_vec_scalar_reciprocal_vector_size::<Tgt>(&operands[0]).is_none() {
                     return false;
                 }
 
-                if !operands[0].is_contiguous()
-                    || !operands[1].is_contiguous()
-                    || !operands[2].is_contiguous()
-                {
+                if !operands[0].is_contiguous() || !operands[1].is_contiguous() {
                     return false;
                 }
 
                 let input_shape = operands[0].shape();
-                if input_shape != operands[2].shape() {
-                    return false;
-                }
-
                 let denominator_shape = operands[1].shape();
                 if denominator_shape.len() != input_shape.len()
                     || denominator_shape.iter().any(|d| d.get() != 1)
@@ -1713,7 +1673,7 @@ impl CpuKernel {
                 if !matches!(typ, PrimitiveSpecType::DivideVecScalar { .. }) {
                     return false;
                 }
-                debug_assert_eq!(operands.len(), 3);
+                debug_assert_eq!(operands.len(), 2);
 
                 if operands.iter().any(|o| o.dtype() != Dtype::Float32) {
                     return false;
@@ -2125,10 +2085,7 @@ impl CpuKernel {
                 let input_spec = parameters[0].spec();
                 let vector_size = input_spec.vector_size().unwrap().get();
                 let value_cnt = input_spec.volume().get();
-                let io_cost = parameters
-                    .iter()
-                    .map(|p| move_cost(p.spec()))
-                    .sum::<MainCost>();
+                let io_cost = 2 * move_cost(parameters[0].spec()) + move_cost(parameters[1].spec());
                 debug_assert_eq!(input_spec.dtype(), Dtype::Float32);
                 debug_assert!(value_cnt.is_multiple_of(vector_size));
                 let vector_cnt = value_cnt / vector_size;
@@ -2140,11 +2097,7 @@ impl CpuKernel {
             }
             CpuKernel::ValueDivideVecScalar => {
                 // TODO: Measure throughput.
-                parameters
-                    .iter()
-                    .map(|p| move_cost(p.spec()))
-                    .sum::<MainCost>()
-                    + 1
+                2 * move_cost(parameters[0].spec()) + move_cost(parameters[1].spec()) + 1
             }
             CpuKernel::VectorMaxLoop => {
                 let value_cnt = parameters[0].spec().volume().get();
@@ -2175,16 +2128,14 @@ impl CpuKernel {
                 const RECIPROCAL_SETUP_COST: MainCost = 3;
                 const PER_VECTOR_COST: MainCost = 1;
                 let value_cnt = parameters[0].spec().volume().get();
-                let vector_size = divide_vec_scalar_reciprocal_vector_size(
-                    parameters[0].spec(),
-                    parameters[2].spec(),
-                )
-                .unwrap()
-                .get();
+                let vector_size = divide_vec_scalar_reciprocal_vector_size(parameters[0].spec())
+                    .unwrap()
+                    .get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
                 RECIPROCAL_SETUP_COST.max(PER_VECTOR_COST * vector_cnt)
                     + slower_than_l1_io_cost(parameters)
+                    + slower_than_l1_io_cost(std::slice::from_ref(&parameters[0]))
             }
             CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
                 let value_cnt = parameters[0].spec().volume().get();
@@ -2435,8 +2386,8 @@ impl CpuKernel {
 
 /// Returns movement cost only for operand in memories slower than L1.
 ///
-/// Kernels use this when their hot-L1 loads and stores overlap with compute throughput, but slower
-/// memory accesses should still affect scheduling.
+/// Kernels use this when their hot-L1 loads and stores overlap with compute throughput,
+/// but slower memory accesses should still affect scheduling.
 fn slower_than_l1_io_cost<P>(parameters: &[P]) -> MainCost
 where
     P: View,
@@ -2664,22 +2615,18 @@ impl CanonicalBimap for CpuMemory {
 
 /// Returns the vector width to use for `DivideVecScalarReciprocal`.
 ///
-/// If both tensors already specify a vector size, they must agree. If only one tensor specifies a
-/// vector size, that size is used. If neither does, this returns the largest target vector width
-/// for the input dtype that evenly divides the shared tile volume.
+/// Uses the tensor's vector size when present. Otherwise, returns the largest target
+/// vector width for the tensor's dtype that evenly divides its volume.
 pub(crate) fn divide_vec_scalar_reciprocal_vector_size<Tgt: Target>(
-    input: &TensorSpec<Tgt>,
-    output: &TensorSpec<Tgt>,
+    inout: &TensorSpec<Tgt>,
 ) -> Option<DimSize> {
-    match (input.vector_size(), output.vector_size()) {
-        (Some(lhs), Some(rhs)) if lhs == rhs => Some(lhs),
-        (Some(_), Some(_)) => None,
-        (Some(vector_size), None) | (None, Some(vector_size)) => Some(vector_size),
-        (None, None) => Tgt::vec_types()
+    match inout.vector_size() {
+        Some(vector_size) => Some(vector_size),
+        None => Tgt::vec_types()
             .iter()
             .filter(|vec_type| {
-                vec_type.dtype == input.dtype()
-                    && input
+                vec_type.dtype == inout.dtype()
+                    && inout
                         .volume()
                         .get()
                         .is_multiple_of(u32::from(vec_type.value_cnt))
@@ -3283,7 +3230,7 @@ mod tests {
             PrimitiveBasics {
                 typ: PrimitiveSpecType::DivideVecScalar { scan_dim: 1 },
                 spec_shape: shape![1, 32],
-                dtypes: vec![Dtype::Float32; 3],
+                dtypes: vec![Dtype::Float32; 2],
             },
             vec![
                 TensorSpecAux::<Avx2Target> {
@@ -3294,11 +3241,6 @@ mod tests {
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::GL,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: None,
-                },
-                TensorSpecAux::<Avx2Target> {
-                    memory: CpuMemory::L1,
-                    layout: row_major(&shape![1, 32]),
                     vector_size: None,
                 },
             ],

@@ -188,14 +188,19 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaled { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax { .. } => todo!(),
                 PrimitiveSpecType::SoftmaxDenominator { .. } => todo!(),
-                PrimitiveSpecType::DivideVec => todo!(),
-                PrimitiveSpecType::DivideVecScalar { scan_dim: _ } => {
-                    let [numer, denom, mut out] = args
+                PrimitiveSpecType::DivideVec => {
+                    let [mut numer, denom] = args
                         .try_into()
-                        .unwrap_or_else(|_| panic!("expected 3 args"));
-                    out.assign(&numer);
-                    out /= &denom;
-                    vec![numer, denom, out]
+                        .unwrap_or_else(|_| panic!("expected 2 args"));
+                    numer /= &denom;
+                    vec![numer, denom]
+                }
+                PrimitiveSpecType::DivideVecScalar { scan_dim: _ } => {
+                    let [mut numer, denom] = args
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("expected 2 args"));
+                    numer /= &denom;
+                    vec![numer, denom]
                 }
                 PrimitiveSpecType::Max { .. } => todo!(),
                 PrimitiveSpecType::Move => {
@@ -862,6 +867,9 @@ where
     let Some(output_idx) = spec.0.unique_output_index() else {
         todo!("Support Specs with multiple outputs");
     };
+    if spec.0.operand_count() != output_idx + 1 {
+        todo!("correctness checking requires the output to be the final parameter");
+    }
 
     // Generate some test inputs (and output).
     let parameters = spec.0.parameters();
@@ -879,7 +887,7 @@ where
     // Compute expected output
     concrete_tensors = spec.0.execute(concrete_tensors);
 
-    lowered_output.approx_eq(&concrete_tensors[output_idx], 1e-6)
+    lowered_output.approx_eq(concrete_tensors.last().unwrap(), 1e-6)
 }
 
 fn make_array_input_dyn<Tgt: Target>(input: &TensorSpec<Tgt>) -> DynArray<IxDyn> {
