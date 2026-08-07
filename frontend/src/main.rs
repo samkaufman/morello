@@ -39,7 +39,7 @@ struct Args {
     #[arg(long, short)]
     db: Option<path::PathBuf>,
 
-    #[arg(long, default_value = "128", help = "Cache size in database pages.")]
+    #[arg(long, default_value = "16384", help = "Cache size in database pages.")]
     cache_size: usize,
 
     /// Color mode
