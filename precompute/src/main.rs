@@ -1,3 +1,5 @@
+mod timing_log;
+
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
@@ -12,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::{mpsc, Arc};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use std::{fs, iter, path};
 
 #[cfg(feature = "db-stats")]
@@ -166,7 +168,22 @@ where
         threads,
     );
     db.set_proactive_saves_enabled(false);
-    main_per_db::<Tgt>(args, db, args.db.as_deref())
+
+    // The clock starts once the database handle exists, excluding the TARGET,
+    // TILESCALE, and semispatial-cache reads. Pages are read lazily during
+    // synthesis, so a resumed run's page loads are still counted. `db` is moved
+    // into (and so flushed and dropped by) main_per_db, keeping the final write
+    // inside the window too.
+    let run_start_wall = SystemTime::now();
+    let run_start = Instant::now();
+    let result = main_per_db::<Tgt>(args, db, args.db.as_deref());
+
+    if let (Ok(()), Some(db_path)) = (&result, args.db.as_deref()) {
+        let run_duration = run_start.elapsed();
+        timing_log::append_run(db_path, run_start_wall, SystemTime::now(), run_duration)
+            .unwrap_or_else(|err| panic!("Failed to write timing log: {err}"));
+    }
+    result
 }
 
 fn main_per_db<Tgt>(

@@ -449,8 +449,11 @@ name = "dbstats"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "csv",
  "env_logger 0.10.2",
  "morello",
+ "serde",
+ "tempfile",
  "tikv-jemallocator",
 ]
 
@@ -1290,6 +1293,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
+ "csv",
  "env_logger 0.11.8",
  "indicatif",
  "indicatif-log-bridge",
@@ -1297,6 +1301,8 @@ dependencies = [
  "morello",
  "nonzero",
  "rayon",
+ "serde",
+ "tempfile",
  "tikv-jemallocator",
 ]
 

@@ -142,6 +142,13 @@ struct Shard {
 }
 
 #[cfg(feature = "db-stats")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalyzeResult {
+    /// The number of Specs covered by the rectangles in the read pages.
+    pub sampled_spec_count: u128,
+}
+
+#[cfg(feature = "db-stats")]
 struct AnalyzeWriters {
     page_writer: csv::Writer<fs::File>,
     block_writer: csv::Writer<fs::File>,
@@ -1113,11 +1120,20 @@ impl FilesDatabase {
         self.stats.blocking_ms.load(atomic::Ordering::SeqCst)
     }
 
-    /// Write statistics about the database to stdout.
+    /// Write statistics about the database to CSV files in `output_dir`.
+    ///
+    /// When `sample` is greater than 1, only one in `sample` pages is read, and the returned
+    /// [AnalyzeResult] covers just those pages. Callers should consider multiplying by the sample
+    /// rate to estimate the whole database.
     ///
     /// This may be expensive and multi-threaded.
     #[cfg(feature = "db-stats")]
-    pub fn analyze(&self, output_dir: &path::Path, sample: usize, skip_read_errors: bool) {
+    pub fn analyze(
+        &self,
+        output_dir: &path::Path,
+        sample: usize,
+        skip_read_errors: bool,
+    ) -> AnalyzeResult {
         let page_csv_path = output_dir.join("pages.csv");
         let block_csv_path = output_dir.join("blocks.csv");
         let block_action_csv_path = output_dir.join("block_actions.csv");
@@ -1137,7 +1153,7 @@ impl FilesDatabase {
             .write_record(["page_path", "block_pt", "action"])
             .unwrap();
 
-        analyze_visit_dir(
+        let sampled_spec_count = analyze_visit_dir(
             self.dir_handle.path(),
             self.dir_handle.path(),
             &mut writers,
@@ -1148,6 +1164,8 @@ impl FilesDatabase {
         writers.page_writer.flush().unwrap();
         writers.block_writer.flush().unwrap();
         writers.block_action_writer.flush().unwrap();
+
+        AnalyzeResult { sampled_spec_count }
     }
 }
 
@@ -1651,17 +1669,22 @@ fn analyze_visit_dir(
     writers: &mut AnalyzeWriters,
     sample: usize,
     skip_read_errors: bool,
-) {
+) -> u128 {
+    let mut sampled_spec_count = 0u128;
+
     // Since we don't revisit blocks, bypass the in-mem. cache and read from disk.
     for file_entry in fs::read_dir(path).unwrap() {
         let file_entry = file_entry.unwrap();
-        if let Some("PRECOMPUTE") = file_entry.path().file_name().unwrap().to_str() {
+        let entry_path = file_entry.path();
+        if entry_path.is_dir() {
+            sampled_spec_count +=
+                analyze_visit_dir(root, &entry_path, writers, sample, skip_read_errors);
             continue;
         }
 
-        let entry_path = file_entry.path();
-        if entry_path.is_dir() {
-            analyze_visit_dir(root, &file_entry.path(), writers, sample, skip_read_errors);
+        // Every page lives in a per-Spec sub-directory, so any plain file directly in the root is
+        // metadata (TARGET, TILESCALE, etc.), not a page.
+        if path == root {
             continue;
         }
 
@@ -1686,17 +1709,21 @@ fn analyze_visit_dir(
         };
 
         let PageContents::RTree(r) = &page.contents;
+        let spec_count = r.spec_count();
+        sampled_spec_count += spec_count;
         writers
             .block_writer
             .write_record([
                 &entry_path_str,
                 &r.rect_count().to_string(),
-                &r.spec_count().to_string(),
+                &spec_count.to_string(),
             ])
             .unwrap();
 
         writers.page_writer.write_record([entry_path_str]).unwrap();
     }
+
+    sampled_spec_count
 }
 
 #[inline]

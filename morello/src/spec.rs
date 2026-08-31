@@ -2916,9 +2916,11 @@ impl BiMap for ShapeBimap {
                     0,
                     "power-or-three-power shape codomain length must be even"
                 );
-                i.chunks_exact(2)
-                    .map(|chunk| {
-                        DimSize::new(decode_power_or_three_power(chunk[0], chunk[1])).unwrap()
+                i.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|&[power, scale]| {
+                        DimSize::new(decode_power_or_three_power(power, scale)).unwrap()
                     })
                     .collect()
             }

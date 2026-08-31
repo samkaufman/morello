@@ -44,7 +44,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - name: Run test suite
-        run: cargo nextest run --features ${{ env.CI_FEATURES }} --run-ignored=all --profile ci
+        run: cargo nextest run --workspace --features ${{ env.CI_FEATURES }} --run-ignored=all --profile ci
       - name: Run documentation tests
         run: cargo test --doc --features ${{ env.CI_FEATURES }}
 
