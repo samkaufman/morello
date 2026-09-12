@@ -349,7 +349,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                                             .map_err(tile_to_apply_err)?,
                                         nz!(4usize), // 1 << 2
                                         operands[0].shape(),
-                                        &[Some(0), Some(1), None],
+                                        &[Some(0), Some(1), Some(2)],
                                     )),
                                 ),
                                 (
@@ -361,7 +361,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
                                             .map_err(tile_to_apply_err)?,
                                         nz!(4usize), // 1 << 2
                                         operands[1].shape(),
-                                        &[Some(0), None, Some(2)],
+                                        &[Some(0), Some(2), Some(3)],
                                     )),
                                 ),
                             ],
@@ -1652,6 +1652,30 @@ mod tests {
             application.is_ok(),
             "expected successful application but got {application:?}",
         );
+    }
+
+    /// The remainder body of a non-multiple Split must read the operands past the main region
+    /// along k, not from k=0.
+    #[test]
+    fn test_split_boundary_offsets_along_k() {
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
+            [1, 8, 10, 8],
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major),
+            (f32, CpuMemory::GL, row_major)
+        ));
+        let Ok(ImplNode::Loop(loop_impl)) = Action::Split(Split { k: nz!(4u32) }).apply(&spec)
+        else {
+            panic!("expected Split to produce a Loop");
+        };
+        let [_, ImplNode::SpecApp(SpecApp(_, boundary_args))] = &loop_impl.bodies[..] else {
+            panic!("expected a main body and a SpecApp boundary body");
+        };
+        let [ViewE::BoundaryTile(lhs), ViewE::BoundaryTile(rhs), ..] = &boundary_args[..] else {
+            panic!("expected the boundary operands to be BoundaryTiles");
+        };
+        // lhs is (b, m, k) and rhs is (b, k, n); both must start past the main region along k.
+        assert_eq!([lhs.offsets()[2], rhs.offsets()[1]], [8, 8]);
     }
 
     /// Test that non-even tiling produces a valid loop structure with the correct cost.
