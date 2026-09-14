@@ -106,6 +106,53 @@ pub struct FilesDatabaseStats {
     pub puts: AtomicU64,
     /// Total time spent waiting for a database thread.
     pub blocking_ms: AtomicU64,
+    /// Profiling data measuring each get that reaches a tree, whether a proper page or the
+    /// non-spatial fallback. (Lock waits and page loads are not included.)
+    pub rtree_lookups: SampledTiming,
+    /// Profiling data covering each rectangle filled into a tree, one per page a put touches, or
+    /// one per put to the non-spatial fallback. (Lock waits and page loads are not included.)
+    pub rtree_inserts: SampledTiming,
+}
+
+/// Count and total time spent on some set of operations.
+///
+/// Only each [Self::SAMPLE_PERIOD]th period is timed, though each period is counted, which reduces
+/// profiling overhead.
+#[cfg(feature = "db-stats")]
+#[derive(Debug, Default)]
+pub struct SampledTiming {
+    /// Number of operations, timed or not.
+    pub count: AtomicU64,
+    /// Total nanoseconds spent in the timed operations only.
+    pub sampled_ns: AtomicU64,
+}
+
+#[cfg(feature = "db-stats")]
+impl SampledTiming {
+    pub const SAMPLE_PERIOD: u64 = 64;
+
+    /// Counts an operation and, if it is sampled, returns a start time to pass to [Self::finish].
+    /// Only the work between the two calls is timed.
+    fn start(&self) -> Option<Instant> {
+        let index = self.count.fetch_add(1, atomic::Ordering::Relaxed);
+        index.is_multiple_of(Self::SAMPLE_PERIOD).then(Instant::now)
+    }
+
+    fn finish(&self, start: Option<Instant>) {
+        if let Some(start) = start {
+            let ns: u64 = start.elapsed().as_nanos().try_into().unwrap();
+            self.sampled_ns.fetch_add(ns, atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Estimated time spent, extrapolated from those timed ones.
+    pub fn estimated_total(&self) -> Duration {
+        let count = self.count.load(atomic::Ordering::Relaxed);
+        let samples = count.div_ceil(Self::SAMPLE_PERIOD).max(1);
+        let sampled_ns = self.sampled_ns.load(atomic::Ordering::Relaxed);
+        let ns = u128::from(sampled_ns) * u128::from(count) / u128::from(samples);
+        Duration::from_nanos(ns.try_into().unwrap())
+    }
 }
 
 #[cfg(feature = "db-stats")]
@@ -559,9 +606,6 @@ impl FilesDatabase {
         Tgt::Memory: CanonicalBimap,
         <Tgt::Memory as CanonicalBimap>::Bimap: BiMap<Codomain = u8>,
     {
-        #[cfg(feature = "db-stats")]
-        self.stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
-
         let mut query = query.clone();
         query.canonicalize().unwrap();
         self.get_with_preference_canon(&query)
@@ -590,11 +634,14 @@ impl FilesDatabase {
                 .nonspatial
                 .gets
                 .fetch_add(1, atomic::Ordering::Relaxed);
-            return match nonspatial_cache
-                .entries
-                .get(&key)
-                .and_then(|tree| tree.get(&memory_pt, query.0.volume()))
-            {
+            return match nonspatial_cache.entries.get(&key).and_then(|tree| {
+                #[cfg(feature = "db-stats")]
+                let start = self.stats.nonspatial.rtree_lookups.start();
+                let result = tree.get(&memory_pt, query.0.volume());
+                #[cfg(feature = "db-stats")]
+                self.stats.nonspatial.rtree_lookups.finish(start);
+                result
+            }) {
                 Some(v) => GetPreference::Hit(v),
                 None => GetPreference::Miss(None),
             };
@@ -612,7 +659,12 @@ impl FilesDatabase {
         let page: &Page = &self.load_live_page(&page_key);
         #[cfg(feature = "db-stats")]
         shard_stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
-        page.contents.get_with_preference(query, &page_local_pt)
+        #[cfg(feature = "db-stats")]
+        let start = shard_stats.rtree_lookups.start();
+        let result = page.contents.get_with_preference(query, &page_local_pt);
+        #[cfg(feature = "db-stats")]
+        shard_stats.rtree_lookups.finish(start);
+        result
     }
 
     pub fn prefetch<Tgt>(&self, query: &Spec<Tgt>)
@@ -721,11 +773,15 @@ impl FilesDatabase {
                     .nonspatial
                     .puts
                     .fetch_add(1, atomic::Ordering::Relaxed);
-                nonspatial_cache
+                let tree = nonspatial_cache
                     .entries
                     .entry(key)
-                    .or_insert_with(|| RTreePageContents::empty(MEMORY_COUNT))
-                    .fill_region(self.k, &dim_ranges, &normalized_decisions);
+                    .or_insert_with(|| RTreePageContents::empty(MEMORY_COUNT));
+                #[cfg(feature = "db-stats")]
+                let start = self.stats.nonspatial.rtree_inserts.start();
+                tree.fill_region(self.k, &dim_ranges, &normalized_decisions);
+                #[cfg(feature = "db-stats")]
+                self.stats.nonspatial.rtree_inserts.finish(start);
                 nonspatial_cache.modified = true;
             }
             if self.proactive_saves_enabled {
@@ -790,23 +846,27 @@ impl FilesDatabase {
             // Load or wait for the page while holding its shard lock, then update both the page and
             // the shard's dirty-page bookkeeping together.
             {
-                let shard = &self.shards.0[self.shard_index(&key)];
+                let shard_idx = self.shard_index(&key);
+                let shard = &self.shards.0[shard_idx];
+                #[cfg(feature = "db-stats")]
+                let shard_stats = &self.stats.shards[shard_idx];
                 let mut shard_guard = shard.lock();
 
                 #[cfg(feature = "db-stats")]
                 if !put_counted {
                     put_counted = true;
-                    shard_guard
-                        .stats
-                        .puts
-                        .fetch_add(1, atomic::Ordering::Relaxed);
+                    shard_stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
                 }
 
                 {
                     let page = shard_guard.load_live_page_mut(&key);
                     page.modified = true;
+                    #[cfg(feature = "db-stats")]
+                    let start = shard_stats.rtree_inserts.start();
                     page.contents
                         .fill_region(self.k, &dim_ranges, &normalized_decisions);
+                    #[cfg(feature = "db-stats")]
+                    shard_stats.rtree_inserts.finish(start);
                 }
 
                 if self.proactive_saves_enabled
@@ -1148,6 +1208,14 @@ impl FilesDatabase {
             *totals.gets.get_mut() += set.gets.load(atomic::Ordering::SeqCst);
             *totals.puts.get_mut() += set.puts.load(atomic::Ordering::SeqCst);
             *totals.blocking_ms.get_mut() += set.blocking_ms.load(atomic::Ordering::SeqCst);
+            *totals.rtree_lookups.count.get_mut() +=
+                set.rtree_lookups.count.load(atomic::Ordering::SeqCst);
+            *totals.rtree_lookups.sampled_ns.get_mut() +=
+                set.rtree_lookups.sampled_ns.load(atomic::Ordering::SeqCst);
+            *totals.rtree_inserts.count.get_mut() +=
+                set.rtree_inserts.count.load(atomic::Ordering::SeqCst);
+            *totals.rtree_inserts.sampled_ns.get_mut() +=
+                set.rtree_inserts.sampled_ns.load(atomic::Ordering::SeqCst);
         }
         totals
     }
@@ -1187,6 +1255,14 @@ impl FilesDatabase {
             set.gets.store(0, atomic::Ordering::SeqCst);
             set.puts.store(0, atomic::Ordering::SeqCst);
             set.blocking_ms.store(0, atomic::Ordering::SeqCst);
+            set.rtree_lookups.count.store(0, atomic::Ordering::SeqCst);
+            set.rtree_lookups
+                .sampled_ns
+                .store(0, atomic::Ordering::SeqCst);
+            set.rtree_inserts.count.store(0, atomic::Ordering::SeqCst);
+            set.rtree_inserts
+                .sampled_ns
+                .store(0, atomic::Ordering::SeqCst);
         }
     }
 

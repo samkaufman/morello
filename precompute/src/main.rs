@@ -234,6 +234,10 @@ where
         }
     });
 
+    // Synth. time across all threads and stages for the whole run.
+    #[cfg(feature = "db-stats")]
+    let synthesis_ns = AtomicU64::new(0);
+
     // Run each parallel phase
     for phase in phases {
         let phase_annotated = phase
@@ -253,6 +257,8 @@ where
                     &top,
                     spec_completed,
                     meta_update_tx.clone(),
+                    #[cfg(feature = "db-stats")]
+                    &synthesis_ns,
                 );
             });
     }
@@ -296,6 +302,7 @@ fn process_spec<Tgt>(
     top: &MemVec,
     spec_completed: usize,
     progress_sender: mpsc::Sender<(LogicalSpec<Tgt>, usize)>,
+    #[cfg(feature = "db-stats")] synthesis_ns: &AtomicU64,
 ) where
     Tgt: CpuTarget,
     Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
@@ -349,9 +356,6 @@ fn process_spec<Tgt>(
             stage.len()
         );
 
-        #[cfg(feature = "db-stats")]
-        let total_synthesis_ms = AtomicU64::new(0);
-
         let stage_start = Instant::now();
         stage.into_par_iter().for_each(|task| {
             let mut worklist = task
@@ -379,8 +383,8 @@ fn process_spec<Tgt>(
             }
 
             #[cfg(feature = "db-stats")]
-            total_synthesis_ms.fetch_add(
-                synthesis_time.as_millis().try_into().unwrap(),
+            synthesis_ns.fetch_add(
+                synthesis_time.as_nanos().try_into().unwrap(),
                 atomic::Ordering::Relaxed,
             );
         });
@@ -390,7 +394,7 @@ fn process_spec<Tgt>(
         );
 
         #[cfg(feature = "db-stats")]
-        log_db_stats(db, &total_synthesis_ms);
+        log_db_stats(db, synthesis_ns);
 
         let save_start = Instant::now();
         db.save();
@@ -458,13 +462,22 @@ fn compute_next_stage<Tgt: Target>(
 }
 
 #[cfg(feature = "db-stats")]
-fn log_db_stats(db: &FilesDatabase, total_synthesis_ms: &AtomicU64) {
+fn log_db_stats(db: &FilesDatabase, synthesis_ns: &AtomicU64) {
     info!("DB stats: {}", db.basic_stats());
-    let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
-    let btime = db.stats().blocking_ms.into_inner();
+    let totals = db.stats();
+    let synthesis = Duration::from_nanos(synthesis_ns.load(atomic::Ordering::Relaxed));
+    let blocking = Duration::from_millis(totals.blocking_ms.load(atomic::Ordering::Relaxed));
+    let lookups = totals.rtree_lookups.estimated_total();
+    let inserts = totals.rtree_inserts.estimated_total();
     info!(
-        "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
-        100.0 * btime as f64 / stime as f64
+        "synthesis: {}ms; blocking: {}ms ({:.0}%); tree lookups: ~{}ms ({:.1}%); tree inserts: ~{}ms ({:.1}%)",
+        synthesis.as_millis(),
+        blocking.as_millis(),
+        100.0 * blocking.as_secs_f64() / synthesis.as_secs_f64(),
+        lookups.as_millis(),
+        100.0 * lookups.as_secs_f64() / synthesis.as_secs_f64(),
+        inserts.as_millis(),
+        100.0 * inserts.as_secs_f64() / synthesis.as_secs_f64(),
     );
 }
 
