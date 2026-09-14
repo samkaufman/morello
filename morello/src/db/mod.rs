@@ -84,18 +84,45 @@ pub struct FilesDatabase {
     proactive_save_interval: Duration,
     next_proactive_save_shard: AtomicUsize,
     #[cfg(feature = "db-stats")]
-    stats: Arc<FilesDatabaseStats>,
+    stats: FilesDatabaseStatsCollection,
 }
 
 #[cfg(feature = "db-stats")]
+struct FilesDatabaseStatsCollection {
+    /// Counters for each shard, updated by the shard's background thread and whichever thread holds
+    /// the shard's lock.
+    shards: Vec<Arc<FilesDatabaseStats>>,
+    /// Counters for the non-spatial cache, updated while its lock is held.
+    nonspatial: FilesDatabaseStats,
+}
+
+#[cfg(feature = "db-stats")]
+#[repr(align(128))]
 #[derive(Debug, Default)]
 pub struct FilesDatabaseStats {
-    disk_bytes_read: AtomicU64,
-    disk_bytes_written: AtomicU64,
-    gets: AtomicU64,
-    puts: AtomicU64,
+    pub disk_bytes_read: AtomicU64,
+    pub disk_bytes_written: AtomicU64,
+    pub gets: AtomicU64,
+    pub puts: AtomicU64,
     /// Total time spent waiting for a database thread.
-    blocking_ms: AtomicU64,
+    pub blocking_ms: AtomicU64,
+}
+
+#[cfg(feature = "db-stats")]
+impl FilesDatabaseStatsCollection {
+    fn new(shard_count: usize) -> Self {
+        Self {
+            shards: (0..shard_count).map(|_| Arc::default()).collect(),
+            nonspatial: FilesDatabaseStats::default(),
+        }
+    }
+
+    fn all(&self) -> impl Iterator<Item = &FilesDatabaseStats> {
+        self.shards
+            .iter()
+            .map(Arc::as_ref)
+            .chain([&self.nonspatial])
+    }
 }
 
 struct ShardVec(Vec<Mutex<Shard>>);
@@ -436,10 +463,11 @@ impl FilesDatabase {
         proactive_saves_enabled: bool,
         nonspatial_entries: NonSpatialEntries,
     ) -> Self {
-        #[cfg(feature = "db-stats")]
-        let stats = Arc::new(FilesDatabaseStats::default());
-
         let shard_count = thread_count * THREAD_SHARDS;
+
+        #[cfg(feature = "db-stats")]
+        let stats = FilesDatabaseStatsCollection::new(shard_count);
+
         let cache_size_per_shard = cache_size / shard_count;
         let cache_per_shard_samples = (cache_size_per_shard / 4).max(1);
         let cache_per_shard_size = cache_size_per_shard
@@ -460,7 +488,7 @@ impl FilesDatabase {
                         cache_per_shard_size,
                         cache_per_shard_samples,
                         #[cfg(feature = "db-stats")]
-                        Arc::clone(&stats),
+                        Arc::clone(&stats.shards[i]),
                     ))
                 })
                 .collect(),
@@ -556,9 +584,13 @@ impl FilesDatabase {
         if !self.can_memoize_efficiently(query) {
             let key = self.nonspatial_key(query);
             let memory_pt = BiMap::apply(&MemoryLimitsBimap::<Tgt>::default(), &query.1);
-            return match self
-                .nonspatial_cache
-                .lock()
+            let nonspatial_cache = self.nonspatial_cache.lock();
+            #[cfg(feature = "db-stats")]
+            self.stats
+                .nonspatial
+                .gets
+                .fetch_add(1, atomic::Ordering::Relaxed);
+            return match nonspatial_cache
                 .entries
                 .get(&key)
                 .and_then(|tree| tree.get(&memory_pt, query.0.volume()))
@@ -575,7 +607,11 @@ impl FilesDatabase {
         let page_local_pt = localize_point(&global_pt, &page_pt);
         let page_key = self.prehasher.prehash((table_key, page_pt));
 
+        #[cfg(feature = "db-stats")]
+        let shard_stats = &self.stats.shards[self.shard_index(&page_key)];
         let page: &Page = &self.load_live_page(&page_key);
+        #[cfg(feature = "db-stats")]
+        shard_stats.gets.fetch_add(1, atomic::Ordering::Relaxed);
         page.contents.get_with_preference(query, &page_local_pt)
     }
 
@@ -672,9 +708,6 @@ impl FilesDatabase {
             "peak memory of an action exceeds memory limits of {spec}: {decisions:?}"
         );
 
-        #[cfg(feature = "db-stats")]
-        self.stats.puts.fetch_add(1, atomic::Ordering::Relaxed);
-
         if !self.can_memoize_efficiently(spec) {
             let key = self.nonspatial_key(spec);
             let (bottom, top) = memory_bounds_to_fill::<Tgt>(&spec.1, &decisions);
@@ -683,6 +716,11 @@ impl FilesDatabase {
                 ActionNormalizedCostVec::normalize(ActionCostVec(decisions), spec.0.volume());
             {
                 let mut nonspatial_cache = self.nonspatial_cache.lock();
+                #[cfg(feature = "db-stats")]
+                self.stats
+                    .nonspatial
+                    .puts
+                    .fetch_add(1, atomic::Ordering::Relaxed);
                 nonspatial_cache
                     .entries
                     .entry(key)
@@ -719,6 +757,11 @@ impl FilesDatabase {
         // Reuse the following two values to avoid some allocations.
         let mut key_tuple = Some((table_key, Vec::with_capacity(rank)));
         let mut dim_ranges = Vec::with_capacity(rank);
+
+        // Count the put once, in the shard of the first page it fills.
+        #[cfg(feature = "db-stats")]
+        let mut put_counted = false;
+
         multi_range_product(&page_bottom, &page_top, |page_point: &[BimapInt]| {
             {
                 let key_tuple = key_tuple.as_mut().unwrap();
@@ -749,6 +792,16 @@ impl FilesDatabase {
             {
                 let shard = &self.shards.0[self.shard_index(&key)];
                 let mut shard_guard = shard.lock();
+
+                #[cfg(feature = "db-stats")]
+                if !put_counted {
+                    put_counted = true;
+                    shard_guard
+                        .stats
+                        .puts
+                        .fetch_add(1, atomic::Ordering::Relaxed);
+                }
+
                 {
                     let page = shard_guard.load_live_page_mut(&key);
                     page.modified = true;
@@ -1078,14 +1131,35 @@ impl FilesDatabase {
         *Prehashed::as_hash(key) as usize % self.shards.0.len()
     }
 
+    /// Return combined/aggregate statistics describing database behavior.
+    ///
+    /// These describe [FilesDatabase] behavior since initialization or the last call to
+    /// [FilesDatabase::reset_basic_stats].
+    ///
+    /// This function is relatively slow and, because it aggregates data from multiple
+    /// threads/shards, the totals may not be exact.
+    #[cfg(feature = "db-stats")]
+    pub fn stats(&self) -> FilesDatabaseStats {
+        let mut totals = FilesDatabaseStats::default();
+        for set in self.stats.all() {
+            *totals.disk_bytes_read.get_mut() += set.disk_bytes_read.load(atomic::Ordering::SeqCst);
+            *totals.disk_bytes_written.get_mut() +=
+                set.disk_bytes_written.load(atomic::Ordering::SeqCst);
+            *totals.gets.get_mut() += set.gets.load(atomic::Ordering::SeqCst);
+            *totals.puts.get_mut() += set.puts.load(atomic::Ordering::SeqCst);
+            *totals.blocking_ms.get_mut() += set.blocking_ms.load(atomic::Ordering::SeqCst);
+        }
+        totals
+    }
+
     /// Return a string describing some basic counts.
     #[cfg(feature = "db-stats")]
     pub fn basic_stats(&self) -> String {
-        let stats = &self.stats;
-        let gets = stats.gets.load(atomic::Ordering::SeqCst);
-        let puts = stats.puts.load(atomic::Ordering::SeqCst);
-        let read = stats.disk_bytes_read.load(atomic::Ordering::SeqCst);
-        let written = stats.disk_bytes_written.load(atomic::Ordering::SeqCst);
+        let totals = self.stats();
+        let gets = totals.gets.into_inner();
+        let puts = totals.puts.into_inner();
+        let read = totals.disk_bytes_read.into_inner();
+        let written = totals.disk_bytes_written.into_inner();
         format!(
             "gets={}, puts={}, bytes_read={}{}, bytes_written={}{}",
             gets,
@@ -1107,17 +1181,13 @@ impl FilesDatabase {
 
     #[cfg(feature = "db-stats")]
     pub fn reset_basic_stats(&mut self) {
-        let stats = &mut self.stats;
-        stats.gets.store(0, atomic::Ordering::SeqCst);
-        stats.puts.store(0, atomic::Ordering::SeqCst);
-        stats.disk_bytes_read.store(0, atomic::Ordering::SeqCst);
-        stats.disk_bytes_written.store(0, atomic::Ordering::SeqCst);
-        stats.blocking_ms.store(0, atomic::Ordering::SeqCst);
-    }
-
-    #[cfg(feature = "db-stats")]
-    pub fn blocking_ms(&self) -> u64 {
-        self.stats.blocking_ms.load(atomic::Ordering::SeqCst)
+        for set in self.stats.all() {
+            set.disk_bytes_read.store(0, atomic::Ordering::SeqCst);
+            set.disk_bytes_written.store(0, atomic::Ordering::SeqCst);
+            set.gets.store(0, atomic::Ordering::SeqCst);
+            set.puts.store(0, atomic::Ordering::SeqCst);
+            set.blocking_ms.store(0, atomic::Ordering::SeqCst);
+        }
     }
 
     /// Write statistics about the database to CSV files in `output_dir`.

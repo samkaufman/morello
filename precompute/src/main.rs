@@ -461,7 +461,7 @@ fn compute_next_stage<Tgt: Target>(
 fn log_db_stats(db: &FilesDatabase, total_synthesis_ms: &AtomicU64) {
     info!("DB stats: {}", db.basic_stats());
     let stime = total_synthesis_ms.load(atomic::Ordering::Relaxed);
-    let btime = db.blocking_ms();
+    let btime = db.stats().blocking_ms.into_inner();
     info!(
         "synthesis: {stime}ms; blocking: {btime}ms ({:.0}%)",
         100.0 * btime as f64 / stime as f64
