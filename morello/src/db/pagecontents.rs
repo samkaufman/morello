@@ -81,12 +81,10 @@ impl RTreePageContents {
         &self.0
     }
 
-    #[cfg(feature = "db-stats")]
     pub fn rect_count(&self) -> usize {
         self.0.size()
     }
 
-    #[cfg(feature = "db-stats")]
     pub fn spec_count(&self) -> u128 {
         self.0
             .iter()

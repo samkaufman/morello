@@ -13,15 +13,10 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::sync::atomic::{self, AtomicU64};
 use std::sync::{mpsc, Arc};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use std::{fs, iter, path};
-
-#[cfg(feature = "db-stats")]
-use std::{
-    sync::atomic::{self, AtomicU64},
-    time::Duration,
-};
 
 use morello::common::{DimSize, Dtype, Shape};
 use morello::db::{ActionCostVec, FilesDatabase, TileScale};
@@ -156,9 +151,6 @@ where
 {
     env_logger::init();
 
-    #[cfg(feature = "db-stats")]
-    info!("DB statistic collection enabled");
-
     let threads = rayon::current_num_threads();
     let mut db = FilesDatabase::new::<Tgt>(
         args.db.as_deref(),
@@ -186,11 +178,7 @@ where
     result
 }
 
-fn main_per_db<Tgt>(
-    args: &Args,
-    #[allow(unused_mut)] mut db: FilesDatabase, // mut when db-stats enabled
-    db_path: Option<&path::Path>,
-) -> Result<()>
+fn main_per_db<Tgt>(args: &Args, db: FilesDatabase, db_path: Option<&path::Path>) -> Result<()>
 where
     Tgt: CpuTarget,
     Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
@@ -235,7 +223,6 @@ where
     });
 
     // Synth. time across all threads and stages for the whole run.
-    #[cfg(feature = "db-stats")]
     let synthesis_ns = AtomicU64::new(0);
 
     // Run each parallel phase
@@ -257,7 +244,6 @@ where
                     &top,
                     spec_completed,
                     meta_update_tx.clone(),
-                    #[cfg(feature = "db-stats")]
                     &synthesis_ns,
                 );
             });
@@ -302,7 +288,7 @@ fn process_spec<Tgt>(
     top: &MemVec,
     spec_completed: usize,
     progress_sender: mpsc::Sender<(LogicalSpec<Tgt>, usize)>,
-    #[cfg(feature = "db-stats")] synthesis_ns: &AtomicU64,
+    synthesis_ns: &AtomicU64,
 ) where
     Tgt: CpuTarget,
     Tgt::Memory: morello::grid::canon::CanonicalBimap + Sync,
@@ -364,25 +350,19 @@ fn process_spec<Tgt>(
                 .collect::<Vec<_>>();
             let mut next_stage = HashSet::new();
 
-            #[cfg(feature = "db-stats")]
             let mut synthesis_time = Duration::ZERO;
             while !worklist.is_empty() {
                 validate_stage_worklist_unique(&worklist);
 
-                #[cfg(feature = "db-stats")]
                 let synthesis_start = Instant::now();
 
                 let stage_results = process_worklist_chunks(db, &worklist);
 
-                #[cfg(feature = "db-stats")]
-                {
-                    synthesis_time += synthesis_start.elapsed();
-                }
+                synthesis_time += synthesis_start.elapsed();
                 compute_next_stage(&worklist, stage_results, memories, &mut next_stage);
                 worklist = next_stage.drain().collect();
             }
 
-            #[cfg(feature = "db-stats")]
             synthesis_ns.fetch_add(
                 synthesis_time.as_nanos().try_into().unwrap(),
                 atomic::Ordering::Relaxed,
@@ -393,7 +373,6 @@ fn process_spec<Tgt>(
             stage_start.elapsed()
         );
 
-        #[cfg(feature = "db-stats")]
         log_db_stats(db, synthesis_ns);
 
         let save_start = Instant::now();
@@ -461,7 +440,6 @@ fn compute_next_stage<Tgt: Target>(
     }
 }
 
-#[cfg(feature = "db-stats")]
 fn log_db_stats(db: &FilesDatabase, synthesis_ns: &AtomicU64) {
     info!("DB stats: {}", db.basic_stats());
     let totals = db.stats();

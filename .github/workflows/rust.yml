@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CLANG: clang
-  CI_FEATURES: clap,db-stats,verification,l2-speed-gl
+  CI_FEATURES: clap,verification,l2-speed-gl
 
 jobs:
   build:
