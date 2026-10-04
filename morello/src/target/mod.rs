@@ -162,6 +162,35 @@ impl std::str::FromStr for TargetId {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    /// Asserts that no two [VecType]s for a target share a `name`.
+    ///
+    /// Each distinct [VecType] a target emits becomes its own C typedef, so two sharing a `name`
+    /// would emit conflicting typedefs for the same identifier.
+    fn assert_vector_type_names_unique<Tgt: Target>() {
+        let mut by_name = HashMap::new();
+        for vec_type in Tgt::vec_types() {
+            if let Some(previous) = by_name.insert(vec_type.name, vec_type) {
+                panic!(
+                    "{:?} gives the name {} to both {:?}x{} and {:?}x{}",
+                    Tgt::target_id(),
+                    vec_type.name,
+                    previous.dtype,
+                    previous.value_cnt,
+                    vec_type.dtype,
+                    vec_type.value_cnt,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_vector_type_names_are_unique() {
+        assert_vector_type_names_unique::<ArmTarget>();
+        assert_vector_type_names_unique::<Avx2Target>();
+        assert_vector_type_names_unique::<Avx512Target>();
+    }
 
     proptest! {
         #[test]
