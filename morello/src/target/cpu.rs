@@ -1020,10 +1020,10 @@ impl CpuKernel {
                           && lhs.is_contiguous() && rhs.is_contiguous()
                           && lhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
                           && rhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
-                          // If lhs is already in VRF, require a full vector so we don't need pointer arithmetic.
                           && (lhs.memory() == CpuMemory::L1
                               || (lhs.memory() == CpuMemory::VRF
-                                  && lhs.vector_size() == Some(DOT_PRODUCT_STRIP_SIZE)))
+                                  && lhs.vector_size() == Some(DOT_PRODUCT_STRIP_SIZE)
+                                  && lhs_shape[2] == DOT_PRODUCT_STRIP_SIZE))
                           && rhs.memory() == CpuMemory::L1
                           && is_rf_or_l1_memory(*out_level)
                     )
@@ -3201,14 +3201,27 @@ mod tests {
     #[test]
     fn test_dotproductloop_applies_to_longer_k() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
-            [1, 1, 32, 1],
-            (f32, CpuMemory::VRF, row_major, 8),
+            [1, 1, 16, 1],
+            (f32, CpuMemory::L1, row_major),
             (f32, CpuMemory::L1, col_major),
             (f32, CpuMemory::L1, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
         assert!(CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_dotproductloop_rejects_vrf_lhs_spanning_multiple_vectors() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 1, 16, 1],
+            (f32, CpuMemory::VRF, row_major, 8),
+            (f32, CpuMemory::L1, col_major),
+            (f32, CpuMemory::L1, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(!CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
     }
 
     #[test]
