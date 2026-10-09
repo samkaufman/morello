@@ -26,9 +26,7 @@ specifications describe the tensor's data type,
 the memory where that tensor's data is stored,
 the layout of the data,
 whether that data is ``aligned'' (buffer address is some target-specific multiple),
-a layout-specific description of how contiguous is the data, and,
-in the data of data stored in a vector register file, the size of the vector register
-(e.g., 128- or 256-bit on AVX2).
+and a layout-specific description of how contiguous is the data.
 
 Available functions are listed as variants of the `PrimitiveSpecType` enum.
 

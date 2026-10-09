@@ -46,7 +46,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 type JobFingerprint = (usize, u64);
 
 const META_FILENAME: &str = "PRECOMPUTE";
-const DB_PROGRESS_VERSION: usize = 4;
+const DB_PROGRESS_VERSION: usize = 5;
 const K: u8 = 1;
 const SUBWORKLIST_MAX_SIZE: usize = 5000;
 const DTYPES: [Dtype; 2] = [Dtype::Uint32, Dtype::Float32];
@@ -671,7 +671,6 @@ fn matmul_top<Tgt: CpuTarget>(size: DimSize, dtype: Dtype) -> LogicalSpec<Tgt> {
         .map(|shape| TensorSpecAux {
             memory: CpuMemory::GL.into(),
             layout: row_major(&shape),
-            vector_size: None,
         })
         .collect::<Vec<_>>();
     LogicalSpec::Primitive(
@@ -697,12 +696,10 @@ fn move_top<Tgt: CpuTarget>(size: DimSize, rank: u8, dtype: Dtype) -> LogicalSpe
             TensorSpecAux {
                 memory: CpuMemory::GL.into(),
                 layout: row_major(&shape),
-                vector_size: None,
             },
             TensorSpecAux {
                 memory: CpuMemory::GL.into(),
                 layout: row_major(&shape),
-                vector_size: None,
             },
         ],
         true,
@@ -835,6 +832,5 @@ fn taux_gl<Tgt: CpuTarget>(shape: &[DimSize]) -> TensorSpecAux<Tgt> {
     TensorSpecAux {
         memory: CpuMemory::GL.into(),
         layout: row_major(shape),
-        vector_size: None,
     }
 }

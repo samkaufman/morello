@@ -319,7 +319,6 @@ mod tests {
                 Dtype::Uint32,
                 CpuMemory::L1,
                 row_major,
-                None,
             );
 
             if let Ok((main_tile, boundary_tiles)) = tiling.apply_with_boundaries(&Param::new(0, spec)) {
@@ -368,7 +367,6 @@ mod tests {
             Dtype::Uint32,
             CpuMemory::L1,
             row_major,
-            None,
         );
         let param = Param::new(0, spec);
         let tiling = Tiling::new_simple(shape![3, 4, 4]);
@@ -416,7 +414,6 @@ mod tests {
             Dtype::Uint32,
             CpuMemory::L1,
             row_major,
-            None,
         );
         let param = Param::new(0, spec);
         let tiling = Tiling::new_simple(shape![2, 3]);
@@ -434,7 +431,6 @@ mod tests {
             Dtype::Uint32,
             CpuMemory::L1,
             row_major,
-            None,
         );
         let param = Param::new(0, spec);
         let tiling = Tiling::new_simple(shape![2, 4, 3]);

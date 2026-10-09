@@ -268,7 +268,6 @@ pub trait ViewExt: View {
             self.spec().dtype(),
             self.spec().memory(),
             transposed_layout,
-            self.spec().vector_size(),
         );
         TransposeView {
             inner: self,
@@ -546,6 +545,8 @@ where
 pub enum TileError {
     #[error("Layout does not apply to tile size")]
     LayoutIncompatible(#[from] LayoutError),
+    #[error("Tile's vector width differs from that of the tiled tensor")]
+    VectorSizeChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -843,6 +844,9 @@ impl<V: View> Tile<V> {
         let expr_term_id = OpaqueSymbol::new();
         let unique_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
+        if !spec.tile_keeps_vector_size(&shape) {
+            return Err(TileError::VectorSizeChanged);
+        }
         spec.shrink(&shape)?;
         Ok(Self {
             shape,
@@ -1165,6 +1169,9 @@ impl<V: View> BoundaryTile<V> {
         let expr_term_id = OpaqueSymbol::new();
         let unique_id = OpaqueSymbol::new();
         let mut spec = view.spec().clone();
+        if !spec.tile_keeps_vector_size(&shape) {
+            return Err(TileError::VectorSizeChanged);
+        }
         spec.shrink(&shape)?;
         Ok(BoundaryTile {
             shape,
@@ -1361,7 +1368,6 @@ mod tests {
             Dtype::Uint32,
             CpuMemory::L1,
             layout,
-            None,
         ))
     }
 }

@@ -1,10 +1,10 @@
-use crate::common::DimSize;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::{
-    make_inner_compose, make_outer_compose, ActionT, ApplyError, NotApplicableReason,
+    make_inner_compose, make_outer_compose, tensorspec_error_to_apply_err, ActionT, ApplyError,
+    NotApplicableReason,
 };
 use crate::spec::{LogicalSpec, Spec};
 use crate::target::Target;
@@ -18,7 +18,6 @@ pub struct Bufferize<Tgt: Target> {
     pub index: usize,
     pub memory: Tgt::Memory,
     pub layout: Layout,
-    pub vector_size: Option<DimSize>,
 }
 
 impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
@@ -54,9 +53,8 @@ impl<Tgt: Target> ActionT<Tgt> for Bufferize<Tgt> {
                 consumer.input_dtype(0),
                 self.memory,
                 self.layout.clone(),
-                self.vector_size,
             )
-            .map_err(|_| ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible))?,
+            .map_err(tensorspec_error_to_apply_err)?,
         );
 
         // Compute the memory limits for the new children.
@@ -151,27 +149,22 @@ mod tests {
         let aux0_1 = TensorSpecAux {
             memory: CpuMemory::GL,
             layout: row_major(&basics0.parameter_shape(1)),
-            vector_size: None,
         };
         let aux1_1 = TensorSpecAux {
             memory: CpuMemory::GL,
             layout: row_major(&basics1.parameter_shape(1)),
-            vector_size: None,
         };
         let aux2_0 = TensorSpecAux {
             memory: CpuMemory::GL,
             layout: row_major(&basics2.parameter_shape(0)),
-            vector_size: None,
         };
         let aux2_1 = TensorSpecAux {
             memory: CpuMemory::GL,
             layout: row_major(&basics2.parameter_shape(1)),
-            vector_size: None,
         };
         let aux0_out = TensorSpecAux {
             memory: CpuMemory::GL,
             layout: row_major(&basics0.parameter_shape(2)),
-            vector_size: None,
         };
         let mut spec = Spec::<Avx2Target>(
             LogicalSpec::Compose {
@@ -182,7 +175,7 @@ mod tests {
             Avx2Target::max_mem(),
         );
         spec.canonicalize().unwrap();
-        let imp = spec.bufferize(1, CpuMemory::GL, row_major, None);
+        let imp = spec.bufferize(1, CpuMemory::GL, row_major);
 
         assert_eq!(imp.children().len(), 2);
         assert!(matches!(imp, ImplNode::Pipeline(_)));

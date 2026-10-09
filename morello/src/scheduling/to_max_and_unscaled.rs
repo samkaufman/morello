@@ -4,10 +4,10 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{tensorspec_error_to_apply_err, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, MEMORY_COUNT};
-use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::{Param, Tensor, View};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,6 @@ use std::rc::Rc;
 pub struct ToMaxAndUnscaled<Tgt: Target> {
     pub max_level: Tgt::Memory,
     pub max_layout: Layout,
-    pub max_vector_size: Option<DimSize>,
 }
 
 impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
@@ -56,7 +55,6 @@ impl<Tgt: Target> ActionT<Tgt> for ToMaxAndUnscaled<Tgt> {
             dtypes[0],
             self.max_level,
             self.max_layout.clone(),
-            self.max_vector_size,
         )?;
         let lowered_limits = child_limits(&spec.1, [max_tensor.spec()])?;
 
@@ -106,7 +104,6 @@ fn scalar_tensor<Tgt: Target>(
     dtype: Dtype,
     max_level: Tgt::Memory,
     max_layout: Layout,
-    max_vector_size: Option<DimSize>,
 ) -> Result<Tensor<Tgt>, ApplyError> {
     let mut max_spec = TensorSpec {
         shape: Shape::from_slice(spec_shape),
@@ -114,21 +111,12 @@ fn scalar_tensor<Tgt: Target>(
         aux: TensorSpecAux {
             memory: max_level,
             layout: max_layout,
-            vector_size: max_vector_size,
         },
     };
     max_spec.shape[usize::from(scan_dim)] = nz!(1u32);
-    max_spec.canonicalize().map_err(|e| match e {
-        tensorspec::CanonicalizeError::VectorSizeInvalid => {
-            ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
-        }
-        tensorspec::CanonicalizeError::VectorSizeVolumeIncompatible => {
-            ApplyError::NotApplicable(NotApplicableReason::VectorSizeVolumeIncompatible)
-        }
-        tensorspec::CanonicalizeError::LayoutError(_) => {
-            ApplyError::NotApplicable(NotApplicableReason::Other(None))
-        }
-    })?;
+    max_spec
+        .canonicalize()
+        .map_err(tensorspec_error_to_apply_err)?;
     Ok(Tensor::new(max_spec))
 }
 

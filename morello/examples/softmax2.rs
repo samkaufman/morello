@@ -34,7 +34,6 @@ fn main() {
             TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout: row_major(&shape),
-                vector_size: None,
             };
             2
         ],
@@ -46,10 +45,8 @@ fn main() {
     let implementation = spec
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)
         .tile_out(&[1, shape[1].get()])
-        .to_softmax_parts(GL, row_major, None)
-        .subschedule(&[0], |subspec| {
-            subspec.to_max_and_unscaled(GL, row_major, None)
-        })
+        .to_softmax_parts(GL, row_major)
+        .subschedule(&[0], |subspec| subspec.to_max_and_unscaled(GL, row_major))
         .subschedule(&[0, 0], |subspec| subspec.to_accum())
         .subschedule(&[0, 0, 0], |subspec| {
             let imp = subspec.move_param(0, L1);

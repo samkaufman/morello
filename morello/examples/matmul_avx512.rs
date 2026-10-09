@@ -35,7 +35,7 @@ fn main() {
 
     let implementation = spec
         .split(128)
-        .move_relayout(1, GL, layout_b.clone(), None)
+        .move_relayout(1, GL, layout_b.clone())
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
             let pref = pack_b
@@ -58,10 +58,10 @@ fn main() {
         .move_param(0, L1)
         .move_param(1, L1)
         .move_param(2, L1)
-        .move_vrf(2, VRF, 16)
+        .move_param(2, VRF)
         .split(1)
         .tile_out(&[1, 1, 16])
-        .move_vrf(1, VRF, 16)
+        .move_param(1, VRF)
         .subschedule(&[1, 0, 1, 1], |m| m.select(CpuKernel::BroadcastVecMultAdd))
         .subschedule(&[1, 1], |m| {
             m.tile_out(&[1, 1, 16])
@@ -69,8 +69,8 @@ fn main() {
                 .move_param(0, L1)
                 .move_param(1, L1)
                 .move_param(2, L1)
-                .move_vrf(1, VRF, 16)
-                .move_vrf(2, VRF, 16)
+                .move_param(1, VRF)
+                .move_param(2, VRF)
                 .select(CpuKernel::BroadcastVecMultAdd)
         })
         .subschedule(&[1, 0, 0], |m| {

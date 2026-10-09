@@ -42,12 +42,12 @@ fn main() {
         .tile_out_parallel(&[1, 2048, 2048])
         .tile_out(&[1, M_R * (2048 / M_R), 2048])
         .subschedule(&[0], |main| {
-            main.move_relayout(1, GL, layout_b.clone(), None)
+            main.move_relayout(1, GL, layout_b.clone())
                 .tile_out(&[1, M_C, 2048])
                 .subschedule(&[0], naive_scalar_move_impl)
                 .subschedule(&[1, 0], |main_main| {
                     main_main
-                        .move_relayout(0, GL, layout_a.clone(), None)
+                        .move_relayout(0, GL, layout_a.clone())
                         // .tile_out(&[1, m_c, 2048])
                         .split(K_C)
                         // A' in 8 MiB L3 per CCX
@@ -56,11 +56,11 @@ fn main() {
                         // Microkernel
                         .tile_out(&[1, M_R, N_R])
                         .move_param(0, L1)
-                        .move_vrf(2, VRF, 8)
+                        .move_param(2, VRF)
                         .split(1)
                         .tile_out(&[1, 1, 16])
                         .move_param(1, L1) // moves low to "skip" modeling
-                        .move_vrf(1, VRF, 8)
+                        .move_param(1, VRF)
                         .select(CpuKernel::BroadcastVecMultAdd)
                         // Moves
                         .subschedule(&[0], naive_scalar_move_impl)
@@ -70,18 +70,18 @@ fn main() {
                 })
                 .subschedule(&[1, 1], |main_secondary| {
                     main_secondary
-                        // .move_relayout(1, GL, layout_b.clone(), None)
-                        .move_relayout(0, GL, layout_a.clone(), None)
+                        // .move_relayout(1, GL, layout_b.clone())
+                        .move_relayout(0, GL, layout_a.clone())
                         .split(K_C)
                         .tile_out(&[1, M_R, N_C])
                         // Microkernel
                         .tile_out(&[1, M_R, N_R])
                         .move_param(0, L1)
-                        .move_vrf(2, VRF, 8)
+                        .move_param(2, VRF)
                         .split(1)
                         .tile_out(&[1, 1, 16])
                         .move_param(1, L1) // moves low to "skip" modeling
-                        .move_vrf(1, VRF, 8)
+                        .move_param(1, VRF)
                         .select(CpuKernel::BroadcastVecMultAdd)
                         // Moves
                         .subschedule(&[0], naive_scalar_move_impl)
@@ -92,16 +92,16 @@ fn main() {
         })
         .subschedule(&[1], |secondary| {
             secondary
-                .move_relayout(1, GL, layout_b.clone(), None)
+                .move_relayout(1, GL, layout_b.clone())
                 .tile_out(&[1, 1, 2048])
                 .split(K_C)
                 // Microkernel
                 .tile_out(&[1, 1, 16])
-                .move_vrf(2, VRF, 8)
+                .move_param(2, VRF)
                 .split(1)
                 .move_param(1, L1) // moves low to "skip" modeling
                 .move_param(0, L1)
-                .move_vrf(1, VRF, 8)
+                .move_param(1, VRF)
                 .select(CpuKernel::BroadcastVecMultAdd)
                 // Moves
                 .subschedule(&[1, 0], naive_vector_move_impl)
@@ -154,11 +154,11 @@ fn main() {
 fn naive_scalar_move_impl(move_spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let imp = move_spec
         .tile_out(&[1, 1, 1])
-        .move_relayout(0, L1, row_major, None)
-        .move_relayout(1, L1, row_major, None);
+        .move_relayout(0, L1, row_major)
+        .move_relayout(1, L1, row_major);
     #[cfg(not(feature = "drop-rf"))]
     {
-        imp.move_relayout(0, RF, row_major, None)
+        imp.move_relayout(0, RF, row_major)
             .subschedule(&[0], |m0| m0.select(CpuKernel::Assign))
             .subschedule(&[1], |m0| m0.select(CpuKernel::Assign))
     }

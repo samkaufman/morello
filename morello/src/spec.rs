@@ -1707,8 +1707,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Move => {
                     let shape = &basics.spec_shape;
                     for (aux, dtype) in primitive_aux.iter_mut().zip(&basics.dtypes) {
-                        let vs = aux.vector_size;
-                        check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.memory, vs)
+                        check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.memory)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
 
                         aux.canonicalize(shape)
@@ -1738,8 +1737,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     for (shp, dtype, aux) in
                         izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
                     {
-                        let vs = aux.vector_size;
-                        check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.memory, vs)
+                        check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.memory)
                             .map_err(CanonicalizeError::TensorSpecAuxCanonicalizeError)?;
 
                         aux.canonicalize(&shp)
@@ -1785,8 +1783,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
                     let dtype = component.parameter_dtype(parameter_idx);
                     let memory = &aux.memory;
-                    let vs = aux.vector_size;
-                    if let Err(e) = check_tensor_vector_size::<Tgt>(&shape, dtype, memory, vs) {
+                    if let Err(e) = check_tensor_vector_size::<Tgt>(&shape, dtype, memory) {
                         status_to_return =
                             Err(CanonicalizeError::TensorSpecAuxCanonicalizeError(e));
                     }
@@ -1804,9 +1801,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                 PrimitiveSpecType::Move => {
                     let shape = &basics.spec_shape;
                     for (aux, dtype) in primitive_aux.iter().zip(&basics.dtypes) {
-                        let vs = aux.vector_size;
-                        if check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.memory, vs).is_err()
-                        {
+                        if check_tensor_vector_size::<Tgt>(shape, *dtype, &aux.memory).is_err() {
                             return false;
                         }
 
@@ -1832,8 +1827,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
                     for (shp, dtype, aux) in
                         izip!(basics.parameter_shapes(), &basics.dtypes, primitive_aux)
                     {
-                        let vs = aux.vector_size;
-                        if check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.memory, vs).is_err() {
+                        if check_tensor_vector_size::<Tgt>(&shp, *dtype, &aux.memory).is_err() {
                             return false;
                         }
 
@@ -1882,8 +1876,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
 
                     let dtype = component.parameter_dtype(parameter_idx);
                     let memory = &aux.memory;
-                    let vs = aux.vector_size;
-                    if check_tensor_vector_size::<Tgt>(&shape, dtype, memory, vs).is_err() {
+                    if check_tensor_vector_size::<Tgt>(&shape, dtype, memory).is_err() {
                         status_to_return = false;
                     }
                 });
@@ -1911,14 +1904,7 @@ impl<Tgt: Target> LogicalSpec<Tgt> {
         if image_shape[2..] != filters_shape[2..] {
             return false;
         }
-        for a in primitive_aux {
-            if let Some(vector_size) = a.vector_size {
-                if vector_size.get() != 1 {
-                    return false;
-                }
-            }
-        }
-        true
+        primitive_aux.iter().all(|a| !a.memory.vector_rf())
     }
 
     pub(crate) fn input_tilings_for_tile_out(
@@ -2988,8 +2974,7 @@ pub fn arb_primitive_logical_spec<Tgt: Target>(
             let auxes_strategy = basics
                 .parameter_shapes()
                 .into_iter()
-                .zip(&basics.dtypes)
-                .map(|(s, &d)| any_with::<TensorSpecAux<Tgt>>((TensorSpecArbMaxShape(s), Some(d))))
+                .map(|s| any_with::<TensorSpecAux<Tgt>>(TensorSpecArbMaxShape(s)))
                 .collect::<Vec<_>>();
             (Just(basics), auxes_strategy, Just(serial_only))
         })
@@ -3013,10 +2998,7 @@ where
         .prop_flat_map(|components| {
             let auxes_strategies = compose_parameter_shapes(&components)
                 .into_iter()
-                .zip(compose_parameter_dtypes(&components))
-                .map(|(shape, dtype)| {
-                    any_with::<TensorSpecAux<Tgt>>((TensorSpecArbMaxShape(shape), Some(dtype)))
-                })
+                .map(|shape| any_with::<TensorSpecAux<Tgt>>(TensorSpecArbMaxShape(shape)))
                 .collect::<Vec<_>>();
             (Just(components), auxes_strategies, any::<bool>())
         })
@@ -3488,21 +3470,14 @@ pub mod macros {
         };
 
         ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr, c0 ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, None, false)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, false)
         };
         ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, None, true)
-        };
-        ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr, $vs:expr, c0 ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, Some($vs), false)
-        };
-        ( @tensorspecaux $shp:expr, $dt:tt, $memory:expr, $layout:expr, $vs:expr ) => {
-            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, Some($vs), true)
+            $crate::lspec!(@tensorspecaux_inner $shp, $dt, $memory, $layout, true)
         };
 
         // TODO: Accept contiguousnesses other than fully contig. or not at all.
-        ( @tensorspecaux_inner $shp:expr, $dt:tt, $memory:expr, $layout:expr, $vs:expr,
-          $c:literal ) =>
+        ( @tensorspecaux_inner $shp:expr, $dt:tt, $memory:expr, $layout:expr, $c:literal ) =>
         {{
             let mut layout;
             if !$crate::target::Memory::has_layout(&($memory)) {
@@ -3517,9 +3492,6 @@ pub mod macros {
             $crate::tensorspec::TensorSpecAux {
                 memory: ($memory).into(),
                 layout,
-                vector_size: ($vs).map(|x: u32| {
-                    $crate::common::DimSize::try_from(x).unwrap()
-                }),
             }
         }};
 
@@ -3649,7 +3621,9 @@ mod tests {
     use crate::scheduling::{Action, ActionT as _, ApplyError};
     use crate::scheduling_sugar::SchedulingSugar;
     use crate::target::CpuMemory::{GL, L1, VRF};
-    use crate::target::{ArmTarget, Avx2Target, CpuMemory, Memory, Target, MEMORY_COUNT};
+    use crate::target::{
+        ArmTarget, Avx2Target, Avx512Target, CpuMemory, Memory, Target, MEMORY_COUNT,
+    };
     use crate::tensorspec::{TensorSpecArbMaxShape, TensorSpecAuxNonDepBimap};
     use crate::utils::{next_binary_power, sum_seqs};
     use crate::views::View;
@@ -3673,19 +3647,16 @@ mod tests {
         let lhs = TensorSpecAux {
             memory: GL,
             layout: row_major(&shape![32, 2, 3]),
-            vector_size: None,
         };
         let mut rhs_layout = row_major(&shape![32, 3, 3]);
         rhs_layout.set_contiguous_none();
         let rhs = TensorSpecAux {
             memory: GL,
             layout: rhs_layout,
-            vector_size: None,
         };
         let out = TensorSpecAux {
             memory: GL,
             layout: row_major(&shape![32, 2, 3]),
-            vector_size: None,
         };
         let expected = LogicalSpec::<Avx2Target>::Primitive(
             PrimitiveBasics {
@@ -4060,6 +4031,11 @@ mod tests {
         }
 
         #[test]
+        fn test_no_action_panics_avx512(spec in arb_canonical_spec::<Avx512Target>(None, None)) {
+            shared_test_no_action_panics(spec);
+        }
+
+        #[test]
         fn test_unique_output_index_matches_parameter_is_output(
             spec_type in any::<PrimitiveSpecType>(),
         ) {
@@ -4145,7 +4121,7 @@ mod tests {
                         let auxes_strategy = basics
                             .parameter_shapes()
                             .into_iter()
-                            .map(|s| any_with::<TensorSpecAux<Avx2Target>>((TensorSpecArbMaxShape(s), Some(dtype))))
+                            .map(|s| any_with::<TensorSpecAux<Avx2Target>>(TensorSpecArbMaxShape(s)))
                             .collect::<Vec<_>>();
                         (Just(basics), auxes_strategy, any::<bool>())
                     })
@@ -4319,6 +4295,11 @@ mod tests {
         }
 
         #[test]
+        fn test_specbimap_is_invertible_avx512(spec in any::<Spec<Avx512Target>>()) {
+            shared_test_specbimap_is_invertible(spec, TileScale::Linear);
+        }
+
+        #[test]
         fn test_parameter_fn_matches_parameters_fn(spec in any::<LogicalSpec<Avx2Target>>()) {
             let parameters = spec.parameters();
             let individual_parameters = (0..parameters.len()).map(|i| spec.parameter(i)).collect::<Vec<_>>();
@@ -4401,12 +4382,7 @@ mod tests {
                 unreachable!();
             };
 
-            let pipeline = compose_spec.bufferize(
-                index,
-                CpuMemory::L1,
-                row_major,
-                None
-            );
+            let pipeline = compose_spec.bufferize(index, CpuMemory::L1, row_major);
             let spec_parameters = compose_spec.0.parameters();
             let pipeline_parameters = pipeline.collect_unbound_parameters();
             prop_assert_eq!(spec_parameters, pipeline_parameters);
@@ -4427,7 +4403,15 @@ mod tests {
         #[test]
         #[ignore]
         fn test_actions_are_valid_through_consumed_memory_arm(
-            logical_spec in arb_canonical_logical_spec::<Avx2Target>(Some(TEST_SMALL_SIZE))
+            logical_spec in arb_canonical_logical_spec::<ArmTarget>(Some(TEST_SMALL_SIZE))
+        ) {
+            shared_test_actions_are_valid_through_consumed_memory(logical_spec)
+        }
+
+        #[test]
+        #[ignore]
+        fn test_actions_are_valid_through_consumed_memory_avx512(
+            logical_spec in arb_canonical_logical_spec::<Avx512Target>(Some(TEST_SMALL_SIZE))
         ) {
             shared_test_actions_are_valid_through_consumed_memory(logical_spec)
         }
@@ -4442,7 +4426,7 @@ mod tests {
         let surmap = SpecSurMap::<Tgt, _, _, _> {
             logical_spec_surmap: LogicalSpecSurMap::new(
                 PrimitiveBasicsBimap { tile_scale },
-                |shape: &[DimSize], dt| TensorSpecAuxNonDepBimap::new(shape, dt),
+                |shape: &[DimSize], _| TensorSpecAuxNonDepBimap::new(shape),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };
@@ -4482,7 +4466,6 @@ mod tests {
             .map(|shape| TensorSpecAux {
                 memory: GL,
                 layout: row_major(shape),
-                vector_size: None,
             })
             .collect();
         let spec = Spec::<Avx2Target>(
@@ -4669,27 +4652,22 @@ mod tests {
         let aux0_1 = TensorSpecAux {
             memory: GL,
             layout: row_major(&basic0.parameter_shape(0)),
-            vector_size: None,
         };
         let aux1_1 = TensorSpecAux {
             memory: L1,
             layout: row_major(&basic1.parameter_shape(1)),
-            vector_size: None,
         };
         let aux2_0 = TensorSpecAux {
             memory: GL,
             layout: row_major(&basic2.parameter_shape(0)),
-            vector_size: None,
         };
         let aux2_1 = TensorSpecAux {
             memory: L1,
             layout: row_major(&basic2.parameter_shape(1)),
-            vector_size: None,
         };
         let aux0_out = TensorSpecAux {
             memory: VRF,
             layout: row_major(&basic0.parameter_shape(2)),
-            vector_size: Some(nz!(8u32)),
         };
 
         LogicalSpec::Compose {

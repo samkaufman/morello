@@ -4,10 +4,13 @@ use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::{row_major, Layout};
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionSolver, ActionT, ApplyError, MoveActionSolver, NotApplicableReason};
+use crate::scheduling::{
+    tensorspec_error_to_apply_err, ActionSolver, ActionT, ApplyError, MoveActionSolver,
+    NotApplicableReason,
+};
 use crate::spec::{LogicalSpec, OperandDirection, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Memory, Target, MEMORY_COUNT};
-use crate::tensorspec::{self, TensorSpec, TensorSpecAux};
+use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::{CacheView, Param, Tensor, ViewE};
 use serde::{Deserialize, Serialize};
 use std::mem;
@@ -18,7 +21,6 @@ pub struct Move<Tgt: Target> {
     pub destination_dtype: Dtype,
     pub destination_level: Tgt::Memory,
     pub destination_layout: Layout,
-    pub destination_vector_size: Option<DimSize>,
 }
 
 /// Data useful to both a Move's [ActionSolver] or [ImplNode].
@@ -66,7 +68,6 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
             self.destination_dtype,
             self.destination_level,
             &self.destination_layout,
-            self.destination_vector_size,
         )?;
 
         let inner_moved_operand = if is_cache_miss {
@@ -122,7 +123,6 @@ impl<Tgt: Target> ActionT<Tgt> for Move<Tgt> {
             self.destination_dtype,
             self.destination_level,
             &self.destination_layout,
-            self.destination_vector_size,
         )?;
         let base_main_cost = move_cost(&plan.outer_moved_operand_spec) + move_cost(&plan.new_spec);
         let allocation = alloc_memory_allocation(&plan.new_spec);
@@ -144,7 +144,6 @@ fn plan_alloc<'a, Tgt: Target>(
     destination_dtype: Dtype,
     destination_level: Tgt::Memory,
     destination_layout: &Layout,
-    destination_vector_size: Option<DimSize>,
 ) -> Result<AllocPlan<'a, Tgt>, ApplyError> {
     let outer_moved_operand_spec = &operands[usize::from(source_idx)];
 
@@ -158,7 +157,6 @@ fn plan_alloc<'a, Tgt: Target>(
         destination_dtype,
         destination_level,
         destination_layout,
-        destination_vector_size,
     )?;
 
     let prologue_spec = make_logue(
@@ -204,7 +202,6 @@ fn plan_alloc_for_solver<Tgt: Target>(
     destination_dtype: Dtype,
     destination_level: Tgt::Memory,
     destination_layout: &Layout,
-    destination_vector_size: Option<DimSize>,
 ) -> Result<SolverAllocPlan<Tgt>, ApplyError> {
     if !matches!(spec.0, LogicalSpec::Primitive(..)) {
         // Compose replacement currently relies on LogicalSpec::replace_io to propagate shapes,
@@ -218,7 +215,6 @@ fn plan_alloc_for_solver<Tgt: Target>(
             destination_dtype,
             destination_level,
             destination_layout,
-            destination_vector_size,
         )?;
         return Ok(SolverAllocPlan {
             outer_moved_operand_spec: plan.outer_moved_operand_spec.clone(),
@@ -240,7 +236,6 @@ fn plan_alloc_for_solver<Tgt: Target>(
         destination_dtype,
         destination_level,
         destination_layout,
-        destination_vector_size,
     )?;
 
     let prologue_spec = make_logue(
@@ -278,7 +273,6 @@ fn plan_alloc_shared<Tgt: Target>(
     destination_dtype: Dtype,
     destination_level: Tgt::Memory,
     destination_layout: &Layout,
-    destination_vector_size: Option<DimSize>,
 ) -> Result<AllocPlanShared<Tgt>, ApplyError> {
     let (destination_layout_canonicalized, is_cache_miss) = if !destination_level.has_layout() {
         let empty_layout = Layout::empty();
@@ -317,7 +311,6 @@ fn plan_alloc_shared<Tgt: Target>(
         destination_dtype,
         destination_level,
         destination_layout_canonicalized,
-        destination_vector_size,
     );
 
     // If this is anything other than a simple cache miss, a new buffer will be allocated, so that
@@ -325,17 +318,7 @@ fn plan_alloc_shared<Tgt: Target>(
     if !is_cache_miss {
         new_spec
             .canonicalize()
-            .map_err(|canon_error| match canon_error {
-                tensorspec::CanonicalizeError::LayoutError(_) => {
-                    ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible)
-                }
-                tensorspec::CanonicalizeError::VectorSizeInvalid => {
-                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
-                }
-                tensorspec::CanonicalizeError::VectorSizeVolumeIncompatible => {
-                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeVolumeIncompatible)
-                }
-            })?;
+            .map_err(tensorspec_error_to_apply_err)?;
     }
 
     assert!(
@@ -568,7 +551,6 @@ mod tests {
                 action.destination_dtype,
                 action.destination_level,
                 &action.destination_layout,
-                action.destination_vector_size,
             ) else {
                 return Ok(());
             };
@@ -593,7 +575,6 @@ mod tests {
                 action.destination_dtype,
                 action.destination_level,
                 &action.destination_layout,
-                action.destination_vector_size,
             ) else {
                 return Ok(());
             };
@@ -651,7 +632,6 @@ mod tests {
             Dtype::Float32,
             CpuMemory::L1,
             &layout![0, 1, 2, 1 p(8)],
-            None,
         )
         .unwrap();
         assert_eq!(
@@ -690,7 +670,6 @@ mod tests {
             destination_dtype: Dtype::Float32,
             destination_level: CpuMemory::L1,
             destination_layout: layout![0, 1, 2, 1 p(8)],
-            destination_vector_size: None,
         });
         match child_get(&spec, action).as_slice() {
             [Spec(logical_spec, _)] => {

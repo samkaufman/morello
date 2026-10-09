@@ -44,7 +44,6 @@ fn main() {
     let aux = TensorSpecAux {
         memory: GL,
         layout: row_major(&tensors_shape),
-        vector_size: None,
     };
 
     let mut spec = Spec::<Avx2Target>(
@@ -57,14 +56,14 @@ fn main() {
     );
     spec.canonicalize().unwrap();
 
-    let mut imp = spec.bufferize(0, GL, row_major, None);
+    let mut imp = spec.bufferize(0, GL, row_major);
     if BATCH > 1 {
         imp = imp.subschedule(&[0], |tail_compose| tail_compose.tile_out(&[1, 2048, 2048]));
     }
     imp = imp
         .subschedule(&[0], |tail_compose| {
             tail_compose
-                .bufferize(0, GL, row_major, None)
+                .bufferize(0, GL, row_major)
                 .subschedule(&[0], |initial_matmul| {
                     initial_matmul
                         .to_accum()
@@ -117,16 +116,16 @@ fn main() {
 
 fn schedule_matmulaccum(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     spec.split(128)
-        .move_relayout(1, GL, layout_b(), None)
+        .move_relayout(1, GL, layout_b())
         .tile_out(&[1, 128, 1024])
         .tile_out(&[1, 4, 16])
         .move_param(0, L1)
         .move_param(1, L1)
         .move_param(2, L1)
-        .move_vrf(2, VRF, 8)
+        .move_param(2, VRF)
         .split(1)
         .tile_out(&[1, 1, 16])
-        .move_vrf(1, VRF, 8)
+        .move_param(1, VRF)
         .select(CpuKernel::BroadcastVecMultAdd)
         .subschedule(&[0], |pack_b| {
             // TODO: This stinks. Use vectors at least.
@@ -163,10 +162,8 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
     let db = FilesDatabase::new::<Avx2Target>(None, Avx2Target::TILE_SCALE, 1, 10_000, 1);
 
     spec.tile_out(&[1, 1, 2048])
-        .to_softmax_parts(GL, row_major, None)
-        .subschedule(&[0], |subspec| {
-            subspec.to_max_and_unscaled(GL, row_major, None)
-        })
+        .to_softmax_parts(GL, row_major)
+        .subschedule(&[0], |subspec| subspec.to_max_and_unscaled(GL, row_major))
         .subschedule(&[0, 0], |subspec| {
             subspec.to_accum().split(1).synthesize(&db)
         })
@@ -186,8 +183,8 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
                 imp.move_param(1, RF)
                     .move_param(2, RF)
                     .subschedule(&[1, 1], |s| {
-                        s.move_relayout(0, VRF, row_major, Some(8))
-                            .move_relayout(3, VRF, row_major, Some(8))
+                        s.move_relayout(0, VRF, row_major)
+                            .move_relayout(3, VRF, row_major)
                             .subschedule(&[0], |m| m.synthesize(&db))
                             .subschedule(&[1, 1], |m| m.synthesize(&db))
                             .subschedule(&[1, 0], |m| {
@@ -200,8 +197,8 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
             }
             #[cfg(feature = "drop-rf")]
             {
-                imp.move_relayout(0, VRF, row_major, Some(8))
-                    .move_relayout(3, VRF, row_major, Some(8))
+                imp.move_relayout(0, VRF, row_major)
+                    .move_relayout(3, VRF, row_major)
                     .subschedule(&[0], |m| m.synthesize(&db))
                     .subschedule(&[1, 1], |m| m.synthesize(&db))
                     .subschedule(&[1, 0], |m| {
@@ -213,11 +210,11 @@ fn schedule_softmax(spec: &Spec<Avx2Target>) -> ImplNode<Avx2Target> {
         .subschedule(&[1], |subspec| {
             subspec
                 .tile_out(&[1, 1, 8])
-                .broadcast_first(VRF, row_major, Some(8))
+                .broadcast_first(VRF, row_major)
                 .subschedule(&[0], |broadcast| {
-                    let imp = broadcast.move_relayout(0, L1, row_major, None);
+                    let imp = broadcast.move_relayout(0, L1, row_major);
                     #[cfg(not(feature = "drop-rf"))]
-                    let imp = imp.move_relayout(0, RF, row_major, None);
+                    let imp = imp.move_relayout(0, RF, row_major);
                     let imp = imp.synthesize(&db);
                     #[cfg(not(feature = "drop-rf"))]
                     let imp = imp.subschedule(&[0], |s| s.synthesize(&db));

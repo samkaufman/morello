@@ -75,6 +75,18 @@ pub trait Target: Clone + Copy + std::hash::Hash + Eq + Default + Debug + 'stati
 
     /// Get corresponding vector types
     fn vec_types() -> &'static [VecType];
+
+    /// Returns the widest vector size available for `dtype` that evenly divides `volume`, or `None`
+    /// if no vector type for `dtype` divides it.
+    fn vector_size_for(dtype: Dtype, volume: DimSize) -> Option<DimSize> {
+        Self::vec_types()
+            .iter()
+            .filter(|vec_type| vec_type.dtype == dtype)
+            .map(|vec_type| u32::from(vec_type.value_cnt))
+            .filter(|&value_cnt| volume.get().is_multiple_of(value_cnt))
+            .max()
+            .map(|value_cnt| DimSize::new(value_cnt).unwrap())
+    }
 }
 
 pub trait Memory:
@@ -82,10 +94,7 @@ pub trait Memory:
 {
     fn is_addressed(&self) -> bool;
     fn can_parallel_tile(&self) -> bool;
-    fn vector_bytes(&self) -> &'static [u32];
-    fn vector_rf(&self) -> bool {
-        !self.vector_bytes().is_empty()
-    }
+    fn vector_rf(&self) -> bool;
     fn counts_registers(&self) -> bool;
     /// Returns true if this memory has (meaningful) layouts associated with it.
     /// Some memories (e.g., RF) have no meaningful relationship beween values.
@@ -163,6 +172,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::collections::HashMap;
+    use strum::VariantArray;
 
     /// Asserts that no two [VecType]s for a target share a `name`.
     ///
@@ -192,12 +202,51 @@ mod tests {
         assert_vector_type_names_unique::<Avx512Target>();
     }
 
+    #[test]
+    fn test_widest_vector_sizes_match_target_widths() {
+        assert_widest_vector_bytes::<ArmTarget>(32);
+        assert_widest_vector_bytes::<Avx2Target>(32);
+        assert_widest_vector_bytes::<Avx512Target>(64);
+    }
+
+    #[test]
+    fn test_vector_size_for_picks_widest_divisor_of_volume() {
+        let size_for = |dtype, volume: u32| {
+            Avx512Target::vector_size_for(dtype, volume.try_into().unwrap()).map(|v| v.get())
+        };
+        assert_eq!(size_for(Dtype::Float32, 64), Some(16));
+        assert_eq!(size_for(Dtype::Float32, 24), Some(8));
+        assert_eq!(size_for(Dtype::Float32, 12), Some(4));
+        assert_eq!(size_for(Dtype::Float32, 6), None);
+        assert_eq!(size_for(Dtype::Uint8, 48), Some(16));
+        assert_eq!(
+            Avx2Target::vector_size_for(Dtype::Float32, 16.try_into().unwrap()),
+            Some(8.try_into().unwrap())
+        );
+    }
+
     proptest! {
         #[test]
         fn test_target_id_display_fromstr_roundtrip(target_id: TargetId) {
             let display_str = target_id.to_string();
             let parsed = display_str.parse::<TargetId>().unwrap();
             prop_assert_eq!(parsed, target_id);
+        }
+    }
+
+    fn assert_widest_vector_bytes<Tgt: Target>(expected_bytes: u32) {
+        for &dtype in Dtype::VARIANTS {
+            let widest = Tgt::vec_types()
+                .iter()
+                .filter(|vec_type| vec_type.dtype == dtype)
+                .map(|vec_type| u32::from(vec_type.value_cnt))
+                .max()
+                .unwrap_or_else(|| panic!("Target has no vector type for {dtype:?}"));
+            assert_eq!(
+                widest * u32::from(dtype.size()),
+                expected_bytes,
+                "unexpected widest vector width for {dtype:?}"
+            );
         }
     }
 }

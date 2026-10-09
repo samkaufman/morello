@@ -1,19 +1,17 @@
-use super::cpu::{vector_accum_count, CpuMemoryBimap, VECTOR_ACCUM_COUNT};
+use super::cpu::{vector_accum_count, VECTOR_ACCUM_COUNT};
 use super::{cpu::CpuTarget, CpuKernel, Kernel, TargetId};
 use crate::common::Dtype;
 use crate::cost::MainCost;
-use crate::grid::canon::CanonicalBimap;
-use crate::grid::general::BiMap;
 use crate::imp::allocs::move_cost;
 use crate::layout;
 use crate::memorylimits::{MemVec, MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType};
-use crate::target::{CpuMemory, Memory};
+use crate::target::CpuMemory;
 use crate::{codegen::c_utils::VecType, views::View};
 
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display};
+use std::fmt::Debug;
 
 crate::target::x86::define_x86_vec_types!(
     X86_AVX512_VEC_TYPES,
@@ -80,20 +78,16 @@ pub enum Avx512Kernel {
     MatmulLoopVdpbf16ps,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Debug, Copy, Clone, Hash, Deserialize, Serialize)]
-#[cfg_attr(test, derive(proptest_derive::Arbitrary))]
-pub struct Avx512Memory(pub CpuMemory);
-
 impl CpuTarget for Avx512Target {
     type Kernel = Avx512Kernel;
-    type Memory = Avx512Memory;
+    type Memory = CpuMemory;
 
     fn target_id() -> TargetId {
         TargetId::Avx512
     }
 
     fn memory_hit_cost(memory: Self::Memory) -> MainCost {
-        match memory.0 {
+        match memory {
             #[cfg(not(feature = "drop-rf"))]
             CpuMemory::RF => 0,
             CpuMemory::VRF => 0,
@@ -396,7 +390,7 @@ fn matmul_vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Tar
     if lhs.memory() != CpuMemory::L1 || rhs.memory() != CpuMemory::L1 {
         return false;
     }
-    if !matches!(out.memory().0, CpuMemory::GL | CpuMemory::L1) {
+    if !matches!(out.memory(), CpuMemory::GL | CpuMemory::L1) {
         return false;
     }
 
@@ -420,88 +414,6 @@ fn matmul_vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Tar
         && lhs_layout == expected_lhs_layout
         && rhs_layout_ok
         && out.layout().is_row_major()
-}
-
-impl Memory for Avx512Memory {
-    fn is_addressed(&self) -> bool {
-        self.0.is_addressed()
-    }
-
-    fn can_parallel_tile(&self) -> bool {
-        self.0.can_parallel_tile()
-    }
-
-    fn vector_bytes(&self) -> &'static [u32] {
-        match self.0 {
-            CpuMemory::VRF => {
-                debug_assert_eq!(self.0.vector_bytes(), &[16, 32]);
-                &[16, 32, 64]
-            }
-            _ => {
-                debug_assert_eq!(self.0.vector_bytes(), &[]);
-                &[]
-            }
-        }
-    }
-
-    fn counts_registers(&self) -> bool {
-        self.0.counts_registers()
-    }
-
-    fn has_layout(&self) -> bool {
-        self.0.has_layout()
-    }
-
-    fn vector_rf(&self) -> bool {
-        self.0.vector_rf()
-    }
-}
-
-impl PartialEq<CpuMemory> for Avx512Memory {
-    fn eq(&self, other: &CpuMemory) -> bool {
-        self.0 == *other
-    }
-}
-
-impl Display for Avx512Memory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<CpuMemory> for Avx512Memory {
-    fn from(memory: CpuMemory) -> Self {
-        Self(memory)
-    }
-}
-
-impl From<Avx512Memory> for CpuMemory {
-    fn from(val: Avx512Memory) -> Self {
-        val.0
-    }
-}
-
-pub struct Avx512MemoryBimap;
-
-impl BiMap for Avx512MemoryBimap {
-    type Domain = Avx512Memory;
-    type Codomain = u8;
-
-    fn apply(&self, memory: &Avx512Memory) -> u8 {
-        <CpuMemoryBimap as BiMap>::apply(&CpuMemoryBimap, &memory.0)
-    }
-
-    fn apply_inverse(&self, i: &u8) -> Avx512Memory {
-        Avx512Memory(<CpuMemoryBimap as BiMap>::apply_inverse(&CpuMemoryBimap, i))
-    }
-}
-
-impl CanonicalBimap for Avx512Memory {
-    type Bimap = Avx512MemoryBimap;
-
-    fn bimap() -> Self::Bimap {
-        Avx512MemoryBimap
-    }
 }
 
 #[cfg(test)]

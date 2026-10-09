@@ -41,14 +41,14 @@ fn main() {
     let interleaved = layout![0, 1, 2, 2 oe(16)];
 
     let implementation = spec
-        .cast(0, Dtype::Float32, L1, interleaved.clone(), None)
+        .cast(0, Dtype::Float32, L1, interleaved.clone())
         .subschedule(&[0], |z| {
             z.tile_out(&[1, 1, 16])
                 .move_param(0, L1)
-                .move_relayout(0, VRF, row_major, Some(16))
+                .move_relayout(0, VRF, row_major)
                 .subschedule(&[0], |z| z.select(CpuKernel::Assign))
                 .subschedule(&[1], |z| {
-                    z.move_relayout(1, VRF, interleaved.clone(), Some(8))
+                    z.move_relayout(1, VRF, interleaved.clone())
                         .subschedule(&[0], |z| z.select(CpuKernel::VectorInterleaveBf16F32))
                         .subschedule(&[1], |z| z.select(CpuKernel::Assign))
                 })

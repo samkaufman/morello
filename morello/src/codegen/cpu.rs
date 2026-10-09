@@ -25,9 +25,8 @@ use crate::shape;
 use crate::spec::OperandDirection;
 use crate::target::{
     cpu::{
-        broadcastvecmult_side, divide_vec_scalar_reciprocal_vector_size, softmax_vector_size,
-        vector_accum_count, vector_max_loop_properties, DOT_PRODUCT_BF16_STRIP_SIZE,
-        DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
+        broadcastvecmult_side, softmax_vector_size, vector_accum_count, vector_max_loop_properties,
+        DOT_PRODUCT_BF16_STRIP_SIZE, DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
     Avx512Kernel, CpuKernel, CpuMemory, CpuTarget, Kernel, Target, TargetId,
 };
@@ -977,43 +976,61 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         Ok(())
     }
 
+    /// Emits one accumulate step of [CpuKernel::BroadcastVecMultAddBf16F32] on AVX512.
+    ///
+    /// This is an RHS load and widen, a broadcast of the scalar LHS, and the `dpbf16` itself.
+    ///
+    /// The step computes `output[i] += scalar_bf16 * rhs_bf16[i]` across the lanes of one F32
+    /// vector register. `vector_size_f32` is that lane count, and picks the intrinsic: 8 lanes
+    /// use `_mm256_dpbf16_ps`, 16 use `_mm512_dpbf16_ps`.
+    ///
+    /// Callers spanning a wider volume emit one step per register, repeating the scalar load and
+    /// broadcast in each; Clang CSEs those down to one `vpbroadcastw` for the whole sequence.
+    ///
+    /// # Example Target Code
+    ///
+    /// Example emitted code for `vector_size_f32` of 16:
+    ///
+    /// ```c
+    /// __m256i v0 = _mm256_loadu_si256((const __m256i *)(&rhs[0]));
+    /// __m512i v1 = _mm512_cvtepu16_epi32(v0);
+    /// __m512bh v2 = (__m512bh)_mm512_set1_epi16(s);
+    /// acc = (vf32_16)_mm512_dpbf16_ps((__m512)acc, v2, (__m512bh)v1);
+    /// ```
+    ///
+    /// The same step for `vector_size_f32` of 8:
+    ///
+    /// ```c
+    /// __m128i v0 = _mm_loadu_si128((const __m128i *)(&rhs[0]));
+    /// __m256i v1 = _mm256_cvtepu16_epi32(v0);
+    /// __m256bh v2 = (__m256bh)_mm256_set1_epi16(s);
+    /// acc = (vf32_8)_mm256_dpbf16_ps((__m256)acc, v2, (__m256bh)v1);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `vector_size_f32` is 8 or 16.
     #[allow(clippy::too_many_arguments)]
     fn emit_avx512_bf16_broadcast_vec_mult_add<W: Write>(
         &mut self,
         w: &mut W,
         output_expr: &str,
         source_ptr: &str,
-        source_vec_expr: Option<&str>,
-        scalar_bits: &str,
-        vector_size_bf16: u32,
+        scalar_bits_name: &str,
+        vector_size_f32: u32,
         vector_type_name: &str,
         depth: usize,
     ) -> fmt::Result {
-        // Use the BF16 dot-product instruction directly for:
-        //   output[i] += scalar_bf16 * rhs_bf16[i]
-        //
-        // The RHS BF16 lanes are zero-extended into 32-bit slots, which reinterprets as BF16 pairs
-        // [rhs_i, 0]. The scalar is broadcast to all BF16 lanes, so each dpbf16 lane computes
-        // scalar * rhs_i + scalar * 0. This avoids separate BF16->F32 conversions and avoids the
-        // manual shift/blend unpack sequence that can crash Clang's x86 instruction selector.
-        match vector_size_bf16 {
+        match vector_size_f32 {
             8 => {
                 let rhs_raw_name = self.namer.fresh_name();
                 let rhs_pairs_name = self.namer.fresh_name();
                 let scalar_vec_name = self.namer.fresh_name();
-                if let Some(source_vec_expr) = source_vec_expr {
-                    writeln!(
-                        w,
-                        "{}__m128i {rhs_raw_name} = {source_vec_expr};",
-                        indent(depth),
-                    )?;
-                } else {
-                    writeln!(
-                        w,
-                        "{}__m128i {rhs_raw_name} = _mm_loadu_si128((const __m128i *)({source_ptr}));",
-                        indent(depth),
-                    )?;
-                }
+                writeln!(
+                    w,
+                    "{}__m128i {rhs_raw_name} = _mm_loadu_si128((const __m128i *)({source_ptr}));",
+                    indent(depth),
+                )?;
                 writeln!(
                     w,
                     "{}__m256i {rhs_pairs_name} = _mm256_cvtepu16_epi32({rhs_raw_name});",
@@ -1021,7 +1038,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 )?;
                 writeln!(
                     w,
-                    "{}__m256bh {scalar_vec_name} = (__m256bh)_mm256_set1_epi16({scalar_bits});",
+                    "{}__m256bh {scalar_vec_name} = (__m256bh)_mm256_set1_epi16({scalar_bits_name});",
                     indent(depth),
                 )?;
                 // _mm256_dpbf16_ps requires -mavx512vl
@@ -1035,19 +1052,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 let rhs_raw_name = self.namer.fresh_name();
                 let rhs_pairs_name = self.namer.fresh_name();
                 let scalar_vec_name = self.namer.fresh_name();
-                if let Some(source_vec_expr) = source_vec_expr {
-                    writeln!(
-                        w,
-                        "{}__m256i {rhs_raw_name} = {source_vec_expr};",
-                        indent(depth),
-                    )?;
-                } else {
-                    writeln!(
-                        w,
-                        "{}__m256i {rhs_raw_name} = _mm256_loadu_si256((const __m256i *)({source_ptr}));",
-                        indent(depth),
-                    )?;
-                }
+                writeln!(
+                    w,
+                    "{}__m256i {rhs_raw_name} = _mm256_loadu_si256((const __m256i *)({source_ptr}));",
+                    indent(depth),
+                )?;
                 writeln!(
                     w,
                     "{}__m512i {rhs_pairs_name} = _mm512_cvtepu16_epi32({rhs_raw_name});",
@@ -1055,7 +1064,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 )?;
                 writeln!(
                     w,
-                    "{}__m512bh {scalar_vec_name} = (__m512bh)_mm512_set1_epi16({scalar_bits});",
+                    "{}__m512bh {scalar_vec_name} = (__m512bh)_mm512_set1_epi16({scalar_bits_name});",
                     indent(depth),
                 )?;
                 writeln!(
@@ -2172,9 +2181,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         writeln!(w, "{}{} = (float){};", indent(depth), exprs[1], exprs[0])
                     }
                     Some(CpuKernel::VectorCastBf16F32) => {
-                        let vector_size =
-                            i32::try_from(arguments[1].spec().vector_size().unwrap().get())
-                                .unwrap();
+                        // cvtbf16_fp32_256's out-parameters are `__m256 *`, so each store uses 8
+                        // lanes regardless of the register width of the kernel's destination
+                        // (`arguments[1]`).
+                        let vf8 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
 
                         self.headers.emit_cvtbf16_fp32 = true;
                         writeln!(
@@ -2182,8 +2192,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{}cvtbf16_fp32_256({}, &{}, &{});",
                             indent(depth),
                             self.c_vec_arg(&arguments[0]),
-                            self.c_vec_arg(&arguments[1]),
-                            self.c_vec_arg_add(&arguments[1], vector_size)
+                            self.c_vec_arg_add_typed(&arguments[1], 8, vf8),
+                            self.c_vec_arg_add_typed(&arguments[1], 0, vf8)
                         )
                     }
                     Some(CpuKernel::MemsetZero) => {
@@ -2196,17 +2206,25 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             arguments[0].spec().bytes_used()
                         )
                     }
-                    Some(
-                        cpu_kernel @ (CpuKernel::VectorZero
-                        | CpuKernel::VectorNegInf
-                        | CpuKernel::VectorMin),
-                    ) => {
+                    Some(CpuKernel::VectorZero) => {
                         let exprs = self.c_vec_args(arguments);
                         let dtype = arguments[0].spec().dtype();
                         let volume = arguments[0].spec().volume();
                         let vtype = get_vector(Tgt::vec_types(), dtype, volume);
-                        let (v, c) = match cpu_kernel {
-                            CpuKernel::VectorZero => ("0", "VectorZero"),
+                        writeln!(
+                            w,
+                            "{}{} = ({}){{0}};  /* VectorZero */",
+                            indent(depth),
+                            exprs[0],
+                            vtype.name
+                        )
+                    }
+                    Some(cpu_kernel @ (CpuKernel::VectorNegInf | CpuKernel::VectorMin)) => {
+                        let exprs = self.c_vec_args(arguments);
+                        let dtype = arguments[0].spec().dtype();
+                        let volume = arguments[0].spec().volume();
+                        let vtype = get_vector(Tgt::vec_types(), dtype, volume);
+                        let (value, comment) = match cpu_kernel {
                             CpuKernel::VectorNegInf => {
                                 self.headers.emit_math_include = true;
                                 ("-INFINITY", "VectorNegInf")
@@ -2218,7 +2236,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         };
                         writeln!(
                             w,
-                            "{}{} = ({}){{{v}}};  /* {c} */",
+                            "{}{} = ({value}) - ({}){{}};  /* {comment} */",
                             indent(depth),
                             exprs[0],
                             vtype.name
@@ -2296,36 +2314,36 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     Some(CpuKernel::BroadcastVecMultAddBf16F32) => {
                         let vector_size_bf16 = arguments[1].spec().vector_size().unwrap().get();
+                        let vector_size_f32 = arguments[2].spec().vector_size().unwrap().get();
                         let volume = arguments[1].spec().volume().get();
-                        debug_assert_eq!(volume % vector_size_bf16, 0);
-                        let vector_count = volume / vector_size_bf16;
+                        debug_assert_eq!(vector_size_bf16 % vector_size_f32, 0);
+                        debug_assert_eq!(volume % vector_size_f32, 0);
+                        let vector_count = volume / vector_size_f32;
                         writeln!(w, "{}/* BroadcastVecMultAddBf16F32 */", indent(depth))?;
                         for vector_idx in 0..vector_count {
                             let vector_offset =
-                                i32::try_from(vector_idx * vector_size_bf16).unwrap();
+                                i32::try_from(vector_idx * vector_size_f32).unwrap();
                             let vfc = get_vector(
                                 Tgt::vec_types(),
                                 Dtype::Float32,
-                                vector_size_bf16.try_into().unwrap(),
+                                vector_size_f32.try_into().unwrap(),
+                            );
+                            let rhs_step_type = get_vector(
+                                Tgt::vec_types(),
+                                Dtype::Bfloat16,
+                                vector_size_f32.try_into().unwrap(),
+                            );
+                            let broadcast_ptr = format!(
+                                "&{}",
+                                self.c_vec_arg_add_typed(
+                                    &arguments[1],
+                                    vector_offset,
+                                    rhs_step_type
+                                )
                             );
 
                             if Tgt::target_id() == TargetId::Avx512 {
                                 let scalar_ptr = self.c_ptr_arg(&arguments[0]);
-
-                                let (broadcast_buffer, broadcast_base_expr) =
-                                    self.c_arg_parts_add(&arguments[1], vector_offset);
-                                let broadcast_ptr =
-                                    self.c_index_ptr(&broadcast_buffer, &broadcast_base_expr, None);
-                                let broadcast_vec_expr =
-                                    if matches!(&broadcast_buffer, CBuffer::RegVars { .. }) {
-                                        Some(self.c_index_vec(
-                                            &broadcast_buffer,
-                                            &broadcast_base_expr,
-                                            None,
-                                        ))
-                                    } else {
-                                        None
-                                    };
 
                                 let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
 
@@ -2343,20 +2361,16 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     w,
                                     &output_expr,
                                     &broadcast_ptr,
-                                    broadcast_vec_expr.as_deref(),
                                     &scalar_name,
-                                    vector_size_bf16,
+                                    vector_size_f32,
                                     vfc.name,
                                     depth,
                                 )?;
 
                                 self.headers.vector_type_defs.insert(vfc);
                             } else {
-                                let exprs = [
-                                    self.c_ptr_arg(&arguments[0]),
-                                    self.c_vec_arg_add(&arguments[1], vector_offset),
-                                    self.c_vec_arg_add(&arguments[2], vector_offset),
-                                ];
+                                let scalar_ptr = self.c_ptr_arg(&arguments[0]);
+                                let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
 
                                 let even_name = self.namer.fresh_name();
                                 let odd_name = self.namer.fresh_name();
@@ -2371,26 +2385,26 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
                                     indent(depth),
                                     scalar_name,
-                                    exprs[0]
+                                    scalar_ptr
                                 )?;
 
-                                let (shift_fn, _, _, _) = vec_func_names(vector_size_bf16);
+                                let (shift_fn, _, _, _) = vec_func_names(vector_size_f32);
                                 let (shift_fn_out, _, _, broadcast16_out) =
-                                    vec_func_names(vector_size_bf16 * 2);
+                                    vec_func_names(vector_size_f32 * 2);
 
                                 let vf8 = get_vector(
                                     Tgt::vec_types(),
                                     Dtype::Float32,
-                                    (vector_size_bf16 / 2).try_into().unwrap(),
+                                    (vector_size_f32 / 2).try_into().unwrap(),
                                 );
                                 writeln!(
                                     w,
-                                    "{0}{1} {2} = ({1}){shift_fn}(*({3}*)(&{4}), {5});",
+                                    "{0}{1} {2} = ({1}){shift_fn}(*({3}*)({4}), {5});",
                                     indent(depth),
                                     vf8.name,
                                     odd_name,
                                     vf8.native_type_name,
-                                    exprs[1],
+                                    broadcast_ptr,
                                     16
                                 )?;
                                 writeln!(
@@ -2400,10 +2414,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     vf8.name,
                                     even_name,
                                     bf16_even_lanes_expr(
-                                        vector_size_bf16,
+                                        vector_size_f32,
                                         vf8.name,
                                         vf8.native_type_name,
-                                        &exprs[1],
+                                        &broadcast_ptr,
                                     ),
                                 )?;
 
@@ -2415,7 +2429,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     concat_name,
                                     odd_name,
                                     even_name,
-                                    interleave_vector_halves_shuffle_indices(vector_size_bf16),
+                                    interleave_vector_halves_shuffle_indices(vector_size_f32),
                                 )?;
 
                                 writeln!(
@@ -2430,7 +2444,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     w,
                                     "{}{} += {} * {};",
                                     indent(depth),
-                                    exprs[2],
+                                    output_expr,
                                     broad_name,
                                     concat_name
                                 )?;
@@ -2491,11 +2505,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     Some(CpuKernel::DotProductLoop) => {
                         self.headers.emit_sum8 = true;
 
-                        let exprs = [
-                            self.c_ptr_arg(&arguments[0]),
-                            self.c_ptr_arg(&arguments[1]),
-                            self.c_value_arg(&arguments[2]),
-                        ];
+                        let lhs_ptr = self.c_ptr_arg(&arguments[0]);
+                        let rhs_ptr = self.c_ptr_arg(&arguments[1]);
+                        let out = self.c_value_arg(&arguments[2]);
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE, 0);
@@ -2542,7 +2554,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
                                 lhs_vec,
-                                exprs[0],
+                                lhs_ptr,
                                 step_idx_name,
                                 i * DOT_PRODUCT_STRIP_SIZE.get() as usize
                             )?;
@@ -2551,7 +2563,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
                                 rhs_vec,
-                                exprs[1],
+                                rhs_ptr,
                                 step_idx_name,
                                 i * DOT_PRODUCT_STRIP_SIZE.get() as usize
                             )?;
@@ -2567,13 +2579,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         writeln!(w, "{}}}", indent(depth))?;
                         writeln!(
                             w,
-                            "{}{} = sum8({});",
+                            "{}{} += sum8({});",
                             indent(depth),
-                            exprs[2],
+                            out,
                             vector_accum_names[0]
                         )?;
                         for accum_name in vector_accum_names.iter().skip(1) {
-                            writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
+                            writeln!(w, "{}{} += sum8({});", indent(depth), out, accum_name)?;
                         }
                         Ok(())
                     }
@@ -2586,7 +2598,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
-                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();
@@ -2626,7 +2638,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             step_idx_name,
-                            lhs_spec.shape()[1],
+                            lhs_spec.shape()[2],
                             VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (i, (_, even_lhs_name, odd_lhs_name, even_rhs_name, odd_rhs_name)) in
@@ -2671,7 +2683,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                         16,
                                         vf32.name,
                                         vf32.native_type_name,
-                                        &compressed_name,
+                                        &format!("&{compressed_name}"),
                                     ),
                                 )?;
                             }
@@ -2706,7 +2718,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
-                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();
@@ -2744,31 +2756,29 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             step_idx_name,
-                            lhs_spec.shape()[1],
+                            lhs_spec.shape()[2],
                             VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
-                        for (
-                            i,
-                            (_, upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name),
-                        ) in loop_names.iter().enumerate()
+                        for (i, (_, low_lhs_name, high_lhs_name, low_rhs_name, high_rhs_name)) in
+                            loop_names.iter().enumerate()
                         {
                             // Load already-dequantized f32 lhs into a pair of vectors.
-                            writeln!(w, "{0}{1} {upper_lhs_name};", indent(depth + 1), vf32.name)?;
+                            writeln!(w, "{0}{1} {low_lhs_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
                                 "{0}__builtin_memcpy(&{1}, {2} + {3} + {4}, sizeof({1}));",
                                 indent(depth + 1),
-                                upper_lhs_name,
+                                low_lhs_name,
                                 exprs[0],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
-                            writeln!(w, "{0}{1} {lower_lhs_name};", indent(depth + 1), vf32.name)?;
+                            writeln!(w, "{0}{1} {high_lhs_name};", indent(depth + 1), vf32.name)?;
                             writeln!(
                                 w,
                                 "{0}__builtin_memcpy(&{1}, {2} + {3} + {4} + 8, sizeof({1}));",
                                 indent(depth + 1),
-                                lower_lhs_name,
+                                high_lhs_name,
                                 exprs[0],
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
@@ -2786,19 +2796,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 step_idx_name,
                                 i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
                             )?;
-                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, upper_rhs_name)?;
-                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, lower_rhs_name)?;
+                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, low_rhs_name)?;
+                            writeln!(w, "{}{} {};", indent(depth + 1), vf32.name, high_rhs_name)?;
                             writeln!(
                                 w,
-                                "{}cvtbf16_fp32_256({compressed_name}, &{upper_rhs_name}, &{lower_rhs_name});",
+                                "{}cvtbf16_fp32_256({compressed_name}, &{high_rhs_name}, &{low_rhs_name});",
                                 indent(depth + 1),
                             )?;
 
                             for (lhs, rhs, a) in [
-                                (upper_lhs_name, upper_rhs_name, &loop_names[i].0),
+                                (low_lhs_name, low_rhs_name, &loop_names[i].0),
                                 (
-                                    lower_lhs_name,
-                                    lower_rhs_name,
+                                    high_lhs_name,
+                                    high_rhs_name,
                                     &loop_names[(i + 2) % loop_names.len()].0,
                                 ),
                             ] {
@@ -2863,7 +2873,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             step_idx_name,
-                            lhs_spec.shape()[1],
+                            lhs_spec.shape()[2],
                             VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (
@@ -2926,7 +2936,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     16,
                                     vf32.name,
                                     vf32.native_type_name,
-                                    &compressed_name,
+                                    &format!("&{compressed_name}"),
                                 ),
                             )?;
 
@@ -2952,6 +2962,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         Ok(())
                     }
                     Some(CpuKernel::PhysicalTransposeByte128) => {
+                        // Each half is typed by its own argument's dtype: the source and destination
+                        // may differ in signedness (u8 vs. i8).
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),
                             (&arguments[0], 16),
@@ -2959,7 +2971,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             (&arguments[1], 16),
                         ]
                         .into_iter()
-                        .map(|(arg, idx)| self.c_vec_arg_add(arg, idx))
+                        .map(|(arg, idx)| {
+                            let byte_vec =
+                                get_vector(Tgt::vec_types(), arg.spec().dtype(), nz!(16u32));
+                            self.c_vec_arg_add_typed(arg, idx, byte_vec)
+                        })
                         .collect::<Vec<_>>()
                         .try_into()
                         .unwrap();
@@ -2984,6 +3000,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     Some(CpuKernel::PhysicalTransposeByte256) => {
                         use CpuMemory::VRF;
 
+                        let intermediate_dtype = arguments[0].spec().dtype();
+                        // Each half is typed by its own argument's dtype: the source and destination
+                        // may differ in signedness (u8 vs. i8).
                         let [in_lower, in_higher, out_lower, out_higher]: [String; 4] = [
                             (&arguments[0], 0),
                             (&arguments[0], 32),
@@ -2991,12 +3010,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             (&arguments[1], 32),
                         ]
                         .into_iter()
-                        .map(|(arg, idx)| self.c_vec_arg_add(arg, idx))
+                        .map(|(arg, idx)| {
+                            let byte_vec =
+                                get_vector(Tgt::vec_types(), arg.spec().dtype(), nz!(32u32));
+                            self.c_vec_arg_add_typed(arg, idx, byte_vec)
+                        })
                         .collect::<Vec<_>>()
                         .try_into()
                         .unwrap();
 
-                        let intermediate_dtype = arguments[0].spec().dtype();
                         let intermediate_lower = self.make_buffer(
                             None,
                             &shape![1, 32],
@@ -3048,13 +3070,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )
                     }
                     Some(CpuKernel::VectorInterleaveBf16F32) => {
-                        let src_name = self.c_vec_arg(&arguments[0]);
-                        let even_name = self.c_vec_arg(&arguments[1]);
-                        let odd_name = self.c_vec_arg_add(&arguments[1], 8);
-
                         let (shift_fn, _, _, _) = vec_func_names(16);
 
                         let vf8 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
+                        let src_name = self.c_vec_arg(&arguments[0]);
+                        let even_name = self.c_vec_arg_add_typed(&arguments[1], 0, vf8);
+                        let odd_name = self.c_vec_arg_add_typed(&arguments[1], 8, vf8);
                         writeln!(
                             w,
                             "{0}{2} = ({1}){shift_fn}(*({3}*)(&{4}), 16);",
@@ -3069,7 +3090,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{}{} = {};",
                             indent(depth),
                             odd_name,
-                            bf16_even_lanes_expr(16, vf8.name, vf8.native_type_name, &src_name),
+                            bf16_even_lanes_expr(
+                                16,
+                                vf8.name,
+                                vf8.native_type_name,
+                                &format!("&{src_name}"),
+                            ),
                         )?;
                         Ok(())
                     }
@@ -3148,9 +3174,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 .unwrap()
                         };
 
-                        let vector_size =
-                            divide_vec_scalar_reciprocal_vector_size::<Tgt>(arguments[0].spec())
-                                .unwrap();
+                        let vector_size = Tgt::vector_size_for(
+                            arguments[0].spec().dtype(),
+                            arguments[0].spec().volume(),
+                        )
+                        .unwrap();
                         let vector_type =
                             get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
                         self.headers.vector_type_defs.insert(vector_type);
@@ -3487,7 +3515,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// Use this helper when emitted C should pass an address or perform pointer arithmetic. For
     /// heap, workspace, and pointer-backed buffers it returns expressions such as `buf + i`; for
     /// stack or register-backed buffers it returns address expressions such as `&buf[i]` or
-    /// `&v012[1]`.
+    /// `&v012`.
+    ///
+    /// This function should not be used to address within vector registers. Instead, address the
+    /// lanes as a sub-vector with [`Self::c_vec_arg_add_typed`].
     fn c_ptr_arg<A>(&self, arg: &A) -> String
     where
         A: View<Tgt = Tgt>,
@@ -3511,9 +3542,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// Returns a C vector-register expression for `arg`.
     ///
     /// Use this helper when emitted C should name the vector register that stores the argument.
-    /// The expression must point at the start of a register vector; otherwise [`Self::c_index_vec`]
-    /// panics. It returns expressions such as `v012`, not memory expressions such as `buf[i]`.
-    fn c_vec_arg<A>(&self, arg: &A) -> String
+    ///
+    /// The expression has `arg`'s own vector type, derived from its volume. If that is narrower
+    /// than the register holding it (as for a tile of a wider VRF tensor), this returns a
+    /// sub-vector expression such as `((vf32_4 *)(&v012))[1]`.
+    fn c_vec_arg<A>(&mut self, arg: &A) -> String
     where
         A: View<Tgt = Tgt>,
     {
@@ -3524,18 +3557,41 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     ///
     /// Like [`Self::c_vec_arg`], but adds `elem_offset` to the flattened element index before
     /// selecting the vector register.
-    fn c_vec_arg_add<A>(&self, arg: &A, elem_offset: i32) -> String
+    fn c_vec_arg_add<A>(&mut self, arg: &A, elem_offset: i32) -> String
     where
         A: View<Tgt = Tgt>,
     {
         let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
-        self.c_index_vec(&buffer, &expr, None)
+        let spec = arg.spec();
+        let vec_type = spec
+            .vector_size()
+            .map(|vector_size| get_vector(Tgt::vec_types(), spec.dtype(), vector_size));
+        self.c_index_vec(&buffer, &expr, vec_type)
+    }
+
+    /// Like [`Self::c_vec_arg_add`], but returned expressions are of type `vec_type`.
+    ///
+    /// `vec_type` may be narrower than the argument's registers. When it is, the result casts the
+    /// register to an array of `vec_type` and indexes into it. When `vec_type` matches the
+    /// register's width, it returns just the register name (`v012`), as [`Self::c_vec_arg_add`]
+    /// does.
+    fn c_vec_arg_add_typed<A>(
+        &mut self,
+        arg: &A,
+        elem_offset: i32,
+        vec_type: &'static VecType,
+    ) -> String
+    where
+        A: View<Tgt = Tgt>,
+    {
+        let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
+        self.c_index_vec(&buffer, &expr, Some(vec_type))
     }
 
     /// Returns C vector-register expressions for each argument.
     ///
     /// Like [`Self::c_vec_arg`], but maps over a full argument list.
-    fn c_vec_args<A>(&self, arguments: &[A]) -> Vec<String>
+    fn c_vec_args<A>(&mut self, arguments: &[A]) -> Vec<String>
     where
         A: View<Tgt = Tgt>,
     {
@@ -3597,15 +3653,18 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
+    /// Returns the C expression for the vector at `expr` in register buffer `buffer`.
+    ///
+    /// With `vec_type` `None` or as wide as the register, this is the bare register name. A
+    /// narrower `vec_type` yields an aligned sub-vector cast like `((vf32_8 *)(&v012))[1]` (see
+    /// [`Self::c_vec_arg_add_typed`]) and records its typedef, hence `&mut self`. Panics for
+    /// non-register buffers, misaligned offsets, or a `vec_type` of another dtype or wider.
     fn c_index_vec(
-        &self,
+        &mut self,
         buffer: &CBuffer,
         expr: &NonAffineExpr<BufferVar>,
-        reinterpret: Option<String>,
+        vec_type: Option<&'static VecType>,
     ) -> String {
-        // self is essentially unused, but included for consistency with c_index.
-        #![allow(clippy::only_used_in_recursion)]
-
         match buffer {
             CBuffer::HeapArray { .. }
             | CBuffer::WorkspaceSlice { .. }
@@ -3613,17 +3672,25 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             | CBuffer::Ptr { .. } => {
                 unimplemented!()
             }
-            CBuffer::RegVars { .. } => {
+            CBuffer::RegVars { inner_vecs } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (name, vec_offset) = buffer.inner_reg_from_expr(&subbed_expr);
-                debug_assert!(vec_offset.as_constant().is_some());
-                if vec_offset != 0 {
-                    panic!("vec_offset must be 0, but was: {vec_offset:?}");
-                }
-                if reinterpret.is_some() {
-                    unimplemented!();
-                }
-                name.clone()
+                let Either::Right(reg_type) = inner_vecs[0].1 else {
+                    panic!("{name} is not a vector register");
+                };
+                let Some(sub_type) = vec_type.filter(|t| *t != reg_type) else {
+                    assert_eq!(vec_offset, 0, "vec_offset must be 0");
+                    return name;
+                };
+                assert_eq!(sub_type.dtype, reg_type.dtype);
+                assert!(sub_type.value_cnt < reg_type.value_cnt);
+                self.headers.vector_type_defs.insert(sub_type);
+                let lanes = i32::from(sub_type.value_cnt);
+                let lane = vec_offset
+                    .as_constant()
+                    .expect("register offset should be constant");
+                assert_eq!(lane % lanes, 0);
+                format!("(({} *)(&{name}))[{}]", sub_type.name, lane / lanes)
             }
         }
     }
@@ -3719,7 +3786,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// backing buffer in `name_env`.
     ///
     /// Panics if `tensor` is not in vector registers or if its backing buffer has no name.
-    fn c_vec_exprs_for_tensor(&self, tensor: &ViewE<Tgt>) -> Vec<String> {
+    fn c_vec_exprs_for_tensor(&mut self, tensor: &ViewE<Tgt>) -> Vec<String> {
         let vector_volume = tensor.spec().volume().get();
         let vector_size = tensor
             .spec()
@@ -3740,20 +3807,17 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// that header (e.g., float.h).
     fn c_min_const_for_dtype(&mut self, dt: Dtype) -> &'static str {
         match dt {
-            Dtype::Uint8 => "UINT8_MIN",
+            Dtype::Uint8 => "0",
             Dtype::Sint8 => "INT8_MIN",
-            Dtype::Uint16 => "UINT16_MIN",
+            Dtype::Uint16 => "0",
             Dtype::Sint16 => "INT16_MIN",
-            Dtype::Uint32 => "UINT32_MIN",
+            Dtype::Uint32 => "0",
             Dtype::Sint32 => "INT32_MIN",
             Dtype::Float32 => {
                 self.headers.emit_float_include = true;
                 "-FLT_MAX"
             }
-            Dtype::Bfloat16 => {
-                self.headers.emit_float_include = true;
-                "(__bf16)(-FLT_MAX)"
-            }
+            Dtype::Bfloat16 => "(__bf16)(-0x1.fep127f)",
         }
     }
 
@@ -3819,22 +3883,22 @@ fn interleave_vector_halves_shuffle_indices(vector_size: u32) -> String {
         .join(", ")
 }
 
-/// Returns a vector expression that keeps bf16 values from even logical lanes
-/// and zeros the odd lanes before the result is reinterpreted as f32.
+/// Returns a vector expression that keeps bf16 values from even logical lanes of the vector at
+/// `input_ptr` and zeros the odd lanes before the result is reinterpreted as f32.
 fn bf16_even_lanes_expr(
     vector_size_bf16: u32,
     vector_type_name: &str,
     native_type_name: &str,
-    input_expr: &str,
+    input_ptr: &str,
 ) -> String {
     let (_, blend_fn, zero_fn, _) = vec_func_names(vector_size_bf16);
     if vector_size_bf16 == 32 {
         format!(
-            "({vector_type_name}){blend_fn}((__mmask32)0xAAAAAAAAu, {zero_fn}(), *({native_type_name}*)(&{input_expr}))"
+            "({vector_type_name}){blend_fn}((__mmask32)0xAAAAAAAAu, {zero_fn}(), *({native_type_name}*)({input_ptr}))"
         )
     } else {
         format!(
-            "({vector_type_name}){blend_fn}({zero_fn}(), *({native_type_name}*)(&{input_expr}), 0xAA)"
+            "({vector_type_name}){blend_fn}({zero_fn}(), *({native_type_name}*)({input_ptr}), 0xAA)"
         )
     }
 }
@@ -4051,7 +4115,6 @@ mod tests {
             k: DimSize::new(4).unwrap(),
             partials_level: CpuMemory::L1,
             partials_layout: row_major(&partial_shape),
-            partials_vector_size: None,
         }
         .apply(&spec)
         .expect("parallel split should apply");
@@ -4096,7 +4159,6 @@ mod tests {
             .map(|shape| TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout: row_major(&shape),
-                vector_size: None,
             })
             .collect();
         let mut spec = Spec(

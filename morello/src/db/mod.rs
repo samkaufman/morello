@@ -927,7 +927,7 @@ impl FilesDatabase {
                 PrimitiveBasicsBimap {
                     tile_scale: self.tile_scale,
                 },
-                |shape: &[DimSize], dtype| TensorSpecAuxNonDepBimap::new(shape, dtype),
+                |shape: &[DimSize], _| TensorSpecAuxNonDepBimap::new(shape),
             ),
             memory_limits_bimap: MemoryLimitsBimap::default(),
         };

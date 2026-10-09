@@ -6,7 +6,7 @@ use crate::imp::{Impl, ImplNode};
 use crate::memorylimits::{MemoryAllocation, MemoryLimits};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
-use crate::tensorspec::{TensorSpec, TensorSpecAux};
+use crate::tensorspec::{CanonicalizeError, TensorSpec, TensorSpecAux};
 
 use crate::views::{Param, Tensor, TileError, View, ViewE};
 use serde::{Deserialize, Serialize};
@@ -186,8 +186,7 @@ pub enum NotApplicableReason {
     LevelPreventedParallel,
     LayoutIncompatible,
     SelfMove,
-    VectorSizeInvalid,
-    VectorSizeVolumeIncompatible,
+    NoVectorSizeForVolume,
     MultipleOutputs,
     Other(Option<&'static str>),
 }
@@ -493,7 +492,7 @@ impl Display for NotApplicableReason {
                 write!(f, "Spec has a non-parallel-tileable memory")
             }
             NotApplicableReason::LayoutIncompatible => {
-                write!(f, "Layout does not apply to tile size")
+                write!(f, "Layout does not apply to tensor shape")
             }
             NotApplicableReason::SelfMove => {
                 write!(
@@ -501,16 +500,10 @@ impl Display for NotApplicableReason {
                     "Source and destination TensorSpecs were equal after canonicalization"
                 )
             }
-            NotApplicableReason::VectorSizeInvalid => {
+            NotApplicableReason::NoVectorSizeForVolume => {
                 write!(
                     f,
-                    "Target does not support the specified vector size for this data type"
-                )
-            }
-            NotApplicableReason::VectorSizeVolumeIncompatible => {
-                write!(
-                    f,
-                    "Tensor volume is not compatible with the specified vector size"
+                    "No vector size for the tensor's dtype divides its volume"
                 )
             }
             NotApplicableReason::MultipleOutputs => {
@@ -520,6 +513,15 @@ impl Display for NotApplicableReason {
             NotApplicableReason::Other(None) => write!(f, "Unknown reason"),
         }
     }
+}
+
+/// Converts a [CanonicalizeError] from building or canonicalizing a [TensorSpec] into an
+/// [ApplyError].
+fn tensorspec_error_to_apply_err(error: CanonicalizeError) -> ApplyError {
+    ApplyError::NotApplicable(match error {
+        CanonicalizeError::LayoutError(_) => NotApplicableReason::LayoutIncompatible,
+        CanonicalizeError::NoVectorSizeForVolume => NotApplicableReason::NoVectorSizeForVolume,
+    })
 }
 
 /// Returns applications of Zeroes corresponding to the outputs of the given Spec.
@@ -737,6 +739,9 @@ fn tile_to_apply_err(err: TileError) -> ApplyError {
     match err {
         TileError::LayoutIncompatible(_) => {
             ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible)
+        }
+        TileError::VectorSizeChanged => {
+            ApplyError::NotApplicable(NotApplicableReason::TileShapeInvalid)
         }
     }
 }

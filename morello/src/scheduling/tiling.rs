@@ -202,6 +202,11 @@ impl<Tgt: Target> ActionT<Tgt> for TileOut {
 
         let shapes = basics.parameter_shapes();
         for ((old, shape), aux) in old_params.iter().zip(shapes).zip(auxes) {
+            if !old.tile_keeps_vector_size(&shape) {
+                return Err(ApplyError::NotApplicable(
+                    NotApplicableReason::TileShapeInvalid,
+                ));
+            }
             if !old.memory().has_layout() {
                 continue;
             }
@@ -270,6 +275,7 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
 
                     let main_lhs_shape = smallvec![lhs.shape()[0], lhs.shape()[1], self.k];
                     let main_rhs_shape = smallvec![rhs.shape()[0], self.k, rhs.shape()[2]];
+
                     let tiles = vec![
                         LoopTile {
                             parameter_index: 0,
@@ -515,6 +521,11 @@ impl<Tgt: Target> ActionT<Tgt> for Split {
 
         let shapes = basics.parameter_shapes();
         for ((old, shape), aux) in old_params.iter().zip(shapes).zip(auxes) {
+            if !old.tile_keeps_vector_size(&shape) {
+                return Err(ApplyError::NotApplicable(
+                    NotApplicableReason::TileShapeInvalid,
+                ));
+            }
             if !old.memory().has_layout() {
                 continue;
             }
@@ -979,6 +990,7 @@ fn create_tile_out_boundary_regions<Tgt: Target>(
                 ),
             ));
         }
+
         boundary_tiles.push((
             u8::try_from(output_index).unwrap(),
             convert_tile_to_boundarytile(
@@ -1312,7 +1324,6 @@ fn split_head_matmul_specs<Tgt: Target>(
     let lhs_aux = TensorSpecAux {
         memory: Tgt::default_memory(),
         layout: row_major(&lhs_shape),
-        vector_size: None,
     };
 
     tail_operand_auxes.push(lhs_aux.clone());
@@ -1552,6 +1563,7 @@ mod tests {
     use crate::tensorspec::{TensorSpec, TensorSpecArbMaxShape, TensorSpecAux};
     use crate::views::{View, ViewE};
     use crate::{lspec, shape, spec};
+    use itertools::Itertools;
     use nonzero::nonzero as nz;
     use proptest::prelude::*;
     use std::num::NonZeroU32;
@@ -1599,22 +1611,18 @@ mod tests {
             TensorSpecAux {
                 memory: CpuMemory::L1,
                 layout: row_major(&shape![1, 5, 2, 2]),
-                vector_size: None,
             },
             TensorSpecAux {
                 memory: CpuMemory::L1,
                 layout: row_major(&shape![1, 6, 4, 2]),
-                vector_size: None,
             },
             TensorSpecAux {
                 memory: CpuMemory::RF,
                 layout: row_major(&shape![5, 6, 3, 1]),
-                vector_size: None,
             },
             TensorSpecAux {
                 memory: CpuMemory::L1,
                 layout: row_major(&shape![1, 5, 2, 2]),
-                vector_size: None,
             },
         ];
         let compose_spec = Spec(
@@ -1752,8 +1760,8 @@ mod tests {
     fn test_tile_out_within_vector_register_disallowed() {
         let mut spec: Spec<Avx2Target> = spec!(Move(
             [64, 1],
-            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)], 8),
-            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)], 8)
+            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)]),
+            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)])
         ));
         spec.canonicalize().expect("spec should canonicalize");
 
@@ -1805,7 +1813,7 @@ mod tests {
         let mut spec: Spec<Avx2Target> = spec!(Move(
             [64, 1],
             (f32, CpuMemory::L1, crate::layout![0, 1, 0 p(8)]),
-            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)], 8)
+            (f32, CpuMemory::VRF, crate::layout![0, 1, 0 p(8)])
         ));
         spec.canonicalize().expect("spec should canonicalize");
 
@@ -1840,7 +1848,6 @@ mod tests {
                     TensorSpecAux {
                         memory: CpuMemory::GL,
                         layout: row_major(&shape![4, 8, 16]),
-                        vector_size: None,
                     };
                     4
                 ],
@@ -1935,25 +1942,21 @@ mod tests {
             TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout: row_major(&matmul_final.parameter_shape(1)),
-                vector_size: None,
             },
             // for matmul_initial's parameter 0
             TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout: row_major(&matmul_initial.parameter_shape(0)),
-                vector_size: None,
             },
             // for matmul_initial's parameter 1
             TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout: row_major(&matmul_initial.parameter_shape(1)),
-                vector_size: None,
             },
             // for matmul_final's parameter 2 (final output)
             TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout: row_major(&matmul_final.parameter_shape(2)),
-                vector_size: None,
             },
         ];
         let mut compose_spec = Spec(
@@ -2013,9 +2016,7 @@ mod tests {
             let shape = tspec.shape().to_vec();
             let original_aux = tspec.aux.clone();
             update_aux_for_tiling(&mut tspec.aux, &shape, &shape);
-            prop_assert_eq!(tspec.aux.layout, original_aux.layout);
-            prop_assert_eq!(tspec.aux.memory, original_aux.memory);
-            prop_assert_eq!(tspec.aux.vector_size, original_aux.vector_size);
+            prop_assert_eq!(tspec.aux, original_aux);
         }
 
         /// Test that any tiling operation (TileOut or Split) producing boundary regions results in SpecApps
@@ -2125,6 +2126,28 @@ mod tests {
                 }
                 Ok(_) => unreachable!(),
                 Err(_) => {} // skip apply failures
+            }
+        }
+
+        /// Test that every parameter of every loop body has the vector size of the parameter it
+        /// comes from.
+        #[test]
+        fn test_tiling_keeps_vrf_vector_sizes(
+            (spec, action) in arb_boundary_tiling_action_for(arb_canonical_spec_with_vrf_parameters())
+        ) {
+            let Ok(ImplNode::Loop(loop_impl)) = action.apply(&spec) else {
+                return Ok(());
+            };
+            for body in &loop_impl.bodies {
+                let ImplNode::SpecApp(SpecApp(body_spec, args)) = body else {
+                    continue;
+                };
+                let parent_params = spec.0.parameters();
+                let body_params = body_spec.0.parameters();
+                prop_assert_eq!(args.len(), parent_params.len());
+                for (body_param, parent_param) in body_params.iter().zip_eq(&parent_params) {
+                    prop_assert_eq!(body_param.vector_size(), parent_param.vector_size());
+                }
             }
         }
 
@@ -2280,13 +2303,11 @@ mod tests {
             .map(|shape| TensorSpecAux {
                 memory: GL,
                 layout: row_major(shape),
-                vector_size: None,
             })
             .collect::<Vec<_>>();
         operand_auxes[3] = TensorSpecAux {
             memory: CpuMemory::VRF,
             layout: row_major(&operand_shapes[3]),
-            vector_size: Some(nz!(8u32)),
         };
         let mut spec = Spec(
             LogicalSpec::Compose {
@@ -2359,17 +2380,14 @@ mod tests {
         let lhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
             memory: GL,
             layout: row_major(&shape![1, 4, 8]),
-            vector_size: None,
         };
         let rhs_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
             memory: GL,
             layout: row_major(&shape![1, 8, 4]),
-            vector_size: None,
         };
         let out_aux: TensorSpecAux<Avx2Target> = TensorSpecAux {
             memory: GL,
             layout: row_major(&shape![1, 4, 4]),
-            vector_size: None,
         };
 
         let mut compose_spec = Spec(
@@ -2575,8 +2593,29 @@ mod tests {
         assert_eq!(gap_result, vec![0b001, 0b100, 0b101]); // OR combinations: 0b001, 0b100, 0b001|0b100
     }
 
-    /// Test that splitting a Matmul produces a nested SpecApp applied to two Tiles and
-    /// a Param.
+    #[test]
+    fn test_split_rejects_boundary_tile_with_different_vrf_vector_size() {
+        use CpuMemory::VRF;
+
+        let spec: Spec<Avx2Target> = spec!(MatmulAccum(
+            [1, 1, 20, 1],
+            (f32, VRF, row_major),
+            (f32, GL, row_major),
+            (f32, GL, row_major),
+            serial
+        ));
+        assert_eq!(spec.0.parameters()[0].vector_size(), Some(nz!(4u32)));
+
+        // Splitting to k=12 yields a loop with an 8-value, 8-lane boundary. This fails because the
+        // main body, with size 12, is covered by 4-value (not 8-value!) vector registers.
+        assert!(matches!(
+            Split { k: nz!(12u32) }.apply(&spec),
+            Err(ApplyError::NotApplicable(
+                NotApplicableReason::TileShapeInvalid
+            ))
+        ));
+    }
+
     #[test]
     fn test_split_apply_yields_tile_bound_specapp() {
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
@@ -2788,7 +2827,14 @@ mod tests {
     /// or Split actions. For other specs, it generates TileOut actions.
     fn arb_spec_and_boundary_tiling_action(
     ) -> impl Strategy<Value = (Spec<Avx2Target>, Action<Avx2Target>)> {
-        arb_canonical_spec::<Avx2Target>(None, None)
+        arb_boundary_tiling_action_for(arb_canonical_spec::<Avx2Target>(None, None))
+    }
+
+    /// Like [arb_spec_and_boundary_tiling_action], but draws Specs from `specs`.
+    fn arb_boundary_tiling_action_for(
+        specs: impl Strategy<Value = Spec<Avx2Target>>,
+    ) -> impl Strategy<Value = (Spec<Avx2Target>, Action<Avx2Target>)> {
+        specs
             .prop_filter("must have unique output", |spec| {
                 spec.0.unique_output_index().is_some()
             })
@@ -2884,6 +2930,35 @@ mod tests {
             })
     }
 
+    /// Generates canonical Specs with a non-empty, random subset of parameters moved into VRF.
+    ///
+    /// [arb_canonical_spec] rarely produces VRF parameters on its own.
+    fn arb_canonical_spec_with_vrf_parameters() -> impl Strategy<Value = Spec<Avx2Target>> {
+        arb_canonical_spec::<Avx2Target>(Some(nz!(32u32)), None)
+            .prop_flat_map(|spec| {
+                let operand_count = spec.0.operand_count();
+                (
+                    Just(spec),
+                    proptest::collection::vec(any::<bool>(), operand_count),
+                )
+            })
+            .prop_filter_map(
+                "must move at least one parameter into VRF and canonicalize",
+                |(mut spec, to_vrf)| {
+                    if !to_vrf.contains(&true) {
+                        return None;
+                    }
+                    let mut parameters = spec.0.parameters();
+                    for (parameter, _) in parameters.iter_mut().zip(&to_vrf).filter(|(_, &v)| v) {
+                        parameter.aux.memory = CpuMemory::VRF;
+                    }
+                    spec.0.replace_io(&parameters);
+                    spec.canonicalize().ok()?;
+                    Some(spec)
+                },
+            )
+    }
+
     fn arb_canonical_matmulaccum() -> impl Strategy<Value = Spec<Avx2Target>> {
         let logical_specs = (
             1u32..=16,
@@ -2901,12 +2976,8 @@ mod tests {
                 let auxes_strategy = basics
                     .parameter_shapes()
                     .into_iter()
-                    .zip(basics.dtypes.iter().copied())
-                    .map(|(shape, dtype)| {
-                        any_with::<TensorSpecAux<Avx2Target>>((
-                            TensorSpecArbMaxShape(shape),
-                            Some(dtype),
-                        ))
+                    .map(|shape| {
+                        any_with::<TensorSpecAux<Avx2Target>>(TensorSpecArbMaxShape(shape))
                     })
                     .collect::<Vec<_>>();
                 (Just(basics), auxes_strategy, any::<bool>())

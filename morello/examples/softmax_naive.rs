@@ -39,7 +39,6 @@ fn main() {
             .map(|layout| TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout,
-                vector_size: None,
             })
             .collect(),
         true,
@@ -53,7 +52,7 @@ fn main() {
         // Tile across the batch dimension. (We cannot tile across the scan dimension.)
         .tile_out(&[1, SIZE.get()])
         // Split into sub-Specs for computing denominator-and-max and then one to complete softmax.
-        .to_softmax_parts_recompute(GL, row_major, None, GL, row_major, None)
+        .to_softmax_parts_recompute(GL, row_major, GL, row_major)
         // This [0] corresponds to SoftmaxDenominatorAndMax
         .subschedule(&[0], |subspec| subspec.to_max_and_denominator())
         // This [0, 0] corresponds to Max
@@ -69,7 +68,7 @@ fn main() {
                 .move_param(0, CpuMemory::L1)
                 .move_param(1, CpuMemory::L1)
                 .move_param(2, CpuMemory::L1)
-                .move_vrf(0, CpuMemory::VRF, 8);
+                .move_param(0, CpuMemory::VRF);
             #[cfg(not(feature = "drop-rf"))]
             let imp = imp.move_param(1, RF).move_param(2, RF);
             imp.select(CpuKernel::VectorSoftmaxDenominator)

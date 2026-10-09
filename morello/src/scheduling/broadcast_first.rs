@@ -1,13 +1,12 @@
-use crate::common::DimSize;
 use crate::imp::pipeline::{Pipeline, StageWiring};
 use crate::imp::subspecs::SpecApp;
 use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
-use crate::scheduling::{ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{tensorspec_error_to_apply_err, ActionT, ApplyError, NotApplicableReason};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::Target;
-use crate::tensorspec::{CanonicalizeError, TensorSpec};
+use crate::tensorspec::TensorSpec;
 use crate::views::{Param, Tensor, View, ViewE};
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -16,7 +15,6 @@ use std::rc::Rc;
 pub struct BroadcastFirst<Tgt: Target> {
     pub broadcast_level: Tgt::Memory,
     pub broadcast_layout: Layout,
-    pub broadcast_vector_size: Option<DimSize>,
 }
 
 impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
@@ -46,17 +44,8 @@ impl<Tgt: Target> ActionT<Tgt> for BroadcastFirst<Tgt> {
                 dtypes[1],
                 self.broadcast_level,
                 self.broadcast_layout.clone(),
-                self.broadcast_vector_size,
             )
-            .map_err(|e| match e {
-                CanonicalizeError::VectorSizeInvalid => {
-                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
-                }
-                CanonicalizeError::VectorSizeVolumeIncompatible => {
-                    ApplyError::NotApplicable(NotApplicableReason::VectorSizeVolumeIncompatible)
-                }
-                _ => ApplyError::NotApplicable(NotApplicableReason::Other(None)),
-            })?,
+            .map_err(tensorspec_error_to_apply_err)?,
         );
 
         // Compute the memory limits for the new children.

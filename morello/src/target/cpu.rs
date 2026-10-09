@@ -25,7 +25,6 @@ use crate::spatial_action_solver::fallback::FallbackSpatialActionSolver;
 use crate::spatial_action_solver::SpatialSolver;
 use crate::spec::{dim_range, FillValue, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Kernel, Memory, Target, TargetId, MEMORY_COUNT};
-use crate::tensorspec::gen_vector_sizes_opt;
 use crate::tensorspec::{TensorSpec, TensorSpecAux};
 use crate::views::View;
 
@@ -315,10 +314,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn all_layouts_for_shape(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
-        let all_target_vector_bytes = Self::memories()
-            .into_iter()
-            .flat_map(|lvl| lvl.vector_bytes().iter().copied())
-            .collect::<Vec<_>>();
+        let all_target_vector_bytes = all_target_vector_bytes::<Self>();
 
         // The following could be faster. It keeps two copies of the non-packed layouts
         // (`base` and the first few values in `result`) and it doesn't compute the size
@@ -397,10 +393,7 @@ impl<T: CpuTarget> Target for T {
     }
 
     fn move_destination_layouts(shape: &[DimSize], dtype: Dtype) -> Vec<Layout> {
-        let all_target_vector_bytes = Self::memories()
-            .into_iter()
-            .flat_map(|lvl| lvl.vector_bytes().iter().copied())
-            .collect::<Vec<_>>();
+        let all_target_vector_bytes = all_target_vector_bytes::<Self>();
 
         // The following could be faster. It keeps two copies of the non-packed layouts
         // (`base` and the first few values in `result`) and it doesn't compute the size
@@ -656,7 +649,6 @@ impl<T: CpuTarget> Target for T {
                                             k,
                                             partials_level,
                                             partials_layout: row_major(&partial_shape),
-                                            partials_vector_size: None,
                                         }
                                         .into(),
                                     );
@@ -716,17 +708,12 @@ impl<T: CpuTarget> Target for T {
                         let dtype = basics.dtypes[1];
                         for memory in Self::memories() {
                             for layout in Self::move_destination_layouts(spec_shape, dtype) {
-                                gen_vector_sizes_opt(dtype, memory.vector_bytes()).for_each(
-                                    |vector_size| {
-                                        broadcast_firsts.push(
-                                            BroadcastFirst {
-                                                broadcast_level: memory,
-                                                broadcast_layout: layout.clone(),
-                                                broadcast_vector_size: vector_size,
-                                            }
-                                            .into(),
-                                        );
-                                    },
+                                broadcast_firsts.push(
+                                    BroadcastFirst {
+                                        broadcast_level: memory,
+                                        broadcast_layout: layout,
+                                    }
+                                    .into(),
                                 );
                             }
                         }
@@ -743,41 +730,23 @@ impl<T: CpuTarget> Target for T {
 
                         for denom_level in memories {
                             for denom_layout in &layouts {
-                                gen_vector_sizes_opt(dtype, denom_level.vector_bytes()).for_each(
-                                    |denominator_vector_size| {
-                                        softmax_actions.push(Action::ToSoftmaxParts(
-                                            ToSoftmaxParts {
+                                softmax_actions.push(Action::ToSoftmaxParts(ToSoftmaxParts {
+                                    denominator_level: denom_level,
+                                    denominator_layout: denom_layout.clone(),
+                                }));
+
+                                for alt_level in memories {
+                                    for alt_layout in &layouts {
+                                        softmax_actions.push(Action::ToSoftmaxPartsRecompute(
+                                            ToSoftmaxPartsRecompute {
+                                                max_level: alt_level,
+                                                max_layout: alt_layout.clone(),
                                                 denominator_level: denom_level,
                                                 denominator_layout: denom_layout.clone(),
-                                                denominator_vector_size,
                                             },
                                         ));
-
-                                        for alt_level in memories {
-                                            for alt_layout in &layouts {
-                                                gen_vector_sizes_opt(
-                                                    dtype,
-                                                    alt_level.vector_bytes(),
-                                                )
-                                                .for_each(|alt_vector_size| {
-                                                    softmax_actions.push(
-                                                        Action::ToSoftmaxPartsRecompute(
-                                                            ToSoftmaxPartsRecompute {
-                                                                max_level: alt_level,
-                                                                max_layout: alt_layout.clone(),
-                                                                max_vector_size: alt_vector_size,
-                                                                denominator_level: denom_level,
-                                                                denominator_layout: denom_layout
-                                                                    .clone(),
-                                                                denominator_vector_size,
-                                                            },
-                                                        ),
-                                                    );
-                                                });
-                                            }
-                                        }
-                                    },
-                                );
+                                    }
+                                }
                             }
                         }
                     }
@@ -792,17 +761,12 @@ impl<T: CpuTarget> Target for T {
 
                             for memory in Self::memories() {
                                 for layout in Self::move_destination_layouts(spec_shape, dtype) {
-                                    gen_vector_sizes_opt(dtype, memory.vector_bytes()).for_each(
-                                        |vector_size| {
-                                            unscaled_actions.push(Action::ToMaxAndUnscaled(
-                                                ToMaxAndUnscaled {
-                                                    max_level: memory,
-                                                    max_layout: layout.clone(),
-                                                    max_vector_size: vector_size,
-                                                },
-                                            ));
+                                    unscaled_actions.push(Action::ToMaxAndUnscaled(
+                                        ToMaxAndUnscaled {
+                                            max_level: memory,
+                                            max_layout: layout,
                                         },
-                                    );
+                                    ));
                                 }
                             }
                         }
@@ -943,10 +907,10 @@ impl CpuKernel {
             }
             CpuKernel::BroadcastVecMultAddBf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && x86_vector_helpers_available::<Tgt>()
                     && operands[0].dtype() == Dtype::Bfloat16
                     && operands[1].dtype() == Dtype::Bfloat16
                     && operands[2].dtype() == Dtype::Float32
-                    && operands[1].vector_size() == operands[2].vector_size()
                     && broadcastvecmult_bf16_applies_to_operands(&operands)
             }
             CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => {
@@ -962,21 +926,20 @@ impl CpuKernel {
                             rhs @ TensorSpec {
                                 shape: rhs_shape,
                                 dtype: Dtype::Sint8,
-                                aux: TensorSpecAux {
-                                    vector_size: Some(rhs_vector_size),
-                                    ..
-                                },
+                                aux: _,
                             },
                             out @ TensorSpec {
                                 shape: out_shape,
                                 dtype: Dtype::Sint16,
                                 aux: _,
                             }
-                        ] if lhs_shape[..] == [nz!(1u32), nz!(1u32), nz!(2u32)]
+                        ] if x86_vector_helpers_available::<Tgt>()
+                          && lhs_shape[..] == [nz!(1u32), nz!(1u32), nz!(2u32)]
                           && rhs_shape[..2] == [nz!(1u32), nz!(2u32)]
-                          && rhs_shape[2].get() * 2 == rhs_vector_size.get()
-                          && out_shape[..2] == [nz!(1u32), nz!(1u32)]
-                          && out_shape[2].get() * 2 == rhs_vector_size.get()
+                          && rhs_shape[2] == nz!(16u32)
+                          && rhs.vector_size() == Some(nz!(32u32))
+                          && out_shape[..] == [nz!(1u32), nz!(1u32), nz!(16u32)]
+                          && out.vector_size() == Some(nz!(16u32))
                           && rhs.layout() == &batched_col_major(rhs_shape)
                           && out.layout().is_row_major()
                           && lhs.is_contiguous() && rhs.is_contiguous() && out.is_contiguous()
@@ -986,7 +949,8 @@ impl CpuKernel {
                     )
             }
             CpuKernel::DotProductLoop => {
-                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                x86_vector_helpers_available::<Tgt>()
+                    && matches!(typ, PrimitiveSpecType::Matmul { accum: true })
                     && matches!(
                         &operands[..],
                         [
@@ -1018,12 +982,10 @@ impl CpuKernel {
                           && lhs.layout().is_row_major()
                           && rhs.layout().is_col_major()
                           && lhs.is_contiguous() && rhs.is_contiguous()
-                          && lhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
-                          && rhs.vector_size().is_none_or(|v| v == DOT_PRODUCT_STRIP_SIZE)
-                          // If lhs is already in VRF, require a full vector so we don't need pointer arithmetic.
                           && (lhs.memory() == CpuMemory::L1
                               || (lhs.memory() == CpuMemory::VRF
-                                  && lhs.vector_size() == Some(DOT_PRODUCT_STRIP_SIZE)))
+                                  && lhs.vector_size() == Some(DOT_PRODUCT_STRIP_SIZE)
+                                  && lhs_shape[2] == DOT_PRODUCT_STRIP_SIZE))
                           && rhs.memory() == CpuMemory::L1
                           && is_rf_or_l1_memory(*out_level)
                     )
@@ -1074,7 +1036,6 @@ impl CpuKernel {
                             aux: TensorSpecAux {
                                 memory: _,
                                 layout: src_layout,
-                                vector_size: src_vs,
                             },
                         },
                         dest @ TensorSpec {
@@ -1083,15 +1044,14 @@ impl CpuKernel {
                             aux: TensorSpecAux {
                                 memory: _,
                                 layout: dest_layout,
-                                vector_size: dest_vs,
                             },
                         },
-                    ] if src.is_contiguous() && dest.is_contiguous()
+                    ] if x86_vector_helpers_available::<Tgt>()
+                      && src.is_contiguous() && dest.is_contiguous()
                       && src_shape.iter().all(|d| d.get() == 1 || d.get() == 16)
                       && src_shape.iter().filter(|d| d.get() == 16).count() == 1
                       && src_shape == dest_shape
-                      && src_vs == &Some(nz!(16u32))
-                      && dest_vs == &Some(nz!(8u32))
+                      && src.vector_size() == Some(nz!(16u32))
                       && src_layout.is_row_major()
                       && dest_layout.dims.iter().all(|(_, pd)| pd == &PhysDim::Dynamic || pd == &leaved)
                       && dest_layout.dims.iter().filter(|(_, pd)| pd == &leaved).count() == 1
@@ -1181,6 +1141,9 @@ impl CpuKernel {
             }
             CpuKernel::VectorSoftmaxComplete => {
                 debug_assert_eq!(operands.len(), 4);
+                if !x86_vector_helpers_available::<Tgt>() {
+                    return false;
+                }
                 if !matches!(typ, PrimitiveSpecType::SoftmaxComplete { .. }) {
                     return false;
                 }
@@ -1362,6 +1325,9 @@ impl CpuKernel {
             }
             CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32 => {
                 debug_assert_eq!(operands.len(), 4);
+                if !x86_vector_helpers_available::<Tgt>() {
+                    return false;
+                }
                 let PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
                     accum: true,
                     scan_dim,
@@ -1423,6 +1389,9 @@ impl CpuKernel {
             }
             CpuKernel::VectorSoftmaxDenominator => {
                 debug_assert_eq!(operands.len(), 3);
+                if !x86_vector_helpers_available::<Tgt>() {
+                    return false;
+                }
                 let PrimitiveSpecType::SoftmaxDenominator {
                     accum: true,
                     scan_dim,
@@ -1522,6 +1491,9 @@ impl CpuKernel {
             }
             CpuKernel::VectorMaxLoop => {
                 debug_assert_eq!(operands.len(), 2);
+                if !x86_vector_helpers_available::<Tgt>() {
+                    return false;
+                }
                 if !matches!(typ, PrimitiveSpecType::Max { accum: true, .. }) {
                     return false;
                 }
@@ -1642,7 +1614,7 @@ impl CpuKernel {
                     return false;
                 }
 
-                if divide_vec_scalar_reciprocal_vector_size::<Tgt>(&operands[0]).is_none() {
+                if Tgt::vector_size_for(operands[0].dtype(), operands[0].volume()).is_none() {
                     return false;
                 }
 
@@ -1755,7 +1727,6 @@ impl CpuKernel {
                                 dtype: Dtype::Bfloat16,
                                 aux: TensorSpecAux {
                                     memory: lhs_level,
-                                    vector_size: None,
                                     ..
                                 },
                             },
@@ -1764,7 +1735,6 @@ impl CpuKernel {
                                 dtype: Dtype::Float32,
                                 aux: TensorSpecAux {
                                     memory: rhs_level,
-                                    vector_size: None,
                                     ..
                                 },
                             }
@@ -1785,7 +1755,6 @@ impl CpuKernel {
                                 aux: TensorSpecAux {
                                     memory: lhs_level,
                                     layout: lhs_layout,
-                                    vector_size: Some(lhs_vector_size),
                                     ..
                                 },
                             },
@@ -1795,15 +1764,14 @@ impl CpuKernel {
                                 aux: TensorSpecAux {
                                     memory: rhs_level,
                                     layout: rhs_layout,
-                                    vector_size: Some(rhs_vector_size),
                                     ..
                                 },
                             }
-                        ] if lhs_shape == rhs_shape
+                        ] if x86_vector_helpers_available::<Tgt>()
+                          && lhs_shape == rhs_shape
                           && lhs_shape.iter().all(|&d| d.get() == 1 || d.get() == 16)
                           && lhs_shape.iter().filter(|&d| d.get() == 16).count() == 1
-                          && lhs_vector_size.get() == 16
-                          && rhs_vector_size.get() == 8
+                          && operands[0].vector_size() == Some(nz!(16u32))
                           && lhs_layout == rhs_layout
                           && *lhs_level == CpuMemory::VRF
                           && *rhs_level == CpuMemory::VRF
@@ -1895,7 +1863,12 @@ impl CpuKernel {
                 ))
             }
             CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 | CpuKernel::BroadcastVecMultAddBf16F32 => {
-                let vec_tensor_spec = &parameters[1].spec();
+                let vector_parameter_idx = match self {
+                    CpuKernel::TwoVecBroadcastVecMultAddU8S8S16 => 1,
+                    CpuKernel::BroadcastVecMultAddBf16F32 => 2,
+                    _ => unreachable!(),
+                };
+                let vec_tensor_spec = parameters[vector_parameter_idx].spec();
                 let regs = u64::from(
                     vec_tensor_spec.volume().get() / vec_tensor_spec.vector_size().unwrap().get(),
                 );
@@ -1907,8 +1880,22 @@ impl CpuKernel {
                     }
                 }))
             }
-            CpuKernel::DotProductLoop
-            | CpuKernel::DotProductLoopBf16Bf16F32
+            CpuKernel::DotProductLoop => {
+                let lhs_spec = parameters[0].spec();
+                let accum_count =
+                    vector_accum_count(lhs_spec.shape()[2].get(), DOT_PRODUCT_STRIP_SIZE.get())
+                        .expect("DotProductLoop applies should have ensured accum_count");
+                let load_temps = if lhs_spec.memory().vector_rf() { 1 } else { 2 };
+                // TODO: Count any additional peak pressure from the inlined sum8 helper.
+                MemoryAllocation::Simple(CPU_MEMORIES.map(|memory| {
+                    if memory.vector_rf() {
+                        u64::from(accum_count + load_temps)
+                    } else {
+                        0
+                    }
+                }))
+            }
+            CpuKernel::DotProductLoopBf16Bf16F32
             | CpuKernel::DotProductLoopF32InterleavedBf16F32
             | CpuKernel::DotProductLoopF32Bf16F32 => {
                 // TODO: Count any additional peak memory from sum8.
@@ -2128,9 +2115,12 @@ impl CpuKernel {
                 const RECIPROCAL_SETUP_COST: MainCost = 3;
                 const PER_VECTOR_COST: MainCost = 1;
                 let value_cnt = parameters[0].spec().volume().get();
-                let vector_size = divide_vec_scalar_reciprocal_vector_size(parameters[0].spec())
-                    .unwrap()
-                    .get();
+                let vector_size = P::Tgt::vector_size_for(
+                    parameters[0].spec().dtype(),
+                    parameters[0].spec().volume(),
+                )
+                .unwrap()
+                .get();
                 debug_assert_eq!(value_cnt % vector_size, 0);
                 let vector_cnt = value_cnt / vector_size;
                 RECIPROCAL_SETUP_COST.max(PER_VECTOR_COST * vector_cnt)
@@ -2417,16 +2407,6 @@ pub(crate) fn vector_accum_count(k: u32, strip: u32) -> Option<u32> {
         .find(|c| chunk_count.is_multiple_of(*c))
 }
 
-fn largest_vector_size_for_volume<Tgt: Target>(dtype: Dtype, volume: u32) -> Option<DimSize> {
-    Tgt::vec_types()
-        .iter()
-        .filter(|vec_type| {
-            vec_type.dtype == dtype && volume.is_multiple_of(u32::from(vec_type.value_cnt))
-        })
-        .max_by_key(|vec_type| vec_type.value_cnt)
-        .map(|vec_type| DimSize::new(u32::from(vec_type.value_cnt)).unwrap())
-}
-
 /// Returns the vector width and accumulator count for `VectorMaxLoop`.
 ///
 /// Returns `None` when the target lacks the x86 horizontal-max helpers or no supported vector
@@ -2435,7 +2415,7 @@ pub(crate) fn vector_max_loop_properties<Tgt: CpuTarget>(value_cnt: u32) -> Opti
     if !x86_vector_helpers_available::<Tgt>() {
         return None;
     }
-    let vector_size = largest_vector_size_for_volume::<Tgt>(Dtype::Float32, value_cnt)?;
+    let vector_size = Tgt::vector_size_for(Dtype::Float32, value_cnt.try_into().unwrap())?;
     if !matches!(vector_size.get(), 4 | 8 | 16) {
         return None;
     }
@@ -2448,6 +2428,9 @@ fn dotproductloop_bf16_applies<const N: usize, Tgt: CpuTarget>(
     lhs_dtype: Dtype,
     allowed_lhs_layouts: [Layout; N],
 ) -> bool {
+    if !x86_vector_helpers_available::<Tgt>() {
+        return false;
+    }
     let Ok(expected_rhs_layout) = layout![0, 2, 1].canonicalize(operands[1].shape()) else {
         return false;
     };
@@ -2505,11 +2488,8 @@ impl Memory for CpuMemory {
         }
     }
 
-    fn vector_bytes(&self) -> &'static [u32] {
-        match &self {
-            CpuMemory::VRF => &[16, 32],
-            _ => &[],
-        }
+    fn vector_rf(&self) -> bool {
+        matches!(self, CpuMemory::VRF)
     }
 
     fn counts_registers(&self) -> bool {
@@ -2613,35 +2593,8 @@ impl CanonicalBimap for CpuMemory {
     }
 }
 
-/// Returns the vector width to use for `DivideVecScalarReciprocal`.
-///
-/// Uses the tensor's vector size when present. Otherwise, returns the largest target
-/// vector width for the tensor's dtype that evenly divides its volume.
-pub(crate) fn divide_vec_scalar_reciprocal_vector_size<Tgt: Target>(
-    inout: &TensorSpec<Tgt>,
-) -> Option<DimSize> {
-    match inout.vector_size() {
-        Some(vector_size) => Some(vector_size),
-        None => Tgt::vec_types()
-            .iter()
-            .filter(|vec_type| {
-                vec_type.dtype == inout.dtype()
-                    && inout
-                        .volume()
-                        .get()
-                        .is_multiple_of(u32::from(vec_type.value_cnt))
-            })
-            .max_by_key(|vec_type| vec_type.value_cnt)
-            .map(|vec_type| DimSize::new(u32::from(vec_type.value_cnt)).unwrap()),
-    }
-}
-
 /// Returns the vector size to use for [CpuKernel::VectorSoftmaxDenominatorAndUnscaledF32] and
 /// [CpuKernel::VectorSoftmaxComplete].
-///
-/// If both tensors already specify a vector size, they must agree or this returns `None`. If just
-/// one tensor specifies a vector size, that size is used. If neither does, this returns the largest
-/// vector size for the tensor dtype defined by `Tgt` that evenly divides the tensor volume.
 pub(crate) fn softmax_vector_size<Tgt: Target>(
     input: &TensorSpec<Tgt>,
     output: &TensorSpec<Tgt>,
@@ -2649,30 +2602,7 @@ pub(crate) fn softmax_vector_size<Tgt: Target>(
     if input.volume() != output.volume() || input.dtype() != output.dtype() {
         return None;
     }
-    let volume = input.volume().get();
-    let dtype = input.dtype();
-    let mut explicit = None;
-
-    // After this loop, `explicit` is the vector width shared by the input/output tensor, or `None`
-    // if neither tensor specified one.
-    for vector_size in [input.vector_size(), output.vector_size()] {
-        let Some(vector_size) = vector_size else {
-            continue;
-        };
-        debug_assert!(volume.is_multiple_of(vector_size.get()));
-        debug_assert!(Tgt::vec_types().iter().any(|vec_type| {
-            vec_type.dtype == dtype && vector_size.get() == u32::from(vec_type.value_cnt)
-        }));
-        // If both tensors specify widths and they disagree, short-circuit with `None`.
-        match explicit {
-            Some(existing) if existing != vector_size => return None,
-            None => explicit = Some(vector_size),
-            Some(_) => {}
-        }
-    }
-
-    // Fall back to the widest legal vector size for this dtype and volume.
-    explicit.or_else(|| largest_vector_size_for_volume::<Tgt>(dtype, volume))
+    Tgt::vector_size_for(input.dtype(), input.volume())
 }
 
 fn physicaltransposebyte_applies_to_operands<Tgt>(
@@ -2687,6 +2617,9 @@ where
     if !matches!(typ, PrimitiveSpecType::Move) {
         return false;
     }
+    if !matches!(Tgt::target_id(), TargetId::Avx2 | TargetId::Avx512) {
+        return false;
+    }
 
     for op in operands {
         match op {
@@ -2697,11 +2630,12 @@ where
                     TensorSpecAux {
                         memory: rhs_level,
                         layout,
-                        vector_size: Some(v),
                     },
             } if shape[..] == *shape![2, vector_values]
                 && layout.is_fully_contiguous()
-                && v.get() == vector_values
+                && op
+                    .vector_size()
+                    .is_some_and(|v| v.get().is_multiple_of(vector_values))
                 && *rhs_level == CpuMemory::VRF => {}
             _ => return false,
         };
@@ -2819,8 +2753,7 @@ where
         return false;
     }
 
-    // Second and third parameters must be in VRF, vector size multiples, aligned, contig., and
-    // have the same dtype as the first parameter.
+    // Second and third parameters must be in VRF, vector-size multiples, and contiguous.
     for o in &operands[1..] {
         if o.memory() != CpuMemory::VRF {
             return false;
@@ -2846,12 +2779,21 @@ where
         return false;
     }
 
-    // Third (output) parameter shape must match the second input parameter shape and
-    // vector size.
     if operands[1].shape() != operands[2].shape() {
         return false;
     }
-    if operands[1].vector_size() != operands[2].vector_size() {
+    let Some(bf16_vector_size) = operands[1].vector_size() else {
+        return false;
+    };
+    let Some(f32_vector_size) = operands[2].vector_size() else {
+        return false;
+    };
+    if !bf16_vector_size.get().is_multiple_of(f32_vector_size.get())
+        || !operands[1]
+            .volume()
+            .get()
+            .is_multiple_of(f32_vector_size.get())
+    {
         return false;
     }
     true
@@ -3024,6 +2966,17 @@ fn is_rf_memory<M: Copy + PartialEq<CpuMemory>>(memory: M) -> bool {
     }
 }
 
+/// Returns the distinct vector widths that `Tgt` exposes to code generation, in bytes.
+fn all_target_vector_bytes<Tgt: CpuTarget>() -> Vec<u32> {
+    let mut widths = Tgt::vec_types()
+        .iter()
+        .map(|vec_type| u32::from(vec_type.value_cnt) * u32::from(vec_type.dtype.size()))
+        .collect::<Vec<_>>();
+    widths.sort_unstable();
+    widths.dedup();
+    widths
+}
+
 fn is_rf_or_l1_memory<M: Copy + PartialEq<CpuMemory>>(memory: M) -> bool {
     memory == CpuMemory::L1 || is_rf_memory(memory)
 }
@@ -3038,13 +2991,13 @@ mod tests {
     use super::*;
     use crate::{
         common::{DimSize, Dtype},
-        layout::{row_major, Layout},
+        layout::{col_major, row_major, Layout},
         lspec,
         memorylimits::MemVec,
         scheduling::{moves::Move, Action, ActionT, ApplyError, NotApplicableReason},
         shape, spec,
         spec::{arb_canonical_spec, LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec},
-        target::Avx2Target,
+        target::{Avx2Target, Avx512Target},
         tensorspec::{TensorSpec, TensorSpecAux},
         views::Param,
     };
@@ -3177,8 +3130,8 @@ mod tests {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 2, 16],
             (u8, CpuMemory::L1, row_major),
-            (i8, CpuMemory::VRF, batched_col_major, 32),
-            (i16, CpuMemory::VRF, row_major, 16),
+            (i8, CpuMemory::VRF, batched_col_major),
+            (i16, CpuMemory::VRF, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -3186,10 +3139,181 @@ mod tests {
     }
 
     #[test]
+    fn test_twovecbroadcastvecmult_applies_to_256bit_vectors_on_avx512() {
+        let logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 1, 2, 16],
+            (u8, CpuMemory::L1, row_major),
+            (i8, CpuMemory::VRF, batched_col_major),
+            (i16, CpuMemory::VRF, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_twovecbroadcastvecmult_rejects_512bit_vectors() {
+        let logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 1, 2, 32],
+            (u8, CpuMemory::L1, row_major),
+            (i8, CpuMemory::VRF, batched_col_major),
+            (i16, CpuMemory::VRF, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(!CpuKernel::TwoVecBroadcastVecMultAddU8S8S16.applies_to_logical_spec(&logical_spec));
+    }
+
+    /// The 256-bit byte transpose works on 32-lane halves. Those may be whole registers (AVX2,
+    /// where a [2, 32] u8 tensor is two 32-lane registers) or halves of a wider register (AVX-512).
+    #[test]
+    fn test_physicaltransposebyte256_accepts_32_lane_subvectors() {
+        let avx2_spec: LogicalSpec<Avx2Target> = lspec!(Move(
+            [2, 32],
+            (u8, CpuMemory::VRF, row_major),
+            (u8, CpuMemory::VRF, col_major)
+        ));
+        assert_eq!(avx2_spec.parameters()[0].vector_size(), Some(nz!(32u32)));
+        assert!(CpuKernel::PhysicalTransposeByte256.applies_to_logical_spec(&avx2_spec));
+
+        let avx512_spec: LogicalSpec<Avx512Target> = lspec!(Move(
+            [2, 32],
+            (u8, CpuMemory::VRF, row_major),
+            (u8, CpuMemory::VRF, col_major)
+        ));
+        assert!(avx512_spec.is_canonical());
+        assert_eq!(avx512_spec.parameters()[0].vector_size(), Some(nz!(64u32)));
+        assert!(CpuKernel::PhysicalTransposeByte256.applies_to_logical_spec(&avx512_spec));
+    }
+
+    #[test]
+    fn test_physicaltransposebyte128_accepts_16_lane_subvectors() {
+        use CpuMemory::VRF;
+
+        let avx2_spec: LogicalSpec<Avx2Target> =
+            lspec!(Move([2, 16], (u8, VRF, row_major), (u8, VRF, col_major)));
+        assert_eq!(avx2_spec.parameters()[0].vector_size(), Some(nz!(32u32)));
+        assert!(CpuKernel::PhysicalTransposeByte128.applies_to_logical_spec(&avx2_spec));
+
+        let avx512_spec: LogicalSpec<Avx512Target> =
+            lspec!(Move([2, 16], (u8, VRF, row_major), (u8, VRF, col_major)));
+        assert!(avx512_spec.is_canonical());
+        assert!(CpuKernel::PhysicalTransposeByte128.applies_to_logical_spec(&avx512_spec));
+    }
+
+    #[test]
+    fn test_broadcastvecmultadd_bf16_f32_accepts_equal_vector_sizes() {
+        use CpuMemory::{L1, VRF};
+
+        let avx512_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 1, 1, 16],
+            (bf16, L1, row_major),
+            (bf16, VRF, row_major),
+            (f32, VRF, row_major),
+            serial
+        ));
+        assert!(avx512_spec.is_canonical());
+        let parameters = avx512_spec.parameters();
+        assert_eq!(parameters[1].vector_size(), Some(nz!(16u32)));
+        assert_eq!(parameters[2].vector_size(), Some(nz!(16u32)));
+        assert!(CpuKernel::BroadcastVecMultAddBf16F32.applies_to_logical_spec(&avx512_spec));
+
+        let avx2_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 1, 1, 8],
+            (bf16, L1, row_major),
+            (bf16, VRF, row_major),
+            (f32, VRF, row_major),
+            serial
+        ));
+        assert!(avx2_spec.is_canonical());
+        let parameters = avx2_spec.parameters();
+        assert_eq!(parameters[1].vector_size(), Some(nz!(8u32)));
+        assert_eq!(parameters[2].vector_size(), Some(nz!(8u32)));
+        assert!(CpuKernel::BroadcastVecMultAddBf16F32.applies_to_logical_spec(&avx2_spec));
+    }
+
+    #[test]
+    fn test_broadcastvecmultadd_bf16_f32_accepts_avx2_widest_vectors() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 1, 1, 16],
+            (bf16, CpuMemory::L1, row_major),
+            (bf16, CpuMemory::VRF, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::BroadcastVecMultAddBf16F32.applies_to_logical_spec(&logical_spec));
+
+        let parameters = logical_spec
+            .parameters()
+            .into_iter()
+            .enumerate()
+            .map(|(idx, spec)| Param::new(u8::try_from(idx).unwrap(), spec))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            CpuKernel::BroadcastVecMultAddBf16F32.main_cost(&parameters),
+            5
+        );
+    }
+
+    #[test]
+    fn test_broadcastvecmultadd_bf16_f32_accepts_avx512_widest_vectors() {
+        let logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 1, 1, 32],
+            (bf16, CpuMemory::L1, row_major),
+            (bf16, CpuMemory::VRF, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            serial
+        ));
+        assert!(logical_spec.is_canonical());
+        assert!(CpuKernel::BroadcastVecMultAddBf16F32.applies_to_logical_spec(&logical_spec));
+
+        let parameters = logical_spec
+            .parameters()
+            .into_iter()
+            .enumerate()
+            .map(|(idx, spec)| Param::new(u8::try_from(idx).unwrap(), spec))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            CpuKernel::BroadcastVecMultAddBf16F32.main_cost(&parameters),
+            5
+        );
+    }
+
+    #[test]
+    fn test_vectorcastbf16f32_applies_to_16_lane_destination_on_avx512() {
+        use CpuMemory::VRF;
+
+        let spec: LogicalSpec<Avx512Target> =
+            lspec!(Move([1, 16], (bf16, VRF, row_major), (f32, VRF, row_major)));
+        assert!(spec.is_canonical());
+        assert_eq!(spec.parameters()[0].vector_size(), Some(nz!(16u32)));
+        assert_eq!(spec.parameters()[1].vector_size(), Some(nz!(16u32)));
+        assert!(CpuKernel::VectorCastBf16F32.applies_to_logical_spec(&spec));
+    }
+
+    /// On AVX-512, a 16-value f32 VRF tensor is one 16-lane register. The VectorInterleaveBf16F32
+    /// emitter addresses the destination as two 8-lane sub-vectors regardless of register width, so
+    /// the kernel should apply even though the destination's vector size is 16, not 8.
+    #[test]
+    fn test_vectorinterleavebf16f32_applies_to_16_lane_destination_on_avx512() {
+        use CpuMemory::VRF;
+
+        let spec: LogicalSpec<Avx512Target> = lspec!(Move(
+            [1, 1, 16],
+            (bf16, VRF, row_major),
+            (f32, VRF, crate::layout![2, 2 oe(16)])
+        ));
+        assert!(spec.is_canonical());
+        assert_eq!(spec.parameters()[1].vector_size(), Some(nz!(16u32)));
+        assert!(CpuKernel::VectorInterleaveBf16F32.applies_to_logical_spec(&spec));
+    }
+
+    #[test]
     fn test_dotproductloop_applies_to_vrf_lhs_strip() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 1, 8, 1],
-            (f32, CpuMemory::VRF, row_major, 8),
+            (f32, CpuMemory::VRF, row_major),
             (f32, CpuMemory::L1, col_major),
             (f32, CpuMemory::L1, row_major),
             serial
@@ -3201,8 +3325,8 @@ mod tests {
     #[test]
     fn test_dotproductloop_applies_to_longer_k() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
-            [1, 1, 32, 1],
-            (f32, CpuMemory::VRF, row_major, 8),
+            [1, 1, 16, 1],
+            (f32, CpuMemory::L1, row_major),
             (f32, CpuMemory::L1, col_major),
             (f32, CpuMemory::L1, row_major),
             serial
@@ -3212,15 +3336,29 @@ mod tests {
     }
 
     #[test]
-    fn test_dotproductloop_rejects_wrong_vector_size() {
+    fn test_dotproductloop_rejects_vrf_lhs_spanning_multiple_vectors() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
-            [1, 1, 8, 1],
-            (f32, CpuMemory::VRF, row_major, 4),
+            [1, 1, 16, 1],
+            (f32, CpuMemory::VRF, row_major),
             (f32, CpuMemory::L1, col_major),
             (f32, CpuMemory::L1, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
+        assert!(!CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
+    }
+
+    /// DotProductLoop offsets whole registers, so it must reject an lhs wider than one 8-lane strip
+    /// on AVX-512.
+    #[test]
+    fn test_dotproductloop_rejects_vrf_lhs_in_wider_register_avx512() {
+        let logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 1, 16, 1],
+            (f32, CpuMemory::VRF, row_major),
+            (f32, CpuMemory::L1, col_major),
+            (f32, CpuMemory::L1, row_major),
+            serial
+        ));
         assert!(!CpuKernel::DotProductLoop.applies_to_logical_spec(&logical_spec));
     }
 
@@ -3236,12 +3374,10 @@ mod tests {
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::L1,
                     layout: row_major(&shape![1, 32]),
-                    vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::GL,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: None,
                 },
             ],
             true,
@@ -3270,22 +3406,18 @@ mod tests {
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::L1,
                     layout: row_major(&shape![1, 32]),
-                    vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::L1,
                     layout: row_major(&shape![1, 32]),
-                    vector_size: None,
                 },
             ],
             true,
@@ -3301,8 +3433,6 @@ mod tests {
         let scalar_memory = CpuMemory::RF;
         #[cfg(feature = "drop-rf")]
         let scalar_memory = CpuMemory::L1;
-        let scalar_vector_size = None;
-
         let logical_spec = LogicalSpec::Primitive(
             PrimitiveBasics {
                 typ: PrimitiveSpecType::SoftmaxDenominatorAndUnscaledFromMax {
@@ -3316,22 +3446,18 @@ mod tests {
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::L1,
                     layout: row_major(&shape![1, 40]),
-                    vector_size: None,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: scalar_vector_size,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: scalar_memory,
                     layout: row_major(&shape![1, 1]),
-                    vector_size: scalar_vector_size,
                 },
                 TensorSpecAux::<Avx2Target> {
                     memory: CpuMemory::L1,
                     layout: row_major(&shape![1, 40]),
-                    vector_size: None,
                 },
             ],
             true,
@@ -3377,10 +3503,10 @@ mod tests {
 
         let spec: Spec<Avx2Target> = spec!(
             MatmulAccum(
-                [1, 1, 1, 16],
+                [1, 1, 1, 32],
                 (u8, lhs_memory, row_major),
-                (u8, CpuMemory::VRF, row_major, 16),
-                (u8, CpuMemory::VRF, row_major, 16),
+                (u8, CpuMemory::VRF, row_major),
+                (u8, CpuMemory::VRF, row_major),
                 serial
             ),
             MemoryLimits::Standard(MemVec::zero::<Avx2Target>())
@@ -3414,9 +3540,9 @@ mod tests {
     fn test_broadcastvecmultadd_rhs_broadcast_param_order() {
         let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
             [1, 8, 1, 1],
-            (f32, CpuMemory::VRF, row_major, 8),
+            (f32, CpuMemory::VRF, row_major),
             (f32, CpuMemory::L1, row_major),
-            (f32, CpuMemory::VRF, row_major, 8),
+            (f32, CpuMemory::VRF, row_major),
             serial
         ));
         assert!(logical_spec.is_canonical());
@@ -3425,15 +3551,8 @@ mod tests {
 
     #[test]
     fn test_assign_main_cost() {
-        let arg0 = TensorSpec::new_canon(
-            shape![2, 32],
-            Dtype::Uint32,
-            CpuMemory::VRF,
-            row_major,
-            Some(nz!(8u32)),
-        );
-        let arg1 =
-            TensorSpec::new_canon(shape![2, 32], Dtype::Uint32, CpuMemory::L1, row_major, None);
+        let arg0 = TensorSpec::new_canon(shape![2, 32], Dtype::Uint32, CpuMemory::VRF, row_major);
+        let arg1 = TensorSpec::new_canon(shape![2, 32], Dtype::Uint32, CpuMemory::L1, row_major);
         let parameter0: Param<Avx2Target> = Param::new(0, arg0);
         let parameter1: Param<Avx2Target> = Param::new(1, arg1);
         let cost = CpuKernel::Assign.main_cost(&[parameter0, parameter1]);

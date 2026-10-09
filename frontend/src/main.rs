@@ -255,7 +255,6 @@ where
                         TensorSpecAux::<Tgt> {
                             memory: GL.into(),
                             layout,
-                            vector_size: None,
                         }
                     })
                     .collect(),

@@ -11,7 +11,6 @@ use crate::{
         Action,
     },
     spec::{dim_range, LogicalSpec, PrimitiveBasics, PrimitiveSpecType},
-    tensorspec::{gen_vector_sizes, gen_vector_sizes_opt},
 };
 use itertools::{Either, Itertools};
 use std::iter;
@@ -269,28 +268,13 @@ pub fn bufferize_actions<Tgt: Target>(
         let intermediate_dtype = comp.dtypes[comp_out_idx];
 
         for memory in Tgt::memories() {
-            let vector_bytes = memory.vector_bytes();
-
             for layout in Tgt::move_destination_layouts(&intermediate_shape, intermediate_dtype) {
                 // TODO: Need to implement `can_move_to`-style logic here.
-
-                if !vector_bytes.is_empty() {
-                    for vector_size in gen_vector_sizes(intermediate_dtype, vector_bytes) {
-                        results.push(Action::Bufferize(Bufferize {
-                            index,
-                            memory,
-                            layout: layout.clone(),
-                            vector_size: Some(vector_size),
-                        }));
-                    }
-                } else {
-                    results.push(Action::Bufferize(Bufferize {
-                        index,
-                        memory,
-                        layout,
-                        vector_size: None,
-                    }));
-                }
+                results.push(Action::Bufferize(Bufferize {
+                    index,
+                    memory,
+                    layout,
+                }));
             }
         }
     }
@@ -322,22 +306,14 @@ pub fn move_actions<Tgt: Target>(
                 for &destination_dtype in
                     iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
                 {
-                    results.extend(
-                        gen_vector_sizes_opt(destination_dtype, memory.vector_bytes()).map(
-                            |vector_size| {
-                                // This may return Moves with identical source and destination
-                                // TensorSpecs (i.e., within-memory copies). These will be filtered
-                                // in [apply_with_aux].
-                                Action::Move(Move {
-                                    source_idx: i,
-                                    destination_dtype,
-                                    destination_level: memory,
-                                    destination_layout: layout.clone(),
-                                    destination_vector_size: vector_size,
-                                })
-                            },
-                        ),
-                    )
+                    // This may return Moves with identical source and destination TensorSpecs
+                    // (i.e., within-memory copies). These will be filtered in [apply_with_aux].
+                    results.push(Action::Move(Move {
+                        source_idx: i,
+                        destination_dtype,
+                        destination_level: memory,
+                        destination_layout: layout.clone(),
+                    }));
                 }
             }
         }
@@ -353,19 +329,12 @@ pub fn move_actions<Tgt: Target>(
                     for &destination_dtype in
                         iter::once(&operand_dtype).chain(operand_dtype.higher_precision_types())
                     {
-                        results.extend(
-                            gen_vector_sizes_opt(destination_dtype, memory.vector_bytes()).map(
-                                |vector_size| {
-                                    Action::Move(Move {
-                                        source_idx: i,
-                                        destination_dtype,
-                                        destination_level: memory,
-                                        destination_layout: original_layout.clone(),
-                                        destination_vector_size: vector_size,
-                                    })
-                                },
-                            ),
-                        )
+                        results.push(Action::Move(Move {
+                            source_idx: i,
+                            destination_dtype,
+                            destination_level: memory,
+                            destination_layout: original_layout.clone(),
+                        }));
                     }
                 }
             }
@@ -718,7 +687,6 @@ mod tests {
                     destination_level,
                     destination_layout,
                     destination_dtype,
-                    destination_vector_size,
                 }) = action
                 {
                     let move_key = (
@@ -726,7 +694,6 @@ mod tests {
                         destination_level,
                         destination_layout,
                         destination_dtype,
-                        destination_vector_size,
                     );
                     if !seen_moves.insert(move_key) {
                         duplicate_count += 1;

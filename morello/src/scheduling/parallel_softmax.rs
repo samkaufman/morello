@@ -6,10 +6,12 @@ use crate::imp::ImplNode;
 use crate::layout::Layout;
 use crate::memorylimits::MemoryLimits;
 use crate::scheduling::tiling::spec_app_with_argument_overrides;
-use crate::scheduling::{tile_to_apply_err, ActionT, ApplyError, NotApplicableReason};
+use crate::scheduling::{
+    tensorspec_error_to_apply_err, tile_to_apply_err, ActionT, ApplyError, NotApplicableReason,
+};
 use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
 use crate::target::{Target, MEMORY_COUNT};
-use crate::tensorspec::{self, TensorSpec};
+use crate::tensorspec::TensorSpec;
 use crate::tiling::Tiling;
 use crate::views::{BoundaryTile, Param, Tensor, View, ViewE};
 use nonzero::nonzero as nz;
@@ -25,7 +27,6 @@ pub struct ParallelSplitSoftmaxDenominatorAndMax<Tgt: Target> {
     pub k: DimSize,
     pub partials_level: Tgt::Memory,
     pub partials_layout: Layout,
-    pub partials_vector_size: Option<DimSize>,
 }
 
 impl<Tgt: Target> ActionT<Tgt> for ParallelSplitSoftmaxDenominatorAndMax<Tgt> {
@@ -85,7 +86,6 @@ impl<Tgt: Target> ActionT<Tgt> for ParallelSplitSoftmaxDenominatorAndMax<Tgt> {
                 dtype,
                 self.partials_level,
                 self.partials_layout.clone(),
-                self.partials_vector_size,
             )
             .map_err(tensorspec_error_to_apply_err)?,
         ));
@@ -95,7 +95,6 @@ impl<Tgt: Target> ActionT<Tgt> for ParallelSplitSoftmaxDenominatorAndMax<Tgt> {
                 dtype,
                 self.partials_level,
                 self.partials_layout.clone(),
-                self.partials_vector_size,
             )
             .map_err(tensorspec_error_to_apply_err)?,
         ));
@@ -308,20 +307,6 @@ fn tail_body<Tgt: Target>(
     )
 }
 
-fn tensorspec_error_to_apply_err(error: tensorspec::CanonicalizeError) -> ApplyError {
-    match error {
-        tensorspec::CanonicalizeError::VectorSizeInvalid => {
-            ApplyError::NotApplicable(NotApplicableReason::VectorSizeInvalid)
-        }
-        tensorspec::CanonicalizeError::VectorSizeVolumeIncompatible => {
-            ApplyError::NotApplicable(NotApplicableReason::VectorSizeVolumeIncompatible)
-        }
-        tensorspec::CanonicalizeError::LayoutError(_) => {
-            ApplyError::NotApplicable(NotApplicableReason::LayoutIncompatible)
-        }
-    }
-}
-
 fn lowered_memory_limits<'a, Tgt: Target, I>(
     base_limits: &MemoryLimits,
     live_tensors: I,
@@ -428,7 +413,6 @@ mod tests {
             k: DimSize::new(k).unwrap(),
             partials_level: CpuMemory::L1,
             partials_layout: row_major(&partial_shape),
-            partials_vector_size: None,
         }
     }
 
@@ -448,7 +432,6 @@ mod tests {
             .map(|shape| TensorSpecAux {
                 memory: CpuMemory::GL,
                 layout: row_major(&shape),
-                vector_size: None,
             })
             .collect();
         let mut spec = Spec(
