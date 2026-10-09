@@ -40,6 +40,12 @@ impl<Tgt: Target> ActionT<Tgt> for SpatialSplit {
                 "Conv is not accumulating",
             ))));
         }
+        if !logical_spec.can_spatial_split() {
+            // TODO: Use a more specific NotApplicableReason.
+            return Err(ApplyError::NotApplicable(NotApplicableReason::Other(Some(
+                "Conv cannot be spatially split",
+            ))));
+        }
         let rank: u8 = operands[0].shape.len().try_into().unwrap();
 
         // We're going to introduce a Loop which traverses all the pixels over all spatial
