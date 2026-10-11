@@ -981,15 +981,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// This is an RHS load and widen, a broadcast of the scalar LHS, and the `dpbf16` itself.
     ///
     /// The step computes `output[i] += scalar_bf16 * rhs_bf16[i]` across the lanes of one F32
-    /// vector register. `vector_size_f32` is that lane count, and picks the intrinsic: 8 lanes
-    /// use `_mm256_dpbf16_ps`, 16 use `_mm512_dpbf16_ps`.
+    /// vector register of type `output_vec_type`.
     ///
     /// Callers spanning a wider volume emit one step per register, repeating the scalar load and
     /// broadcast in each; Clang CSEs those down to one `vpbroadcastw` for the whole sequence.
     ///
     /// # Example Target Code
     ///
-    /// Example emitted code for `vector_size_f32` of 16:
+    /// Example emitted code for 16 lanes:
     ///
     /// ```c
     /// __m256i v0 = _mm256_loadu_si256((const __m256i *)(&rhs[0]));
@@ -998,7 +997,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// acc = (vf32_16)_mm512_dpbf16_ps((__m512)acc, v2, (__m512bh)v1);
     /// ```
     ///
-    /// The same step for `vector_size_f32` of 8:
+    /// The same step for 8 lanes:
     ///
     /// ```c
     /// __m128i v0 = _mm_loadu_si128((const __m128i *)(&rhs[0]));
@@ -1009,19 +1008,18 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     ///
     /// # Panics
     ///
-    /// Panics unless `vector_size_f32` is 8 or 16.
-    #[allow(clippy::too_many_arguments)]
+    /// Panics unless `output_vec_type` has 8 or 16 lanes.
     fn emit_avx512_bf16_broadcast_vec_mult_add<W: Write>(
         &mut self,
         w: &mut W,
         output_expr: &str,
         source_ptr: &str,
         scalar_bits_name: &str,
-        vector_size_f32: u32,
-        vector_type_name: &str,
+        output_vec_type: &VecType,
         depth: usize,
     ) -> fmt::Result {
-        match vector_size_f32 {
+        let vector_type_name = output_vec_type.name;
+        match output_vec_type.value_cnt {
             8 => {
                 let rhs_raw_name = self.namer.fresh_name();
                 let rhs_pairs_name = self.namer.fresh_name();
@@ -2328,6 +2326,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 Dtype::Float32,
                                 vector_size_f32.try_into().unwrap(),
                             );
+                            self.headers.vector_type_defs.insert(vfc);
+
+                            let scalar_ptr = self.c_ptr_arg(&arguments[0]);
                             let rhs_step_type = get_vector(
                                 Tgt::vec_types(),
                                 Dtype::Bfloat16,
@@ -2341,52 +2342,32 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     rhs_step_type
                                 )
                             );
+                            let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
+
+                            let scalar_name = self.namer.fresh_name();
+                            writeln!(w, "{0}short {scalar_name};", indent(depth),)?;
+                            writeln!(
+                                w,
+                                "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
+                                indent(depth),
+                                scalar_name,
+                                scalar_ptr
+                            )?;
 
                             if Tgt::target_id() == TargetId::Avx512 {
-                                let scalar_ptr = self.c_ptr_arg(&arguments[0]);
-
-                                let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
-
-                                // TODO: Don't inline `short` below.
-                                let scalar_name = self.namer.fresh_name();
-                                writeln!(w, "{0}short {scalar_name};", indent(depth),)?;
-                                writeln!(
-                                    w,
-                                    "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
-                                    indent(depth),
-                                    scalar_name,
-                                    scalar_ptr
-                                )?;
                                 self.emit_avx512_bf16_broadcast_vec_mult_add(
                                     w,
                                     &output_expr,
                                     &broadcast_ptr,
                                     &scalar_name,
-                                    vector_size_f32,
-                                    vfc.name,
+                                    vfc,
                                     depth,
                                 )?;
-
-                                self.headers.vector_type_defs.insert(vfc);
                             } else {
-                                let scalar_ptr = self.c_ptr_arg(&arguments[0]);
-                                let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
-
                                 let even_name = self.namer.fresh_name();
                                 let odd_name = self.namer.fresh_name();
                                 let concat_name = self.namer.fresh_name();
                                 let broad_name = self.namer.fresh_name();
-
-                                // TODO: Don't inline `short` below.
-                                let scalar_name = self.namer.fresh_name();
-                                writeln!(w, "{0}short {scalar_name};", indent(depth),)?;
-                                writeln!(
-                                    w,
-                                    "{0}__builtin_memcpy(&{1}, {2}, sizeof({1}));",
-                                    indent(depth),
-                                    scalar_name,
-                                    scalar_ptr
-                                )?;
 
                                 let (shift_fn, _, _, _) = vec_func_names(vector_size_f32);
                                 let (shift_fn_out, _, _, broadcast16_out) =
@@ -2450,7 +2431,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 )?;
 
                                 self.headers.vector_type_defs.insert(vf8);
-                                self.headers.vector_type_defs.insert(vfc);
                             }
                         }
                         Ok(())
