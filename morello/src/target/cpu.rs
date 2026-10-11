@@ -1699,23 +1699,8 @@ impl CpuKernel {
                     return false;
                 }
 
-                let mut has_vrf = false;
-                for o in operands {
-                    if o.memory().vector_rf() {
-                        has_vrf = true;
-                        match o.vector_size() {
-                            Some(vector_size) => {
-                                if o.volume().get() % vector_size.get() != 0 {
-                                    return false;
-                                }
-                            }
-                            None => {
-                                panic!("No vector_size on operand in memory {:?}", o.memory());
-                            }
-                        }
-                    }
-                }
-                has_vrf
+                // A VRF operand's derived vector size always divides its volume.
+                operands.iter().any(|o| o.memory().vector_rf())
             }
             CpuKernel::CastBf16F32 => {
                 matches!(typ, PrimitiveSpecType::Move)
@@ -2617,7 +2602,7 @@ where
     if !matches!(typ, PrimitiveSpecType::Move) {
         return false;
     }
-    if !matches!(Tgt::target_id(), TargetId::Avx2 | TargetId::Avx512) {
+    if !x86_vector_helpers_available::<Tgt>() {
         return false;
     }
 
@@ -2753,15 +2738,12 @@ where
         return false;
     }
 
-    // Second and third parameters must be in VRF, vector-size multiples, and contiguous.
+    // Second and third parameters must be in VRF and contiguous.
     for o in &operands[1..] {
         if o.memory() != CpuMemory::VRF {
             return false;
         }
         if !o.is_contiguous() {
-            return false;
-        }
-        if o.volume().get() % o.vector_size().unwrap().get() != 0 {
             return false;
         }
     }
@@ -2788,15 +2770,8 @@ where
     let Some(f32_vector_size) = operands[2].vector_size() else {
         return false;
     };
-    if !bf16_vector_size.get().is_multiple_of(f32_vector_size.get())
-        || !operands[1]
-            .volume()
-            .get()
-            .is_multiple_of(f32_vector_size.get())
-    {
-        return false;
-    }
-    true
+    // The emitter steps through f32 registers, so each step must lie within one bf16 register.
+    bf16_vector_size.get().is_multiple_of(f32_vector_size.get())
 }
 
 fn is_safe_c_widening(src_dtype: Dtype, dst_dtype: Dtype) -> bool {
@@ -2982,7 +2957,7 @@ fn is_rf_or_l1_memory<M: Copy + PartialEq<CpuMemory>>(memory: M) -> bool {
 }
 
 // TODO: This should go away when Avx2 and Avx512 get their own "supertype"
-fn x86_vector_helpers_available<Tgt: CpuTarget>() -> bool {
+fn x86_vector_helpers_available<Tgt: Target>() -> bool {
     matches!(Tgt::target_id(), TargetId::Avx2 | TargetId::Avx512)
 }
 

@@ -2490,12 +2490,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let out = self.c_value_arg(&arguments[2]);
 
                         let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE, 0);
                         let strip = DOT_PRODUCT_STRIP_SIZE.get();
-                        let chunk_count = lhs_spec.shape()[2].get() / strip;
-                        let accum_count = (1..=VECTOR_ACCUM_COUNT)
-                            .rev()
-                            .find(|c| chunk_count.is_multiple_of(*c))
+                        let accum_count = vector_accum_count(lhs_spec.shape()[2].get(), strip)
                             .expect("DotProductLoop applies should have ensured accum_count");
                         let step_size = accum_count * strip;
                         let step_idx_name = self.namer.fresh_name();
@@ -2557,14 +2553,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
                         }
                         writeln!(w, "{}}}", indent(depth))?;
-                        writeln!(
-                            w,
-                            "{}{} += sum8({});",
-                            indent(depth),
-                            out,
-                            vector_accum_names[0]
-                        )?;
-                        for accum_name in vector_accum_names.iter().skip(1) {
+                        for accum_name in &vector_accum_names {
                             writeln!(w, "{}{} += sum8({});", indent(depth), out, accum_name)?;
                         }
                         Ok(())

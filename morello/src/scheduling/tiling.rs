@@ -2616,6 +2616,8 @@ mod tests {
         ));
     }
 
+    /// Test that splitting a Matmul produces a nested SpecApp applied to two Tiles and
+    /// a Param.
     #[test]
     fn test_split_apply_yields_tile_bound_specapp() {
         let spec: Spec<Avx2Target> = spec!(MatmulAccum(
