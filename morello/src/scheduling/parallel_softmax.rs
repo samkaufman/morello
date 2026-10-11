@@ -141,7 +141,7 @@ impl<Tgt: Target> ActionT<Tgt> for ParallelSplitSoftmaxDenominatorAndMax<Tgt> {
                     dtypes: dtypes.clone(),
                 },
                 vec![
-                    auxes[0].clone(),
+                    input_tile.tile.spec().aux.clone(),
                     partial_max.spec().aux.clone(),
                     partial_denom.spec().aux.clone(),
                 ],
