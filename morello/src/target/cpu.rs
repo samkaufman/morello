@@ -87,6 +87,18 @@ pub enum CpuKernel {
     MultAdd,
     /// Lowers to Clang's scalar-vector multiply-accumulate.
     BroadcastVecMultAdd,
+    /// A 1xRxRxN MatmulAccum where RHS and output are each one row-major vector register holding
+    /// R >= 2 rows of N >= 4 values. The LHS may be in RF or L1. Only 32-bit dtypes on x86.
+    ///
+    /// As an example, with R = 2, N = 4, each step `k` computes:
+    ///
+    /// ```text
+    ///       row 0               row 1
+    ///      [ o00 o01 o02 o03 | o10 o11 o12 o13 ]   output
+    ///   += [ a0k a0k a0k a0k | a1k a1k a1k a1k ]   LHS column `k`, each value across its row
+    ///    * [ bk0 bk1 bk2 bk3 | bk0 bk1 bk2 bk3 ]   RHS row `k`, replicated into every row
+    /// ```
+    BroadcastMultiRowMultAdd,
     BroadcastVecMultAddBf16F32, // TODO: Move into X86 kernel.
     /// Lowers to an outer product 1x2xN MatmulAccum implementation taking u8 and s8 inputs and
     /// producing a s16 output.
@@ -472,9 +484,10 @@ impl<T: CpuTarget> Target for T {
                 PrimitiveSpecType::OnePrefix => unreachable!(),
                 PrimitiveSpecType::Matmul { accum } => {
                     if *accum {
-                        const MATMUL_ACCUM_KERNELS: [CpuKernel; 8] = [
+                        const MATMUL_ACCUM_KERNELS: [CpuKernel; 9] = [
                             CpuKernel::MultAdd,
                             CpuKernel::BroadcastVecMultAdd,
+                            CpuKernel::BroadcastMultiRowMultAdd,
                             CpuKernel::BroadcastVecMultAddBf16F32,
                             CpuKernel::TwoVecBroadcastVecMultAddU8S8S16,
                             CpuKernel::DotProductLoop,
@@ -824,6 +837,7 @@ impl CpuKernel {
             | CpuKernel::VectorSoftmaxDenominator
             | CpuKernel::VectorSoftmaxDenominatorAndMax
             | CpuKernel::BroadcastVecMultAdd
+            | CpuKernel::BroadcastMultiRowMultAdd
             | CpuKernel::BroadcastVecMultAddBf16F32
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::DotProductLoop
@@ -904,6 +918,29 @@ impl CpuKernel {
                 }
                 operands.iter().skip(1).all(|o| o.dtype() == first_dtype)
                     && broadcastvecmult_side(&operands).is_some()
+            }
+            CpuKernel::BroadcastMultiRowMultAdd => {
+                if !matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    || !x86_vector_helpers_available::<Tgt>()
+                {
+                    return false;
+                }
+                let [lhs, rhs, out] = &operands[..] else {
+                    unreachable!("MatmulAccum should have 3 operands")
+                };
+                let m = lhs.shape()[1];
+                matches!(lhs.dtype(), Dtype::Float32 | Dtype::Sint32 | Dtype::Uint32)
+                    && lhs.dtype() == rhs.dtype()
+                    && lhs.dtype() == out.dtype()
+                    && m.get() >= 2
+                    && rhs.shape()[2].get() >= 4
+                    && is_rf_or_l1_memory(lhs.memory())
+                    && lhs.shape() == [nz!(1u32), m, m]
+                    && [rhs, out].iter().all(|o| {
+                        o.is_contiguous()
+                            && o.layout().is_row_major()
+                            && o.vector_size() == Some(o.volume())
+                    })
             }
             CpuKernel::BroadcastVecMultAddBf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
@@ -1833,6 +1870,9 @@ impl CpuKernel {
 
     pub fn memory_allocated<P: View>(&self, parameters: &[P]) -> MemoryAllocation {
         match self {
+            CpuKernel::BroadcastMultiRowMultAdd => MemoryAllocation::Simple(
+                CPU_MEMORIES.map(|memory| if memory.vector_rf() { 4 } else { 0 }),
+            ),
             // TODO: Model memory correctly for BroadcastVecMultAddBf16F32
             CpuKernel::BroadcastVecMultAdd => {
                 // BroadcastVecMult applies to 1x1xn Matmuls. It broadcasts into a single
@@ -1976,6 +2016,16 @@ impl CpuKernel {
     {
         match self {
             CpuKernel::OnePrefixNoOp => 0,
+            CpuKernel::BroadcastMultiRowMultAdd => {
+                let rows = parameters[0].spec().shape()[1].get();
+                let step = match <P::Tgt as CpuTarget>::target_id() {
+                    TargetId::Avx2 => 2 * (rows - 1) + 4,
+                    TargetId::Avx512 if parameters[0].spec().dtype() == Dtype::Float32 => 4,
+                    TargetId::Avx512 => 5,
+                    TargetId::Arm => todo!("BroadcastMultiRowMultAdd cost on Arm"),
+                };
+                rows * step
+            }
             CpuKernel::BroadcastVecMultAdd
             | CpuKernel::TwoVecBroadcastVecMultAddU8S8S16
             | CpuKernel::BroadcastVecMultAddBf16F32 => {
@@ -3509,6 +3559,42 @@ mod tests {
             ),
             "Expected OutOfMemory error, got {act_unchecked_application:?}",
         );
+    }
+
+    #[test]
+    fn test_broadcastmultirowmultadd_applies_to_one_register_avx2() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 2, 2, 4],
+            (f32, CpuMemory::L1, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            serial
+        ));
+        assert!(CpuKernel::BroadcastMultiRowMultAdd.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_broadcastmultirowmultadd_rejects_two_registers_avx2() {
+        let logical_spec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 4, 4, 4],
+            (f32, CpuMemory::L1, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            serial
+        ));
+        assert!(!CpuKernel::BroadcastMultiRowMultAdd.applies_to_logical_spec(&logical_spec));
+    }
+
+    #[test]
+    fn test_broadcastmultirowmultadd_applies_to_one_register_avx512() {
+        let logical_spec: LogicalSpec<Avx512Target> = lspec!(MatmulAccum(
+            [1, 4, 4, 4],
+            (f32, CpuMemory::L1, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            (f32, CpuMemory::VRF, row_major),
+            serial
+        ));
+        assert!(CpuKernel::BroadcastMultiRowMultAdd.applies_to_logical_spec(&logical_spec));
     }
 
     #[test]

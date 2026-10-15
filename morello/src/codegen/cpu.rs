@@ -2310,6 +2310,69 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
+                    Some(CpuKernel::BroadcastMultiRowMultAdd) => {
+                        let [lhs, rhs, out] = &arguments[..] else {
+                            panic!();
+                        };
+
+                        let rows = i32::try_from(lhs.spec().shape()[1].get()).unwrap();
+                        let n = i32::try_from(out.spec().shape()[2].get()).unwrap();
+
+                        // output occupies one register, so register width equals volume.
+                        let vec_type =
+                            get_vector(Tgt::vec_types(), out.spec().dtype(), out.spec().volume());
+                        let f32_vec_type =
+                            get_vector(Tgt::vec_types(), Dtype::Float32, out.spec().volume());
+
+                        self.headers
+                            .vector_type_defs
+                            .extend([vec_type, f32_vec_type]);
+
+                        let lhs_cast = if vec_type == f32_vec_type {
+                            String::new()
+                        } else {
+                            format!("({})", vec_type.name)
+                        };
+                        let rhs_name = self.c_vec_arg(rhs);
+                        let out_name = self.c_vec_arg(out);
+
+                        let lhs_shuffle = (0..rows).flat_map(|m| (0..n).map(move |_| m)).join(", ");
+                        for k in 0..rows {
+                            let rhs_shuffle = (0..rows).flat_map(|_| k * n..(k + 1) * n).join(", ");
+                            let lhs_column = (0..rows)
+                                .map(|m| {
+                                    let ptr = self.c_index_ptr_with_point_exprs(
+                                        lhs,
+                                        &[
+                                            (1, NonAffineExpr::constant(m)),
+                                            (2, NonAffineExpr::constant(k)),
+                                        ],
+                                    );
+                                    if vec_type == f32_vec_type {
+                                        return Ok(format!("*({ptr})"));
+                                    }
+                                    let bits = self.namer.fresh_name();
+                                    writeln!(w, "{}float {bits};", indent(depth))?;
+                                    writeln!(
+                                        w,
+                                        "{}__builtin_memcpy(&{bits}, {ptr}, sizeof({bits}));",
+                                        indent(depth),
+                                    )?;
+                                    Ok(bits)
+                                })
+                                .collect::<Result<Vec<_>, fmt::Error>>()?
+                                .join(", ");
+                            let col = self.namer.fresh_name();
+                            let lhs_name = self.namer.fresh_name();
+                            let rhs_row = self.namer.fresh_name();
+                            let (ft, vt) = (f32_vec_type.name, vec_type.name);
+                            writeln!(w, "{}{ft} {col} = ({ft}){{{lhs_column}}};", indent(depth))?;
+                            writeln!(w, "{}{ft} {lhs_name} = __builtin_shufflevector({col}, {col}, {lhs_shuffle});", indent(depth))?;
+                            writeln!(w, "{}{vt} {rhs_row} = __builtin_shufflevector({rhs_name}, {rhs_name}, {rhs_shuffle});", indent(depth))?;
+                            writeln!(w, "{}{out_name} += {lhs_cast}{lhs_name} * {rhs_row}; /* BroadcastMultiRowMultAdd */", indent(depth))?;
+                        }
+                        Ok(())
+                    }
                     Some(CpuKernel::BroadcastVecMultAddBf16F32) => {
                         let vector_size_bf16 = arguments[1].spec().vector_size().unwrap().get();
                         let vector_size_f32 = arguments[2].spec().vector_size().unwrap().get();
