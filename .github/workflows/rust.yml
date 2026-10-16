@@ -220,8 +220,7 @@ jobs:
           git fetch origin "${db_size_notes_ref}:${db_size_notes_ref}" || true
           git notes --ref="$peak_rss_notes_ref" add -f -m "$peak_rss_kib" HEAD
           git notes --ref="$db_size_notes_ref" add -f -m "$db_size_bytes" HEAD
-          git push origin "$peak_rss_notes_ref"
-          git push origin "$db_size_notes_ref"
+          git push --atomic origin "$peak_rss_notes_ref" "$db_size_notes_ref"
 
   smoke-test-precompute:
     strategy:
