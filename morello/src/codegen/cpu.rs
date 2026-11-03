@@ -2051,18 +2051,12 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         for vector_idx in 0..vector_count {
                             let elem_offset =
                                 i32::try_from(vector_size.get() * vector_idx).unwrap();
-                            let exprs = arguments
-                                .iter()
-                                .map(|arg| self.c_ptr_arg_add(arg, elem_offset))
-                                .collect::<Vec<_>>();
-
+                            let [src, dst] =
+                                [0, 1].map(|i| self.c_ptr_arg_add(&arguments[i], elem_offset));
                             cline!(
                                 w,
                                 depth,
-                                "__builtin_memcpy((void *)({0}), (const void *)({1}), {2});  /* Assign */",
-                                exprs[1],
-                                exprs[0],
-                                byte_count,
+                                "__builtin_memcpy((void *)({dst}), (const void *)({src}), {byte_count});  /* Assign */"
                             )?;
                         }
                         Ok(())
@@ -2165,26 +2159,18 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_count = volume / vector_size;
                         for vector_idx in 0..vector_count {
                             let vector_offset = i32::try_from(vector_idx * vector_size).unwrap();
-                            let exprs = arguments
-                                .iter()
-                                .enumerate()
-                                .map(|(idx, arg)| {
-                                    if idx == scalar_idx {
-                                        self.c_value_arg(arg)
-                                    } else if idx == broadcast_idx || idx == 2 {
-                                        self.c_vec_arg_add(arg, vector_offset)
-                                    } else {
-                                        unreachable!()
-                                    }
-                                })
-                                .collect::<Vec<_>>();
+                            let [lhs, rhs, out] = [0, 1, 2].map(|idx| {
+                                if idx == scalar_idx {
+                                    self.c_value_arg(&arguments[idx])
+                                } else {
+                                    assert!(idx == broadcast_idx || idx == 2);
+                                    self.c_vec_arg_add(&arguments[idx], vector_offset)
+                                }
+                            });
                             cline!(
                                 w,
                                 depth,
-                                "{} += {} * {}; /* BroadcastVecMultAdd */",
-                                exprs[2],
-                                exprs[0],
-                                exprs[1]
+                                "{out} += {lhs} * {rhs}; /* BroadcastVecMultAdd */"
                             )?;
                         }
                         Ok(())
@@ -2194,46 +2180,43 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let volume = arguments[1].spec().volume().get();
                         debug_assert_eq!(volume % vector_size_bf16, 0);
                         let vector_count = volume / vector_size_bf16;
+                        let vfc = get_vector(
+                            Tgt::vec_types(),
+                            Dtype::Float32,
+                            vector_size_bf16.try_into().unwrap(),
+                        );
+                        self.headers.vector_type_defs.insert(vfc);
+                        let scalar_ptr = self.c_ptr_arg(&arguments[0]);
+                        // Copies the bf16 scalar's bits into a new variable, returning its name.
+                        // TODO: Don't inline `short` below.
+                        let load_scalar = |this: &mut Self, w: &mut W| {
+                            let name = this.namer.fresh_name();
+                            cline!(w, depth, "short {name};")?;
+                            cline!(
+                                w,
+                                depth,
+                                "__builtin_memcpy(&{name}, {scalar_ptr}, sizeof({name}));"
+                            )?;
+                            Ok::<_, fmt::Error>(name)
+                        };
                         cline!(w, depth, "/* BroadcastVecMultAddBf16F32 */")?;
                         for vector_idx in 0..vector_count {
                             let vector_offset =
                                 i32::try_from(vector_idx * vector_size_bf16).unwrap();
-                            let vfc = get_vector(
-                                Tgt::vec_types(),
-                                Dtype::Float32,
-                                vector_size_bf16.try_into().unwrap(),
-                            );
-
+                            let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
                             if Tgt::target_id() == TargetId::Avx512 {
-                                let scalar_ptr = self.c_ptr_arg(&arguments[0]);
-
-                                let (broadcast_buffer, broadcast_base_expr) =
+                                let (broadcast_buffer, broadcast_expr) =
                                     self.c_arg_parts_add(&arguments[1], vector_offset);
                                 let broadcast_ptr =
-                                    self.c_index_ptr(&broadcast_buffer, &broadcast_base_expr, None);
-                                let broadcast_vec_expr =
-                                    if matches!(&broadcast_buffer, CBuffer::RegVars { .. }) {
-                                        Some(self.c_index_vec(
-                                            &broadcast_buffer,
-                                            &broadcast_base_expr,
-                                            None,
-                                        ))
-                                    } else {
-                                        None
-                                    };
-
-                                let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
-
-                                // TODO: Don't inline `short` below.
-                                let scalar_name = self.namer.fresh_name();
-                                cline!(w, depth, "short {scalar_name};")?;
-                                cline!(
-                                    w,
-                                    depth,
-                                    "__builtin_memcpy(&{0}, {1}, sizeof({0}));",
-                                    scalar_name,
-                                    scalar_ptr
-                                )?;
+                                    self.c_index_ptr(&broadcast_buffer, &broadcast_expr, None);
+                                let broadcast_vec_expr = matches!(
+                                    &broadcast_buffer,
+                                    CBuffer::RegVars { .. }
+                                )
+                                .then(|| {
+                                    self.c_index_vec(&broadcast_buffer, &broadcast_expr, None)
+                                });
+                                let scalar_name = load_scalar(self, w)?;
                                 self.emit_avx512_bf16_broadcast_vec_mult_add(
                                     w,
                                     &output_expr,
@@ -2244,94 +2227,49 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     vfc.name,
                                     depth,
                                 )?;
-
-                                self.headers.vector_type_defs.insert(vfc);
                             } else {
-                                let exprs = [
-                                    self.c_ptr_arg(&arguments[0]),
-                                    self.c_vec_arg_add(&arguments[1], vector_offset),
-                                    self.c_vec_arg_add(&arguments[2], vector_offset),
-                                ];
-
-                                let even_name = self.namer.fresh_name();
-                                let odd_name = self.namer.fresh_name();
-                                let concat_name = self.namer.fresh_name();
-                                let broad_name = self.namer.fresh_name();
-
-                                // TODO: Don't inline `short` below.
-                                let scalar_name = self.namer.fresh_name();
-                                cline!(w, depth, "short {scalar_name};")?;
-                                cline!(
-                                    w,
-                                    depth,
-                                    "__builtin_memcpy(&{0}, {1}, sizeof({0}));",
-                                    scalar_name,
-                                    exprs[0]
-                                )?;
+                                let broadcast_expr =
+                                    self.c_vec_arg_add(&arguments[1], vector_offset);
+                                let [even_name, odd_name, concat_name, broad_name] =
+                                    [(); 4].map(|_| self.namer.fresh_name());
+                                let scalar_name = load_scalar(self, w)?;
 
                                 let (shift_fn, _, _, _) = vec_func_names(vector_size_bf16);
                                 let (shift_fn_out, _, _, broadcast16_out) =
                                     vec_func_names(vector_size_bf16 * 2);
-
                                 let vf8 = get_vector(
                                     Tgt::vec_types(),
                                     Dtype::Float32,
                                     (vector_size_bf16 / 2).try_into().unwrap(),
                                 );
-                                cline!(
-                                    w,
-                                    depth,
-                                    "{0} {1} = ({0}){shift_fn}(*({2}*)(&{3}), {4});",
-                                    vf8.name,
-                                    odd_name,
-                                    vf8.native_type_name,
-                                    exprs[1],
-                                    16
-                                )?;
-                                cline!(
-                                    w,
-                                    depth,
-                                    "{} {} = {};",
-                                    vf8.name,
-                                    even_name,
-                                    bf16_even_lanes_expr(
-                                        vector_size_bf16,
-                                        vf8.name,
-                                        vf8.native_type_name,
-                                        &exprs[1],
-                                    )
-                                )?;
-
-                                cline!(
-                                    w,
-                                    depth,
-                                    "{} {} = __builtin_shufflevector({}, {}, {});",
-                                    vfc.name,
-                                    concat_name,
-                                    odd_name,
-                                    even_name,
-                                    interleave_vector_halves_shuffle_indices(vector_size_bf16)
-                                )?;
-
-                                cline!(
-                                    w,
-                                    depth,
-                                    "{0} {broad_name} = ({0}){shift_fn_out}({broadcast16_out}({1}), 16);",
-                                    vfc.name,
-                                    scalar_name
-                                )?;
-
-                                cline!(
-                                    w,
-                                    depth,
-                                    "{} += {} * {};",
-                                    exprs[2],
-                                    broad_name,
-                                    concat_name
-                                )?;
-
                                 self.headers.vector_type_defs.insert(vf8);
-                                self.headers.vector_type_defs.insert(vfc);
+                                let even_expr = bf16_even_lanes_expr(
+                                    vector_size_bf16,
+                                    vf8.name,
+                                    vf8.native_type_name,
+                                    &broadcast_expr,
+                                );
+                                let shuffle_indices =
+                                    interleave_vector_halves_shuffle_indices(vector_size_bf16);
+                                let (vf8_ty, vf8_native_ty, vfc_ty) =
+                                    (vf8.name, vf8.native_type_name, vfc.name);
+                                cline!(
+                                    w,
+                                    depth,
+                                    "{vf8_ty} {odd_name} = ({vf8_ty}){shift_fn}(*({vf8_native_ty}*)(&{broadcast_expr}), 16);"
+                                )?;
+                                cline!(w, depth, "{vf8_ty} {even_name} = {even_expr};")?;
+                                cline!(
+                                    w,
+                                    depth,
+                                    "{vfc_ty} {concat_name} = __builtin_shufflevector({odd_name}, {even_name}, {shuffle_indices});"
+                                )?;
+                                cline!(
+                                    w,
+                                    depth,
+                                    "{vfc_ty} {broad_name} = ({vfc_ty}){shift_fn_out}({broadcast16_out}({scalar_name}), 16);"
+                                )?;
+                                cline!(w, depth, "{output_expr} += {broad_name} * {concat_name};")?;
                             }
                         }
                         Ok(())
@@ -2344,11 +2282,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         for vector_idx in 0..vector_count {
                             let vector_offset = i32::try_from(vector_idx * vector_size).unwrap();
-                            let exprs = [
-                                self.c_ptr_arg(&arguments[0]),
-                                self.c_vec_arg_add(&arguments[1], vector_offset),
-                                self.c_vec_arg_add(&arguments[2], vector_offset),
-                            ];
+                            let lhs = self.c_ptr_arg(&arguments[0]);
+                            let [rhs, out] =
+                                [1, 2].map(|i| self.c_vec_arg_add(&arguments[i], vector_offset));
 
                             // TODO: Lift the broadcast out of this loop.
                             let broadcast_name = self.namer.fresh_name();
@@ -2358,27 +2294,19 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             cline!(
                                 w,
                                 depth,
-                                "__builtin_memcpy(&{0}, {1}, sizeof({0}));",
-                                broadcast_scalar,
-                                exprs[0]
+                                "__builtin_memcpy(&{broadcast_scalar}, {lhs}, sizeof({broadcast_scalar}));"
                             )?;
                             cline!(
                                 w,
                                 depth,
-                                "__m256i {0} = _mm256_set1_epi16({1});",
-                                broadcast_name,
-                                broadcast_scalar
+                                "__m256i {broadcast_name} = _mm256_set1_epi16({broadcast_scalar});"
                             )?;
 
                             // matmul (k=2) the broadcast vector with the rhs vectors.
                             cline!(
                                 w,
                                 depth,
-                                "{} = _mm256_add_epi16({}, _mm256_maddubs_epi16({}, {}));",
-                                exprs[2],
-                                exprs[2],
-                                broadcast_name,
-                                exprs[1]
+                                "{out} = _mm256_add_epi16({out}, _mm256_maddubs_epi16({broadcast_name}, {rhs}));"
                             )?;
                         }
                         Ok(())
@@ -2941,19 +2869,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let volume = arguments[1].spec().volume().get();
                         debug_assert_eq!(volume % vector_size.get(), 0);
                         let vector_count = volume / vector_size.get();
+                        let value = self.c_value_arg(&arguments[0]);
                         for vector_idx in 0..vector_count {
                             let vector_offset =
                                 i32::try_from(vector_idx * vector_size.get()).unwrap();
-                            let exprs = [
-                                self.c_value_arg(&arguments[0]),
-                                self.c_vec_arg_add(&arguments[1], vector_offset),
-                            ];
+                            let out = self.c_vec_arg_add(&arguments[1], vector_offset);
                             cline!(
                                 w,
                                 depth,
-                                "{} = ({} - ({}){{}}); /* VecScalarAssign */",
-                                exprs[1],
-                                exprs[0],
+                                "{out} = ({value} - ({}){{}}); /* VecScalarAssign */",
                                 out_vector_type.name,
                             )?;
                         }
@@ -2968,18 +2892,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         for vector_idx in 0..vector_count {
                             let vector_offset =
                                 i32::try_from(vector_idx * vector_size.get()).unwrap();
-                            let exprs = arguments
-                                .iter()
-                                .map(|arg| self.c_vec_arg_add(arg, vector_offset))
-                                .collect::<Vec<_>>();
-                            cline!(
-                                w,
-                                depth,
-                                "{} = {} / {}; /* DivideVec */",
-                                exprs[0],
-                                exprs[0],
-                                exprs[1]
-                            )?;
+                            let [lhs, rhs] =
+                                [0, 1].map(|i| self.c_vec_arg_add(&arguments[i], vector_offset));
+                            cline!(w, depth, "{lhs} = {lhs} / {rhs}; /* DivideVec */")?;
                         }
                         Ok(())
                     }
