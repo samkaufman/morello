@@ -75,17 +75,11 @@ impl CBuffer {
     pub fn emit<W: fmt::Write>(&self, w: &mut W, init_type: InitType, depth: usize) -> fmt::Result {
         match self {
             CBuffer::HeapArray { name, size, dtype } => {
-                writeln!(
+                cline!(w, depth, "{} *__restrict__ {};", c_type(*dtype), name)?;
+                cline!(
                     w,
-                    "{}{} *__restrict__ {};",
-                    indent(depth),
-                    c_type(*dtype),
-                    name
-                )?;
-                writeln!(
-                    w,
-                    "{}if (posix_memalign((void **)&{}, {}, {}*sizeof({})) != 0) abort();",
-                    indent(depth),
+                    depth,
+                    "if (posix_memalign((void **)&{}, {}, {}*sizeof({})) != 0) abort();",
                     name,
                     HEAP_BUFFER_ALIGNMENT_BYTES,
                     size,
@@ -94,10 +88,10 @@ impl CBuffer {
 
                 match init_type {
                     InitType::Zero => {
-                        writeln!(
+                        cline!(
                             w,
-                            "{}memset({}, 0, {}*sizeof({}));",
-                            indent(depth),
+                            depth,
+                            "memset({}, 0, {}*sizeof({}));",
                             name,
                             size,
                             c_type(*dtype)
@@ -114,10 +108,10 @@ impl CBuffer {
                 workspace_name,
                 offset_bytes,
             } => {
-                writeln!(
+                cline!(
                     w,
-                    "{}{} *__restrict__ {} = ({} *)({} + {});",
-                    indent(depth),
+                    depth,
+                    "{} *__restrict__ {} = ({} *)({} + {});",
                     c_type(*dtype),
                     name,
                     c_type(*dtype),
@@ -127,10 +121,10 @@ impl CBuffer {
 
                 match init_type {
                     InitType::Zero => {
-                        writeln!(
+                        cline!(
                             w,
-                            "{}memset({}, 0, {}*sizeof({}));",
-                            indent(depth),
+                            depth,
+                            "memset({}, 0, {}*sizeof({}));",
                             name,
                             size,
                             c_type(*dtype)
@@ -146,10 +140,10 @@ impl CBuffer {
                 } else {
                     ""
                 };
-                writeln!(
+                cline!(
                     w,
-                    "{}{} {}[{}] __attribute__((aligned (128))){};",
-                    indent(depth),
+                    depth,
+                    "{} {}[{}] __attribute__((aligned (128))){};",
                     c_type(*dtype),
                     name,
                     size,
@@ -198,26 +192,21 @@ impl CBuffer {
         name: &str,
         dtype: Dtype,
     ) -> fmt::Result {
-        writeln!(
-            w,
-            "{}for (size_t idx = 0; idx < {}; idx++) {{",
-            indent(depth),
-            size,
-        )?;
+        cline!(w, depth, "for (size_t idx = 0; idx < {}; idx++) {{", size)?;
         match dtype {
             Dtype::Float32 => {
                 // Start from the f32 bit pattern for 1.0 and randomize only the mantissa bits.
                 // This keeps benchmark inputs in [1, 2) and avoids denormals, infinities, NaNs,
                 // signed zero, and softmax exp underflow.
-                writeln!(
+                cline!(
                     w,
-                    "{}uint32_t bits = 0x3f800000u | ((uint32_t)rand() & 0x007fffffu);",
-                    indent(depth + 1)
+                    depth + 1,
+                    "uint32_t bits = 0x3f800000u | ((uint32_t)rand() & 0x007fffffu);"
                 )?;
-                writeln!(
+                cline!(
                     w,
-                    "{}__builtin_memcpy(&{}[idx], &bits, sizeof(bits));",
-                    indent(depth + 1),
+                    depth + 1,
+                    "__builtin_memcpy(&{}[idx], &bits, sizeof(bits));",
                     name
                 )?;
             }
@@ -226,35 +215,29 @@ impl CBuffer {
                 // Special-case bf16 to mitigate the need for rtlib support for bf16 truncation,
                 // which is a partial workaround for a Clang issue:
                 //   https://github.com/llvm/llvm-project/pull/84192
-                writeln!(
+                cline!(
                     w,
-                    "{}uint16_t bits = (uint16_t)(0x3f80u | (rand() & 0x007fu));",
-                    indent(depth + 1)
+                    depth + 1,
+                    "uint16_t bits = (uint16_t)(0x3f80u | (rand() & 0x007fu));"
                 )?;
-                writeln!(
+                cline!(
                     w,
-                    "{}__builtin_memcpy(&{}[idx], &bits, sizeof(bits));",
-                    indent(depth + 1),
+                    depth + 1,
+                    "__builtin_memcpy(&{}[idx], &bits, sizeof(bits));",
                     name
                 )?;
             }
             _ => {
-                writeln!(
-                    w,
-                    "{}{}[idx] = ({})rand();",
-                    indent(depth + 1),
-                    name,
-                    c_type(dtype)
-                )?;
+                cline!(w, depth + 1, "{}[idx] = ({})rand();", name, c_type(dtype))?;
             }
         }
-        writeln!(w, "{}}}", indent(depth))
+        cline!(w, depth, "}}")
     }
 
     pub fn emit_free<W: fmt::Write>(&self, w: &mut W, depth: usize) -> fmt::Result {
         match self {
             CBuffer::HeapArray { name, .. } => {
-                writeln!(w, "{}free({name});", indent(depth))?;
+                cline!(w, depth, "free({name});")?;
                 Ok(())
             }
             CBuffer::WorkspaceSlice { .. }

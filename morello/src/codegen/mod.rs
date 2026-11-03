@@ -1,3 +1,9 @@
+macro_rules! cline {
+    ($w:expr, $depth:expr, $($fmt:tt)+) => {
+        writeln!($w, "{}{}", $crate::utils::indent($depth), format_args!($($fmt)+))
+    };
+}
+
 pub(crate) mod c_utils;
 mod clang;
 mod cpu;
