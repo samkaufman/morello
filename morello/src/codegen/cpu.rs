@@ -2046,13 +2046,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let dtype = first_spec.dtype();
                         let byte_count =
                             usize::from(dtype.size()) * usize::try_from(vector_size.get()).unwrap();
-                        let vector_count = first_spec.volume().get() / vector_size.get();
-
-                        for vector_idx in 0..vector_count {
-                            let elem_offset =
-                                i32::try_from(vector_size.get() * vector_idx).unwrap();
+                        for offset in vector_offsets(first_spec.volume().get(), vector_size.get()) {
                             let [src, dst] =
-                                [0, 1].map(|i| self.c_ptr_arg_add(&arguments[i], elem_offset));
+                                [0, 1].map(|i| self.c_ptr_arg_add(&arguments[i], offset));
                             cline!(
                                 w,
                                 depth,
@@ -2155,16 +2151,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let row_len = output_shape[2].get();
                         debug_assert!(row_len > 0);
                         let volume = arguments[2].spec().volume().get();
-                        debug_assert_eq!(volume % vector_size, 0);
-                        let vector_count = volume / vector_size;
-                        for vector_idx in 0..vector_count {
-                            let vector_offset = i32::try_from(vector_idx * vector_size).unwrap();
+                        for offset in vector_offsets(volume, vector_size) {
                             let [lhs, rhs, out] = [0, 1, 2].map(|idx| {
                                 if idx == scalar_idx {
                                     self.c_value_arg(&arguments[idx])
                                 } else {
                                     assert!(idx == broadcast_idx || idx == 2);
-                                    self.c_vec_arg_add(&arguments[idx], vector_offset)
+                                    self.c_vec_arg_add(&arguments[idx], offset)
                                 }
                             });
                             cline!(
@@ -2178,8 +2171,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     Some(CpuKernel::BroadcastVecMultAddBf16F32) => {
                         let vector_size_bf16 = arguments[1].spec().vector_size().unwrap().get();
                         let volume = arguments[1].spec().volume().get();
-                        debug_assert_eq!(volume % vector_size_bf16, 0);
-                        let vector_count = volume / vector_size_bf16;
                         let vfc = get_vector(
                             Tgt::vec_types(),
                             Dtype::Float32,
@@ -2200,13 +2191,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             Ok::<_, fmt::Error>(name)
                         };
                         cline!(w, depth, "/* BroadcastVecMultAddBf16F32 */")?;
-                        for vector_idx in 0..vector_count {
-                            let vector_offset =
-                                i32::try_from(vector_idx * vector_size_bf16).unwrap();
-                            let output_expr = self.c_vec_arg_add(&arguments[2], vector_offset);
+                        for offset in vector_offsets(volume, vector_size_bf16) {
+                            let output_expr = self.c_vec_arg_add(&arguments[2], offset);
                             if Tgt::target_id() == TargetId::Avx512 {
                                 let (broadcast_buffer, broadcast_expr) =
-                                    self.c_arg_parts_add(&arguments[1], vector_offset);
+                                    self.c_arg_parts_add(&arguments[1], offset);
                                 let broadcast_ptr =
                                     self.c_index_ptr(&broadcast_buffer, &broadcast_expr, None);
                                 let broadcast_vec_expr = matches!(
@@ -2228,8 +2217,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     depth,
                                 )?;
                             } else {
-                                let broadcast_expr =
-                                    self.c_vec_arg_add(&arguments[1], vector_offset);
+                                let broadcast_expr = self.c_vec_arg_add(&arguments[1], offset);
                                 let [even_name, odd_name, concat_name, broad_name] =
                                     [(); 4].map(|_| self.namer.fresh_name());
                                 let scalar_name = load_scalar(self, w)?;
@@ -2277,14 +2265,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     Some(CpuKernel::TwoVecBroadcastVecMultAddU8S8S16) => {
                         let vector_size = arguments[2].spec().vector_size().unwrap().get();
                         let volume = arguments[2].spec().volume().get();
-                        debug_assert_eq!(volume % vector_size, 0);
-                        let vector_count = volume / vector_size;
-
-                        for vector_idx in 0..vector_count {
-                            let vector_offset = i32::try_from(vector_idx * vector_size).unwrap();
+                        for offset in vector_offsets(volume, vector_size) {
                             let lhs = self.c_ptr_arg(&arguments[0]);
                             let [rhs, out] =
-                                [1, 2].map(|i| self.c_vec_arg_add(&arguments[i], vector_offset));
+                                [1, 2].map(|i| self.c_vec_arg_add(&arguments[i], offset));
 
                             // TODO: Lift the broadcast out of this loop.
                             let broadcast_name = self.namer.fresh_name();
@@ -2867,18 +2851,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             get_vector(Tgt::vec_types(), arguments[1].spec().dtype(), vector_size);
 
                         let volume = arguments[1].spec().volume().get();
-                        debug_assert_eq!(volume % vector_size.get(), 0);
-                        let vector_count = volume / vector_size.get();
                         let value = self.c_value_arg(&arguments[0]);
-                        for vector_idx in 0..vector_count {
-                            let vector_offset =
-                                i32::try_from(vector_idx * vector_size.get()).unwrap();
-                            let out = self.c_vec_arg_add(&arguments[1], vector_offset);
+                        for offset in vector_offsets(volume, vector_size.get()) {
+                            let out = self.c_vec_arg_add(&arguments[1], offset);
+                            let ty = out_vector_type.name;
                             cline!(
                                 w,
                                 depth,
-                                "{out} = ({value} - ({}){{}}); /* VecScalarAssign */",
-                                out_vector_type.name,
+                                "{out} = ({value} - ({ty}){{}}); /* VecScalarAssign */"
                             )?;
                         }
                         Ok(())
@@ -2887,13 +2867,9 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let vector_size = arguments[0].spec().vector_size().unwrap();
                         debug_assert_eq!(arguments[1].spec().vector_size(), Some(vector_size));
                         let volume = arguments[1].spec().volume().get();
-                        debug_assert_eq!(volume % vector_size.get(), 0);
-                        let vector_count = volume / vector_size.get();
-                        for vector_idx in 0..vector_count {
-                            let vector_offset =
-                                i32::try_from(vector_idx * vector_size.get()).unwrap();
+                        for offset in vector_offsets(volume, vector_size.get()) {
                             let [lhs, rhs] =
-                                [0, 1].map(|i| self.c_vec_arg_add(&arguments[i], vector_offset));
+                                [0, 1].map(|i| self.c_vec_arg_add(&arguments[i], offset));
                             cline!(w, depth, "{lhs} = {lhs} / {rhs}; /* DivideVec */")?;
                         }
                         Ok(())
@@ -3499,12 +3475,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             .spec()
             .vector_size()
             .expect("tensor must be in vector registers");
-        let vector_count = vector_volume / vector_size.get();
-        (0..vector_count)
-            .map(|vector_idx| {
-                let elem_offset = i32::try_from(vector_size.get() * vector_idx).unwrap();
-                self.c_vec_arg_add(tensor, elem_offset)
-            })
+        vector_offsets(vector_volume, vector_size.get())
+            .map(|offset| self.c_vec_arg_add(tensor, offset))
             .collect()
     }
 
@@ -3554,6 +3526,14 @@ impl<Tgt: Target> Default for CpuCodeGenerator<Tgt> {
             phantom: PhantomData,
         }
     }
+}
+
+/// Yields the element offset of each vector in a tensor with `volume`.
+fn vector_offsets(volume: u32, vector_size: u32) -> impl Iterator<Item = i32> {
+    debug_assert_eq!(volume % vector_size, 0);
+    (0..volume)
+        .step_by(usize::try_from(vector_size).unwrap())
+        .map(|offset| i32::try_from(offset).unwrap())
 }
 
 const fn vec_func_names(
