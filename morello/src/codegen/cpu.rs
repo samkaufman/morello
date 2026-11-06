@@ -10,6 +10,7 @@ use super::c_utils::{c_type, printf_fmt, CBuffer, CName, InitType, VecType};
 use super::header::HeaderEmitter;
 use super::namegen::NameGenerator;
 use super::planmem::{StaticAllocationPlan, WorkspaceId};
+use super::vec_accums::{VecAccums, VecReduce};
 use super::ENABLE_STATIC_ALLOCATION;
 use crate::common::{DimSize, Dtype};
 use crate::expr::{AffineForm, Bounds as _, NonAffine, NonAffineExpr, Substitute, Term};
@@ -1386,280 +1387,99 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let max_expr = self.c_value_arg(&arguments[1]);
                         let out_expr = self.c_value_arg(&arguments[2]);
 
-                        let accum_count = input_vector_exprs
-                            .len()
-                            .min(usize::try_from(VECTOR_ACCUM_COUNT).unwrap());
-                        debug_assert_ne!(accum_count, 0);
-                        let vector_accum_names = (0..accum_count)
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
+                        let accum_count = u32::try_from(input_vector_exprs.len())
+                            .unwrap()
+                            .min(VECTOR_ACCUM_COUNT);
                         let vector_type =
                             get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
-                        self.headers.vector_type_defs.insert(vector_type);
-                        for accum_name in &vector_accum_names {
-                            cline!(w, depth, "{0} {accum_name} = ({0}){{}};", vector_type.name)?;
-                        }
-                        // TODO: Don't fully unroll. Instead, read from L1.
-                        for (i, input_vector_name) in input_vector_exprs.iter().enumerate() {
-                            cline!(
-                                w,
-                                depth,
-                                "{} += {exp_helper}({} - {});",
-                                vector_accum_names[i % accum_count],
-                                input_vector_name,
-                                max_expr,
-                            )?;
-                        }
-                        let mut reduced_accum_names = vector_accum_names;
-                        while reduced_accum_names.len() > 1 {
-                            let mut next_round =
-                                Vec::with_capacity(reduced_accum_names.len().div_ceil(2));
-                            for pair in reduced_accum_names.chunks(2) {
-                                if pair.len() == 2 {
-                                    cline!(w, depth, "{} += {};", pair[0], pair[1])?;
-                                }
-                                next_round.push(pair[0].clone());
-                            }
-                            reduced_accum_names = next_round;
-                        }
-                        cline!(
+                        let accums = VecAccums::declare(
+                            self,
                             w,
                             depth,
-                            "{} += {sum_helper}({});",
-                            out_expr,
-                            reduced_accum_names[0],
-                        )
+                            VecReduce::Add,
+                            accum_count,
+                            vector_type,
+                        )?;
+                        // TODO: Don't fully unroll. Instead, read from L1.
+                        for (i, input_vector_name) in input_vector_exprs.iter().enumerate() {
+                            let exp = format!("{exp_helper}({input_vector_name} - {max_expr})");
+                            accums.emit_update(w, depth, i, &exp)?;
+                        }
+                        let sum_vec = accums.emit_reduce(w, depth)?;
+                        cline!(w, depth, "{out_expr} += {sum_helper}({sum_vec});")
                     }
-                    Some(CpuKernel::VectorSoftmaxDenominatorAndMax) => {
-                        cline!(w, depth, "/* VectorSoftmaxDenominatorAndMax */")?;
+                    Some(
+                        cpu_kernel @ (CpuKernel::VectorSoftmaxDenominatorAndMax
+                        | CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts),
+                    ) => {
+                        // The arguments are either an input or partial maxes and denominators,
+                        // followed by the max and denominator outputs.
+                        cline!(w, depth, "/* {cpu_kernel:?} */")?;
                         self.headers.emit_math_include = true;
 
                         let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
+                        let part_denom_vector_exprs = (cpu_kernel
+                            == CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts)
+                            .then(|| self.c_vec_exprs_for_tensor(&arguments[1]));
+                        debug_assert!(part_denom_vector_exprs
+                            .as_ref()
+                            .is_none_or(|d| d.len() == input_vector_exprs.len()));
                         let vector_size = arguments[0].spec().vector_size().unwrap();
                         let vector_type =
                             get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
-                        self.headers.vector_type_defs.insert(vector_type);
                         let exp_helper = self.require_x86_f32_exp_helper(vector_size);
                         let sum_helper = self.require_x86_f32_sum_helper(vector_size);
                         let horizontal_max_helper =
                             self.require_x86_f32_horizontal_max_helper(vector_size);
-                        let max_expr = self.c_value_arg(&arguments[1]);
-                        let denom_expr = self.c_value_arg(&arguments[2]);
+                        let max_expr = self.c_value_arg(&arguments[arguments.len() - 2]);
+                        let denom_expr = self.c_value_arg(&arguments[arguments.len() - 1]);
 
-                        let accum_count = input_vector_exprs
-                            .len()
-                            .min(usize::try_from(VECTOR_ACCUM_COUNT).unwrap());
-                        debug_assert_ne!(accum_count, 0);
-                        let max_accum_names = (0..accum_count)
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
-                        let denom_accum_names = (0..accum_count)
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
-                        for accum_name in &max_accum_names {
-                            cline!(
-                                w,
-                                depth,
-                                "{0} {accum_name} = (-INFINITY) - ({0}){{}};",
-                                vector_type.name
-                            )?;
-                        }
+                        let accum_count = u32::try_from(input_vector_exprs.len())
+                            .unwrap()
+                            .min(VECTOR_ACCUM_COUNT);
+
+                        let max_accums = VecAccums::declare(
+                            self,
+                            w,
+                            depth,
+                            VecReduce::Max,
+                            accum_count,
+                            vector_type,
+                        )?;
                         for (i, input_vector_name) in input_vector_exprs.iter().enumerate() {
-                            cline!(
-                                w,
-                                depth,
-                                "{} = __builtin_elementwise_max({}, {});",
-                                max_accum_names[i % accum_count],
-                                max_accum_names[i % accum_count],
-                                input_vector_name
-                            )?;
+                            max_accums.emit_update(w, depth, i, input_vector_name)?;
                         }
-                        let mut reduced_max_accum_names = max_accum_names;
-                        while reduced_max_accum_names.len() > 1 {
-                            let mut next_round =
-                                Vec::with_capacity(reduced_max_accum_names.len().div_ceil(2));
-                            for pair in reduced_max_accum_names.chunks(2) {
-                                if pair.len() == 2 {
-                                    cline!(
-                                        w,
-                                        depth,
-                                        "{} = __builtin_elementwise_max({}, {});",
-                                        pair[0],
-                                        pair[0],
-                                        pair[1]
-                                    )?;
-                                }
-                                next_round.push(pair[0].clone());
-                            }
-                            reduced_max_accum_names = next_round;
-                        }
+                        let max_vec = max_accums.emit_reduce(w, depth)?;
                         let chunk_max_name = self.namer.fresh_name();
                         cline!(
                             w,
                             depth,
-                            "float {chunk_max_name} = {horizontal_max_helper}({});",
-                            reduced_max_accum_names[0]
+                            "float {chunk_max_name} = {horizontal_max_helper}({max_vec});"
                         )?;
 
-                        for accum_name in &denom_accum_names {
-                            cline!(w, depth, "{0} {accum_name} = ({0}){{}};", vector_type.name)?;
-                        }
+                        let denom_accums = VecAccums::declare(
+                            self,
+                            w,
+                            depth,
+                            VecReduce::Add,
+                            accum_count,
+                            vector_type,
+                        )?;
                         for (i, input_vector_name) in input_vector_exprs.iter().enumerate() {
-                            cline!(
-                                w,
-                                depth,
-                                "{} += {exp_helper}({} - {chunk_max_name});",
-                                denom_accum_names[i % accum_count],
-                                input_vector_name
-                            )?;
+                            let exp =
+                                format!("{exp_helper}({input_vector_name} - {chunk_max_name})");
+                            let term = match &part_denom_vector_exprs {
+                                Some(part_denoms) => format!("{} * {exp}", part_denoms[i]),
+                                None => exp,
+                            };
+                            denom_accums.emit_update(w, depth, i, &term)?;
                         }
-                        let mut reduced_denom_accum_names = denom_accum_names;
-                        while reduced_denom_accum_names.len() > 1 {
-                            let mut next_round =
-                                Vec::with_capacity(reduced_denom_accum_names.len().div_ceil(2));
-                            for pair in reduced_denom_accum_names.chunks(2) {
-                                if pair.len() == 2 {
-                                    cline!(w, depth, "{} += {};", pair[0], pair[1])?;
-                                }
-                                next_round.push(pair[0].clone());
-                            }
-                            reduced_denom_accum_names = next_round;
-                        }
+                        let denom_vec = denom_accums.emit_reduce(w, depth)?;
                         let chunk_denom_name = self.namer.fresh_name();
                         cline!(
                             w,
                             depth,
-                            "float {chunk_denom_name} = {sum_helper}({});",
-                            reduced_denom_accum_names[0],
-                        )?;
-
-                        let old_max_name = self.namer.fresh_name();
-                        let new_max_name = self.namer.fresh_name();
-                        cline!(w, depth, "float {old_max_name} = {max_expr};")?;
-                        cline!(
-                            w,
-                            depth,
-                            "float {new_max_name} = fmaxf({old_max_name}, {chunk_max_name});"
-                        )?;
-                        cline!(
-                            w,
-                            depth,
-                            "{denom_expr} = {denom_expr} * expf({old_max_name} - {new_max_name}) + {chunk_denom_name} * expf({chunk_max_name} - {new_max_name});"
-                        )?;
-                        cline!(w, depth, "{max_expr} = {new_max_name};")
-                    }
-                    Some(CpuKernel::VectorSoftmaxDenominatorAndMaxFromParts) => {
-                        cline!(w, depth, "/* VectorSoftmaxDenominatorAndMaxFromParts */")?;
-                        self.headers.emit_math_include = true;
-
-                        let max_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
-                        let denom_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[1]);
-                        debug_assert_eq!(max_vector_exprs.len(), denom_vector_exprs.len());
-                        let vector_size = arguments[0].spec().vector_size().unwrap();
-                        let vector_type =
-                            get_vector(Tgt::vec_types(), arguments[0].spec().dtype(), vector_size);
-                        self.headers.vector_type_defs.insert(vector_type);
-                        let exp_helper = self.require_x86_f32_exp_helper(vector_size);
-                        let sum_helper = self.require_x86_f32_sum_helper(vector_size);
-                        let horizontal_max_helper =
-                            self.require_x86_f32_horizontal_max_helper(vector_size);
-                        let max_tensor = arguments[2].backing_tensor().unwrap();
-                        let denom_tensor = arguments[3].backing_tensor().unwrap();
-                        let max_buffer = self.name_env.get(&max_tensor.identifier()).unwrap();
-                        let denom_buffer = self.name_env.get(&denom_tensor.identifier()).unwrap();
-                        let max_iexpr = zero_points(arguments[2].make_buffer_indexing_expr());
-                        let denom_iexpr = zero_points(arguments[3].make_buffer_indexing_expr());
-                        let max_expr = self.c_index(max_buffer, &max_iexpr, None);
-                        let denom_expr = self.c_index(denom_buffer, &denom_iexpr, None);
-
-                        let accum_count = max_vector_exprs
-                            .len()
-                            .min(usize::try_from(VECTOR_ACCUM_COUNT).unwrap());
-                        debug_assert_ne!(accum_count, 0);
-                        let max_accum_names = (0..accum_count)
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
-                        let denom_accum_names = (0..accum_count)
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
-                        for accum_name in &max_accum_names {
-                            cline!(
-                                w,
-                                depth,
-                                "{0} {accum_name} = (-INFINITY) - ({0}){{}};",
-                                vector_type.name
-                            )?;
-                        }
-                        for (i, max_vector_name) in max_vector_exprs.iter().enumerate() {
-                            cline!(
-                                w,
-                                depth,
-                                "{} = __builtin_elementwise_max({}, {});",
-                                max_accum_names[i % accum_count],
-                                max_accum_names[i % accum_count],
-                                max_vector_name
-                            )?;
-                        }
-                        let mut reduced_max_accum_names = max_accum_names;
-                        while reduced_max_accum_names.len() > 1 {
-                            let mut next_round =
-                                Vec::with_capacity(reduced_max_accum_names.len().div_ceil(2));
-                            for pair in reduced_max_accum_names.chunks(2) {
-                                if pair.len() == 2 {
-                                    cline!(
-                                        w,
-                                        depth,
-                                        "{} = __builtin_elementwise_max({}, {});",
-                                        pair[0],
-                                        pair[0],
-                                        pair[1]
-                                    )?;
-                                }
-                                next_round.push(pair[0].clone());
-                            }
-                            reduced_max_accum_names = next_round;
-                        }
-                        let chunk_max_name = self.namer.fresh_name();
-                        cline!(
-                            w,
-                            depth,
-                            "float {chunk_max_name} = {horizontal_max_helper}({});",
-                            reduced_max_accum_names[0],
-                        )?;
-
-                        for accum_name in &denom_accum_names {
-                            cline!(w, depth, "{0} {accum_name} = ({0}){{}};", vector_type.name)?;
-                        }
-                        for (i, (max_vector_name, denom_vector_name)) in
-                            max_vector_exprs.iter().zip(&denom_vector_exprs).enumerate()
-                        {
-                            cline!(
-                                w,
-                                depth,
-                                "{} += {} * {exp_helper}({} - {chunk_max_name});",
-                                denom_accum_names[i % accum_count],
-                                denom_vector_name,
-                                max_vector_name,
-                            )?;
-                        }
-                        let mut reduced_denom_accum_names = denom_accum_names;
-                        while reduced_denom_accum_names.len() > 1 {
-                            let mut next_round =
-                                Vec::with_capacity(reduced_denom_accum_names.len().div_ceil(2));
-                            for pair in reduced_denom_accum_names.chunks(2) {
-                                if pair.len() == 2 {
-                                    cline!(w, depth, "{} += {};", pair[0], pair[1])?;
-                                }
-                                next_round.push(pair[0].clone());
-                            }
-                            reduced_denom_accum_names = next_round;
-                        }
-                        let chunk_denom_name = self.namer.fresh_name();
-                        cline!(
-                            w,
-                            depth,
-                            "float {chunk_denom_name} = {sum_helper}({});",
-                            reduced_denom_accum_names[0],
+                            "float {chunk_denom_name} = {sum_helper}({denom_vec});"
                         )?;
 
                         let old_max_name = self.namer.fresh_name();
@@ -1883,42 +1703,25 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         )
                     }
                     Some(CpuKernel::VectorMax) => {
-                        let vector_volume = arguments[0].spec().volume().get();
                         let vector_size = arguments[0].spec().vector_size().unwrap();
-                        let vector_count = vector_volume / vector_size.get();
-
                         self.headers.emit_math_include = true;
                         let horizontal_max_helper =
                             self.require_x86_f32_horizontal_max_helper(vector_size);
-
                         cline!(w, depth, "/* VectorMax */")?;
-
                         let out_expr = self.c_value_arg(&arguments[1]);
-
-                        let input_vector_exprs = self.c_vec_exprs_for_tensor(&arguments[0]);
-
-                        // Emit the vertical reductions
-                        // TODO: Repeatedly halve pairs instead of reducing into the first vector.
-                        for vector_idx in 1..usize::try_from(vector_count).unwrap() {
-                            cline!(
-                                w,
-                                depth,
-                                "{0} = __builtin_elementwise_max({0}, {1});",
-                                input_vector_exprs[0],
-                                input_vector_exprs[vector_idx]
-                            )?;
-                        }
+                        // Emit the vertical reductions, in place in the input vectors
+                        let input_vectors = VecAccums {
+                            op: VecReduce::Max,
+                            names: self.c_vec_exprs_for_tensor(&arguments[0]),
+                        };
+                        let max_vec = input_vectors.emit_reduce(w, depth)?;
 
                         // Emit the single-vector reduction
                         cline!(
                             w,
                             depth,
-                            "{0} = fmaxf({0}, {horizontal_max_helper}({1}));",
-                            out_expr,
-                            input_vector_exprs[0]
-                        )?;
-
-                        Ok(())
+                            "{out_expr} = fmaxf({out_expr}, {horizontal_max_helper}({max_vec}));"
+                        )
                     }
                     Some(CpuKernel::VectorMaxLoop) => {
                         let value_cnt = arguments[0].spec().volume().get();
@@ -3484,13 +3287,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     ///
     /// This will modify `self.headers` if a returned constant is defined in
     /// that header (e.g., float.h).
-    fn c_min_const_for_dtype(&mut self, dt: Dtype) -> &'static str {
+    pub fn c_min_const_for_dtype(&mut self, dt: Dtype) -> &'static str {
         match dt {
-            Dtype::Uint8 => "UINT8_MIN",
+            Dtype::Uint8 | Dtype::Uint16 | Dtype::Uint32 => "0",
             Dtype::Sint8 => "INT8_MIN",
-            Dtype::Uint16 => "UINT16_MIN",
             Dtype::Sint16 => "INT16_MIN",
-            Dtype::Uint32 => "UINT32_MIN",
             Dtype::Sint32 => "INT32_MIN",
             Dtype::Float32 => {
                 self.headers.emit_float_include = true;

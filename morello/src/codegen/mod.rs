@@ -10,6 +10,7 @@ mod cpu;
 mod header;
 mod namegen;
 mod planmem;
+mod vec_accums;
 
 use crate::codegen::clang::clang_path;
 use crate::codegen::cpu::CpuCodeGenerator;

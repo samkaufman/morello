@@ -1,3 +1,5 @@
+use std::iter;
+
 pub struct NameGenerator {
     names_generated: usize,
 }
@@ -11,6 +13,12 @@ impl NameGenerator {
         let new_name = format!("n{:03}", self.names_generated);
         self.names_generated += 1;
         new_name
+    }
+
+    pub fn fresh_names(&mut self, count: usize) -> Vec<String> {
+        iter::repeat_with(|| self.fresh_name())
+            .take(count)
+            .collect()
     }
 }
 
