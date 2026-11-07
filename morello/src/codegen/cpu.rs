@@ -319,7 +319,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 spec.memory(),
             );
             buf.emit(&mut main_body_str, InitType::Zero, depth)?;
-            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
+            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero()));
             self.name_env.insert(kernel_argument.identifier(), buf);
             writeln!(main_body_str)?;
         }
@@ -441,7 +441,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 spec.memory(),
             );
             buf.emit(&mut main_body_str, InitType::Random, depth)?;
-            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero(), None));
+            parameter_buf_names.push(self.c_index_ptr(&buf, &NonAffineExpr::zero()));
             self.name_env.insert(kernel_argument.identifier(), buf);
             writeln!(main_body_str)?;
         }
@@ -498,7 +498,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             write!(
                 kernel_call_str,
                 "{}{}",
-                self.c_index_ptr(a, &AffineForm::zero(), None),
+                self.c_index_ptr(a, &AffineForm::zero()),
                 if i < top_arg_tensors.len() - 1 {
                     ", "
                 } else {
@@ -585,7 +585,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
             depth,
             "printf(\"{} \", {});",
             printf_fmt(tensor.spec().dtype()),
-            self.c_index(buffer, &buffer_indexing_expr, None)
+            self.c_index(buffer, &buffer_indexing_expr)
         )?;
         depth -= 1;
 
@@ -734,7 +734,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         });
                 let out_acc_name = self.namer.fresh_name();
                 let out_buffer = self.c_buffer_for_view(&arguments[2]);
-                let out_ptr = self.c_index_ptr(out_buffer, &out_index_expr, None);
+                let out_ptr = self.c_index_ptr(out_buffer, &out_index_expr);
                 l1_output_acc_names_and_ptrs.push((out_acc_name.clone(), out_ptr));
                 let mut acc_names = vec![out_acc_name];
                 acc_names.extend((1..stripe_count).map(|_| self.namer.fresh_name()));
@@ -1553,8 +1553,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         };
 
                         if !input_buffer.needs_unroll() && !output_buffer.needs_unroll() {
-                            let in_ptr = self.c_index_ptr(&input_buffer, &input_base_expr, None);
-                            let out_ptr = self.c_index_ptr(&output_buffer, &output_base_expr, None);
+                            let in_ptr = self.c_index_ptr(&input_buffer, &input_base_expr);
+                            let out_ptr = self.c_index_ptr(&output_buffer, &output_base_expr);
                             let offset_var = self.namer.fresh_name();
                             let step_size = vector_size.get() * u32::try_from(accum_count).unwrap();
                             debug_assert_eq!(volume % step_size, 0);
@@ -1585,9 +1585,8 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
                                 let input_iexpr = input_base_expr.clone() + offset;
                                 let output_iexpr = output_base_expr.clone() + offset;
-                                let input_ptr = self.c_index_ptr(&input_buffer, &input_iexpr, None);
-                                let output_ptr =
-                                    self.c_index_ptr(&output_buffer, &output_iexpr, None);
+                                let input_ptr = self.c_index_ptr(&input_buffer, &input_iexpr);
+                                let output_ptr = self.c_index_ptr(&output_buffer, &output_iexpr);
                                 let unscaled_vector_name = self.namer.fresh_name();
                                 emit_unscaled_vector(
                                     w,
@@ -1658,11 +1657,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let out_vec = self.namer.fresh_name();
                         let input_ptr = format!(
                             "{} + {loop_iter_name}",
-                            self.c_index_ptr(&input_buffer, &inp_base_expr, None)
+                            self.c_index_ptr(&input_buffer, &inp_base_expr)
                         );
                         let output_ptr = format!(
                             "{} + {loop_iter_name}",
-                            self.c_index_ptr(&output_buffer, &out_base_expr, None)
+                            self.c_index_ptr(&output_buffer, &out_base_expr)
                         );
                         cline!(w, depth + 1, "{vtype} {0};", input_vec)?;
                         cline!(
@@ -2000,14 +1999,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 let (broadcast_buffer, broadcast_expr) =
                                     self.c_arg_parts_add(&arguments[1], offset);
                                 let broadcast_ptr =
-                                    self.c_index_ptr(&broadcast_buffer, &broadcast_expr, None);
-                                let broadcast_vec_expr = matches!(
-                                    &broadcast_buffer,
-                                    CBuffer::RegVars { .. }
-                                )
-                                .then(|| {
-                                    self.c_index_vec(&broadcast_buffer, &broadcast_expr, None)
-                                });
+                                    self.c_index_ptr(&broadcast_buffer, &broadcast_expr);
+                                let broadcast_vec_expr =
+                                    matches!(&broadcast_buffer, CBuffer::RegVars { .. }).then(
+                                        || self.c_index_vec(&broadcast_buffer, &broadcast_expr),
+                                    );
                                 let scalar_name = load_scalar(self, w)?;
                                 self.emit_avx512_bf16_broadcast_vec_mult_add(
                                     w,
@@ -2731,13 +2727,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             depth,
                             "{0} {reciprocal_vec} = (1.0f / ({1})) - ({0}){{}};",
                             vector_type.name,
-                            self.c_index(&denom_buffer, &denom_expr, None),
+                            self.c_index(&denom_buffer, &denom_expr),
                         )?;
 
                         let vector_temp = self.namer.fresh_name();
                         cline!(w, depth, "{} {vector_temp};", vector_type.name)?;
                         if !inout_buffer.needs_unroll() {
-                            let inout_ptr = self.c_index_ptr(&inout_buffer, &inout_expr, None);
+                            let inout_ptr = self.c_index_ptr(&inout_buffer, &inout_expr);
                             let offset_var = self.namer.fresh_name();
                             cline!(
                                 w,
@@ -2765,14 +2761,14 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                     w,
                                     depth,
                                     "__builtin_memcpy(&{vector_temp}, {}, sizeof({vector_temp}));",
-                                    self.c_index_ptr(&inout_buffer, &inout_expr, None),
+                                    self.c_index_ptr(&inout_buffer, &inout_expr),
                                 )?;
                                 cline!(w, depth, "{vector_temp} *= {reciprocal_vec};")?;
                                 cline!(
                                     w,
                                     depth,
                                     "__builtin_memcpy({}, &{vector_temp}, sizeof({vector_temp}));",
-                                    self.c_index_ptr(&inout_buffer, &inout_expr, None),
+                                    self.c_index_ptr(&inout_buffer, &inout_expr),
                                 )?;
                             }
                         }
@@ -3022,7 +3018,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         A: View<Tgt = Tgt>,
     {
         let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
-        self.c_index(&buffer, &expr, None)
+        self.c_index(&buffer, &expr)
     }
 
     /// Returns C lvalue expressions for each argument.
@@ -3058,7 +3054,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         A: View<Tgt = Tgt>,
     {
         let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
-        self.c_index_ptr(&buffer, &expr, None)
+        self.c_index_ptr(&buffer, &expr)
     }
 
     /// Returns a C vector-register expression for `arg`.
@@ -3082,7 +3078,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         A: View<Tgt = Tgt>,
     {
         let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
-        self.c_index_vec(&buffer, &expr, None)
+        self.c_index_vec(&buffer, &expr)
     }
 
     /// Returns C vector-register expressions for each argument.
@@ -3113,35 +3109,21 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     }
 
     /// Returns a C expression referring to the value at a given expression.
-    ///
-    /// Additionally, `reinterpret` may be provided to introduce a type cast.
-    /// This is useful for interpreting a (partial) buffer as a vector type.
-    fn c_index(
-        &self,
-        buffer: &CBuffer,
-        expr: &NonAffineExpr<BufferVar>,
-        reinterpret: Option<String>,
-    ) -> String {
+    fn c_index(&self, buffer: &CBuffer, expr: &NonAffineExpr<BufferVar>) -> String {
         match buffer {
             CBuffer::HeapArray { name, .. }
             | CBuffer::WorkspaceSlice { name, .. }
             | CBuffer::StackArray { name, .. }
-            | CBuffer::Ptr { name, .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => format!(
-                    "{}[{}]",
-                    name,
-                    expr_to_c(&self.sub_expr_bindings(expr.clone()))
-                ),
-            },
+            | CBuffer::Ptr { name, .. } => format!(
+                "{}[{}]",
+                name,
+                expr_to_c(&self.sub_expr_bindings(expr.clone()))
+            ),
             CBuffer::RegVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (name, vec_offset) = buffer.inner_reg_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
-                if let Some(reinterpret) = reinterpret {
-                    debug_assert_eq!(vec_offset, 0);
-                    format!("*({reinterpret} *)(&{name})")
-                } else if vec_offset == 0 {
+                if vec_offset == 0 {
                     name
                 } else {
                     format!("{}[{}]", name, expr_to_c(&vec_offset))
@@ -3150,12 +3132,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
-    fn c_index_vec(
-        &self,
-        buffer: &CBuffer,
-        expr: &NonAffineExpr<BufferVar>,
-        reinterpret: Option<String>,
-    ) -> String {
+    fn c_index_vec(&self, buffer: &CBuffer, expr: &NonAffineExpr<BufferVar>) -> String {
         // self is essentially unused, but included for consistency with c_index.
         #![allow(clippy::only_used_in_recursion)]
 
@@ -3173,44 +3150,25 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 if vec_offset != 0 {
                     panic!("vec_offset must be 0, but was: {vec_offset:?}");
                 }
-                if reinterpret.is_some() {
-                    unimplemented!();
-                }
                 name.clone()
             }
         }
     }
 
-    fn c_index_ptr(
-        &self,
-        buffer: &CBuffer,
-        expr: &NonAffineExpr<BufferVar>,
-        reinterpret: Option<String>,
-    ) -> String {
+    fn c_index_ptr(&self, buffer: &CBuffer, expr: &NonAffineExpr<BufferVar>) -> String {
         match buffer {
             CBuffer::HeapArray { name, .. }
             | CBuffer::WorkspaceSlice { name, .. }
-            | CBuffer::Ptr { name, .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => {
-                    format!(
-                        "{} + {}",
-                        name,
-                        expr_to_c(&self.sub_expr_bindings(expr.clone()))
-                    )
-                }
-            },
-            CBuffer::StackArray { .. } => match reinterpret {
-                Some(_) => unimplemented!(),
-                None => format!("&{}", self.c_index(buffer, expr, None)),
-            },
+            | CBuffer::Ptr { name, .. } => format!(
+                "{} + {}",
+                name,
+                expr_to_c(&self.sub_expr_bindings(expr.clone()))
+            ),
+            CBuffer::StackArray { .. } => format!("&{}", self.c_index(buffer, expr)),
             CBuffer::RegVars { .. } => {
                 let subbed_expr = self.sub_expr_bindings(expr.clone());
                 let (name, vec_offset) = buffer.inner_reg_from_expr(&subbed_expr);
                 debug_assert!(vec_offset.as_constant().is_some());
-                if reinterpret.is_some() {
-                    unimplemented!();
-                };
                 if vec_offset == 0 {
                     format!("&{name}")
                 } else {
