@@ -1028,7 +1028,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         }
     }
 
-    fn c_buffer_for_view(&self, arg: &ViewE<Tgt>) -> &CBuffer {
+    pub fn c_buffer_for_view(&self, arg: &ViewE<Tgt>) -> &CBuffer {
         let backing_tensor = arg.backing_tensor().unwrap();
         self.name_env.get(&backing_tensor.identifier()).unwrap()
     }
@@ -1506,34 +1506,30 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let exp_helper = self.require_x86_f32_exp_helper(vector_size);
                         let sum_helper = self.require_x86_f32_sum_helper(vector_size);
 
-                        let (input_buffer, input_base_expr) = self.c_arg_parts(&arguments[0]);
                         let max_expr = self.c_value_arg(&arguments[1]);
                         let denom_expr = self.c_value_arg(&arguments[2]);
-                        let (output_buffer, output_base_expr) = self.c_arg_parts(&arguments[3]);
                         let volume = arguments[0].spec().volume().get();
-                        let vector_count = volume / vector_size.get();
-                        let accum_count = usize::try_from(vector_count)
-                            .unwrap()
-                            .min(VECTOR_ACCUM_COUNT as usize);
-                        debug_assert!(accum_count > 0);
-                        let vector_accum_names = (0..accum_count)
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
-                        let vector_type = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size)
-                            .native_type_name;
-                        for accum_name in &vector_accum_names {
-                            cline!(w, depth, "{0} {accum_name} = ({0}){{}};", vector_type)?;
-                        }
+                        let accum_count = (volume / vector_size.get()).min(VECTOR_ACCUM_COUNT);
+                        let vector_type = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size);
+                        let accums = VecAccums::declare(
+                            self,
+                            w,
+                            depth,
+                            VecReduce::Add,
+                            accum_count,
+                            vector_type,
+                        )?;
+                        let native_type = vector_type.native_type_name;
                         let input_vector_name = self.namer.fresh_name();
-                        cline!(w, depth, "{0} {input_vector_name};", vector_type)?;
+                        cline!(w, depth, "{native_type} {input_vector_name};")?;
 
-                        let emit_unscaled_vector = |w: &mut W,
-                                                    depth: usize,
-                                                    input_ptr: &str,
-                                                    output_ptr: &str,
-                                                    accum_name: &str,
-                                                    unscaled_vector_name: &str|
-                         -> fmt::Result {
+                        let strip_loop = self.strip_loop(
+                            vector_size,
+                            accum_count,
+                            [&arguments[0], &arguments[3]],
+                        );
+                        strip_loop.emit(w, depth, |w, depth, lane, [input_ptr, output_ptr]| {
+                            let unscaled = self.namer.fresh_name();
                             cline!(
                                 w,
                                 depth,
@@ -1542,152 +1538,59 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             cline!(
                                 w,
                                 depth,
-                                "{vector_type} {unscaled_vector_name} = {exp_helper}({input_vector_name} - {max_expr});"
+                                "{native_type} {unscaled} = {exp_helper}({input_vector_name} - {max_expr});"
                             )?;
                             cline!(
                                 w,
                                 depth,
-                                "__builtin_memcpy({output_ptr}, &{unscaled_vector_name}, sizeof({unscaled_vector_name}));"
+                                "__builtin_memcpy({output_ptr}, &{unscaled}, sizeof({unscaled}));"
                             )?;
-                            cline!(w, depth, "{accum_name} += {unscaled_vector_name};")
-                        };
-
-                        if !input_buffer.needs_unroll() && !output_buffer.needs_unroll() {
-                            let in_ptr = self.c_index_ptr(&input_buffer, &input_base_expr);
-                            let out_ptr = self.c_index_ptr(&output_buffer, &output_base_expr);
-                            let offset_var = self.namer.fresh_name();
-                            let step_size = vector_size.get() * u32::try_from(accum_count).unwrap();
-                            debug_assert_eq!(volume % step_size, 0);
-                            cline!(
-                                w,
-                                depth,
-                                "for (int {offset_var} = 0; {offset_var} < {volume}; {offset_var} += {step_size}) {{"
-                            )?;
-                            for (i, accum_name) in vector_accum_names.iter().enumerate() {
-                                let lane_offset = u32::try_from(i).unwrap() * vector_size.get();
-                                let input_ptr =
-                                    format!("({in_ptr}) + {offset_var} + {lane_offset}");
-                                let output_ptr =
-                                    format!("({out_ptr}) + {offset_var} + {lane_offset}");
-                                let unscaled_vector_name = self.namer.fresh_name();
-                                emit_unscaled_vector(
-                                    w,
-                                    depth + 1,
-                                    &input_ptr,
-                                    &output_ptr,
-                                    accum_name,
-                                    &unscaled_vector_name,
-                                )?;
-                            }
-                            cline!(w, depth, "}}")?;
-                        } else {
-                            for vector_idx in 0..vector_count {
-                                let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
-                                let input_iexpr = input_base_expr.clone() + offset;
-                                let output_iexpr = output_base_expr.clone() + offset;
-                                let input_ptr = self.c_index_ptr(&input_buffer, &input_iexpr);
-                                let output_ptr = self.c_index_ptr(&output_buffer, &output_iexpr);
-                                let unscaled_vector_name = self.namer.fresh_name();
-                                emit_unscaled_vector(
-                                    w,
-                                    depth,
-                                    &input_ptr,
-                                    &output_ptr,
-                                    &vector_accum_names
-                                        [usize::try_from(vector_idx).unwrap() % accum_count],
-                                    &unscaled_vector_name,
-                                )?;
-                            }
-                        }
-                        let mut reduced_accum_names = vector_accum_names;
-                        while reduced_accum_names.len() > 1 {
-                            let mut next_round =
-                                Vec::with_capacity(reduced_accum_names.len().div_ceil(2));
-                            for pair in reduced_accum_names.chunks(2) {
-                                if pair.len() == 2 {
-                                    cline!(w, depth, "{0} += {1};", pair[0], pair[1])?;
-                                }
-                                next_round.push(pair[0].clone());
-                            }
-                            reduced_accum_names = next_round;
-                        }
-                        cline!(
-                            w,
-                            depth,
-                            "{} += {sum_helper}({});",
-                            denom_expr,
-                            reduced_accum_names[0]
-                        )?;
-                        Ok(())
+                            accums.emit_update(w, depth, lane, &unscaled)
+                        })?;
+                        let sum_vec = accums.emit_reduce(w, depth)?;
+                        cline!(w, depth, "{denom_expr} += {sum_helper}({sum_vec});")
                     }
                     Some(CpuKernel::VectorSoftmaxComplete) => {
                         let vector_size =
                             softmax_vector_size::<Tgt>(arguments[0].spec(), arguments[3].spec())
                                 .unwrap();
                         let exp_helper = self.require_x86_f32_exp_helper(vector_size);
-                        let vector_count = arguments[0].spec().volume().get() / vector_size.get();
                         cline!(w, depth, "/* VectorSoftmaxComplete */")?;
 
                         let vtype = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size)
                             .native_type_name;
-
-                        let (input_buffer, inp_base_expr) = self.c_arg_parts(&arguments[0]);
                         let max_expr = self.c_value_arg(&arguments[1]);
                         let denom_expr = self.c_value_arg(&arguments[2]);
-                        let (output_buffer, out_base_expr) = self.c_arg_parts(&arguments[3]);
                         let reciprocal_vec = self.namer.fresh_name();
                         cline!(
                             w,
                             depth,
-                            "{vtype} {reciprocal_vec} = (1.0f / ({0})) - ({vtype}){{}};",
-                            denom_expr
+                            "{vtype} {reciprocal_vec} = (1.0f / ({denom_expr})) - ({vtype}){{}};"
                         )?;
 
-                        let loop_iter_name = self.namer.fresh_name();
-                        cline!(
-                            w,
-                            depth,
-                            "for (int {0} = 0; {0} < {1}; {0} += {2}) {{",
-                            loop_iter_name,
-                            vector_count * vector_size.get(),
-                            vector_size.get()
-                        )?;
-
-                        let input_vec = self.namer.fresh_name();
-                        let out_vec = self.namer.fresh_name();
-                        let input_ptr = format!(
-                            "{} + {loop_iter_name}",
-                            self.c_index_ptr(&input_buffer, &inp_base_expr)
-                        );
-                        let output_ptr = format!(
-                            "{} + {loop_iter_name}",
-                            self.c_index_ptr(&output_buffer, &out_base_expr)
-                        );
-                        cline!(w, depth + 1, "{vtype} {0};", input_vec)?;
-                        cline!(
-                            w,
-                            depth + 1,
-                            "__builtin_memcpy(&{0}, {1}, sizeof({0}));",
-                            input_vec,
-                            input_ptr
-                        )?;
-                        cline!(
-                            w,
-                            depth + 1,
-                            "{vtype} {0} = {exp_helper}({1} - {2});",
-                            out_vec,
-                            input_vec,
-                            max_expr
-                        )?;
-                        cline!(w, depth + 1, "{0} *= {1};", out_vec, reciprocal_vec)?;
-                        cline!(
-                            w,
-                            depth + 1,
-                            "__builtin_memcpy({0}, &{1}, sizeof({1}));",
-                            output_ptr,
-                            out_vec
-                        )?;
-                        cline!(w, depth, "}}")
+                        let strip_loop =
+                            self.strip_loop(vector_size, 1, [&arguments[0], &arguments[3]]);
+                        strip_loop.emit(w, depth, |w, depth, _, [input_ptr, output_ptr]| {
+                            let [input_vec, out_vec] =
+                                [self.namer.fresh_name(), self.namer.fresh_name()];
+                            cline!(w, depth, "{vtype} {input_vec};")?;
+                            cline!(
+                                w,
+                                depth,
+                                "__builtin_memcpy(&{input_vec}, {input_ptr}, sizeof({input_vec}));"
+                            )?;
+                            cline!(
+                                w,
+                                depth,
+                                "{vtype} {out_vec} = {exp_helper}({input_vec} - {max_expr});"
+                            )?;
+                            cline!(w, depth, "{out_vec} *= {reciprocal_vec};")?;
+                            cline!(
+                                w,
+                                depth,
+                                "__builtin_memcpy({output_ptr}, &{out_vec}, sizeof({out_vec}));"
+                            )
+                        })
                     }
                     Some(CpuKernel::ValueMax) => {
                         self.headers.emit_math_include = true;
@@ -1728,90 +1631,38 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             vector_max_loop_properties::<Tgt>(value_cnt).unwrap();
 
                         self.headers.emit_math_include = true;
-
-                        let exprs = [
-                            self.c_ptr_arg(&arguments[0]),
-                            self.c_value_arg(&arguments[1]),
-                        ];
-
+                        let out_expr = self.c_value_arg(&arguments[1]);
                         let horizontal_max_helper =
                             self.require_x86_f32_horizontal_max_helper(vector_size);
                         let vector_type = get_vector(Tgt::vec_types(), Dtype::Float32, vector_size);
                         self.headers.vector_type_defs.insert(vector_type);
-                        let accum_count = usize::try_from(accum_count)
-                            .expect("vector accum_count must fit usize");
-                        let strip = usize::try_from(vector_size.get()).unwrap();
-                        let step_size = accum_count * strip;
-                        let step_idx_name = self.namer.fresh_name();
-                        let vector_accum_names = (0..accum_count)
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
 
                         cline!(w, depth, "/* VectorMaxLoop */")?;
-                        for accum_name in &vector_accum_names {
+                        let accums = VecAccums::declare(
+                            self,
+                            w,
+                            depth,
+                            VecReduce::Max,
+                            accum_count,
+                            vector_type,
+                        )?;
+                        let strip_loop = self.strip_loop(vector_size, accum_count, [&arguments[0]]);
+                        strip_loop.emit(w, depth, |w, depth, lane, [ptr]| {
+                            let input_vec = self.namer.fresh_name();
+                            cline!(w, depth, "{} {input_vec};", vector_type.name)?;
                             cline!(
                                 w,
                                 depth,
-                                "{0} {accum_name} = (-INFINITY) - ({0}){{}};",
-                                vector_type.name
+                                "__builtin_memcpy(&{input_vec}, {ptr}, sizeof({input_vec}));"
                             )?;
-                        }
+                            accums.emit_update(w, depth, lane, &input_vec)
+                        })?;
+                        let max_vec = accums.emit_reduce(w, depth)?;
                         cline!(
                             w,
                             depth,
-                            "for (size_t {0} = 0; {0} < {1}; {0} += {2}) {{",
-                            step_idx_name,
-                            value_cnt,
-                            step_size
-                        )?;
-                        for (i, accum_name) in vector_accum_names.iter().enumerate() {
-                            let input_vec_name = self.namer.fresh_name();
-                            cline!(w, depth + 1, "{0} {input_vec_name};", vector_type.name)?;
-                            cline!(
-                                w,
-                                depth + 1,
-                                "__builtin_memcpy(&{input_vec_name}, {0} + {1} + {2}, sizeof({input_vec_name}));",
-                                exprs[0],
-                                step_idx_name,
-                                i * strip
-                            )?;
-                            cline!(
-                                w,
-                                depth + 1,
-                                "{0} = __builtin_elementwise_max({0}, {input_vec_name});",
-                                accum_name
-                            )?;
-                        }
-                        cline!(w, depth, "}}")?;
-
-                        let mut reduced_accum_names = vector_accum_names;
-                        while reduced_accum_names.len() > 1 {
-                            let mut next_round =
-                                Vec::with_capacity(reduced_accum_names.len().div_ceil(2));
-                            for pair in reduced_accum_names.chunks(2) {
-                                if pair.len() == 2 {
-                                    cline!(
-                                        w,
-                                        depth,
-                                        "{0} = __builtin_elementwise_max({0}, {1});",
-                                        pair[0],
-                                        pair[1]
-                                    )?;
-                                }
-                                next_round.push(pair[0].clone());
-                            }
-                            reduced_accum_names = next_round;
-                        }
-
-                        cline!(
-                            w,
-                            depth,
-                            "{0} = fmaxf({0}, {horizontal_max_helper}({1}));",
-                            exprs[1],
-                            reduced_accum_names[0]
-                        )?;
-
-                        Ok(())
+                            "{out_expr} = fmaxf({out_expr}, {horizontal_max_helper}({max_vec}));"
+                        )
                     }
                     Some(CpuKernel::MultAdd) => {
                         let exprs = self.c_value_args(arguments);
@@ -1848,16 +1699,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         let dtype = first_spec.dtype();
                         let byte_count =
                             usize::from(dtype.size()) * usize::try_from(vector_size.get()).unwrap();
-                        for offset in vector_offsets(first_spec.volume().get(), vector_size.get()) {
-                            let [src, dst] =
-                                [0, 1].map(|i| self.c_ptr_arg_add(&arguments[i], offset));
+                        let strip_loop =
+                            self.strip_loop(vector_size, 1, [&arguments[0], &arguments[1]]);
+                        strip_loop.emit(w, depth, |w, depth, _, [src, dst]| {
                             cline!(
                                 w,
                                 depth,
                                 "__builtin_memcpy((void *)({dst}), (const void *)({src}), {byte_count});  /* Assign */"
-                            )?;
-                        }
-                        Ok(())
+                            )
+                        })
                     }
                     Some(CpuKernel::CastBf16F32) => {
                         let exprs = self.c_value_args(arguments);
@@ -2705,9 +2555,6 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         self.headers.vector_type_defs.insert(vector_type);
                         let volume = arguments[0].spec().volume().get();
                         debug_assert_eq!(volume % vector_size.get(), 0);
-                        let vector_count = volume / vector_size.get();
-
-                        let (inout_buffer, inout_expr) = self.c_arg_parts(&arguments[0]);
                         let (denom_buffer, _) = self.c_arg_parts(&arguments[1]);
 
                         let reciprocal_vec = self.namer.fresh_name();
@@ -2732,47 +2579,20 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let vector_temp = self.namer.fresh_name();
                         cline!(w, depth, "{} {vector_temp};", vector_type.name)?;
-                        if !inout_buffer.needs_unroll() {
-                            let inout_ptr = self.c_index_ptr(&inout_buffer, &inout_expr);
-                            let offset_var = self.namer.fresh_name();
+                        let strip_loop = self.strip_loop(vector_size, 1, [&arguments[0]]);
+                        strip_loop.emit(w, depth, |w, depth, _, [ptr]| {
                             cline!(
                                 w,
                                 depth,
-                                "for (int {offset_var} = 0; {offset_var} < {volume}; {offset_var} += {}) {{",
-                                vector_size.get()
+                                "__builtin_memcpy(&{vector_temp}, {ptr}, sizeof({vector_temp}));"
                             )?;
+                            cline!(w, depth, "{vector_temp} *= {reciprocal_vec};")?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "__builtin_memcpy(&{vector_temp}, ({inout_ptr}) + {offset_var}, sizeof({vector_temp}));"
-                            )?;
-                            cline!(w, depth + 1, "{vector_temp} *= {reciprocal_vec};")?;
-                            cline!(
-                                w,
-                                depth + 1,
-                                "__builtin_memcpy(({inout_ptr}) + {offset_var}, &{vector_temp}, sizeof({vector_temp}));"
-                            )?;
-                            cline!(w, depth, "}}")?;
-                        } else {
-                            for vector_idx in 0..vector_count {
-                                let offset = i32::try_from(vector_idx * vector_size.get()).unwrap();
-                                let inout_expr = inout_expr.clone() + offset;
-                                cline!(
-                                    w,
-                                    depth,
-                                    "__builtin_memcpy(&{vector_temp}, {}, sizeof({vector_temp}));",
-                                    self.c_index_ptr(&inout_buffer, &inout_expr),
-                                )?;
-                                cline!(w, depth, "{vector_temp} *= {reciprocal_vec};")?;
-                                cline!(
-                                    w,
-                                    depth,
-                                    "__builtin_memcpy({}, &{vector_temp}, sizeof({vector_temp}));",
-                                    self.c_index_ptr(&inout_buffer, &inout_expr),
-                                )?;
-                            }
-                        }
-                        Ok(())
+                                depth,
+                                "__builtin_memcpy({ptr}, &{vector_temp}, sizeof({vector_temp}));"
+                            )
+                        })
                     }
                     None => match kernel_type.into_avx512_kernel() {
                         Some(avx512_kernel) => {
@@ -3037,11 +2857,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// heap, workspace, and pointer-backed buffers it returns expressions such as `buf + i`; for
     /// stack or register-backed buffers it returns address expressions such as `&buf[i]` or
     /// `&v012[1]`.
-    fn c_ptr_arg<A>(&self, arg: &A) -> String
+    pub fn c_ptr_arg<A>(&self, arg: &A) -> String
     where
         A: View<Tgt = Tgt>,
     {
-        self.c_ptr_arg_add(arg, 0)
+        self.c_ptr_arg_add(arg, &NonAffineExpr::zero())
     }
 
     /// Returns a C pointer expression for `arg` plus `elem_offset` elements.
@@ -3049,12 +2869,13 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     /// Like [`Self::c_ptr_arg`], but adds `elem_offset` to the flattened element index. For
     /// example, an argument at logical index `i` with `elem_offset == 8` can lower to `buf + i + 8`
     /// or `&buf[i + 8]`.
-    fn c_ptr_arg_add<A>(&self, arg: &A, elem_offset: i32) -> String
+    pub fn c_ptr_arg_add<A>(&self, arg: &A, elem_offset: &NonAffineExpr<CName>) -> String
     where
         A: View<Tgt = Tgt>,
     {
-        let (buffer, expr) = self.c_arg_parts_add(arg, elem_offset);
-        self.c_index_ptr(&buffer, &expr)
+        let (buffer, expr) = self.c_arg_parts(arg);
+        let expr = self.sub_expr_bindings(expr) + elem_offset.clone();
+        self.c_index_ptr_bound(&buffer, &expr)
     }
 
     /// Returns a C vector-register expression for `arg`.
@@ -3156,18 +2977,18 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
     }
 
     fn c_index_ptr(&self, buffer: &CBuffer, expr: &NonAffineExpr<BufferVar>) -> String {
+        self.c_index_ptr_bound(buffer, &self.sub_expr_bindings(expr.clone()))
+    }
+
+    /// Like [`Self::c_index_ptr`], but `expr`'s variables are left as-is.
+    fn c_index_ptr_bound(&self, buffer: &CBuffer, expr: &NonAffineExpr<CName>) -> String {
         match buffer {
             CBuffer::HeapArray { name, .. }
             | CBuffer::WorkspaceSlice { name, .. }
-            | CBuffer::Ptr { name, .. } => format!(
-                "{} + {}",
-                name,
-                expr_to_c(&self.sub_expr_bindings(expr.clone()))
-            ),
-            CBuffer::StackArray { .. } => format!("&{}", self.c_index(buffer, expr)),
+            | CBuffer::Ptr { name, .. } => format!("{name} + {}", expr_to_c(expr)),
+            CBuffer::StackArray { name, .. } => format!("&{name}[{}]", expr_to_c(expr)),
             CBuffer::RegVars { .. } => {
-                let subbed_expr = self.sub_expr_bindings(expr.clone());
-                let (name, vec_offset) = buffer.inner_reg_from_expr(&subbed_expr);
+                let (name, vec_offset) = buffer.inner_reg_from_expr(expr);
                 debug_assert!(vec_offset.as_constant().is_some());
                 if vec_offset == 0 {
                     format!("&{name}")
@@ -3201,26 +3022,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                 None => panic!("var was not bound: {v:?}"),
             },
         });
-
-        match buffer {
-            CBuffer::HeapArray { name, .. }
-            | CBuffer::WorkspaceSlice { name, .. }
-            | CBuffer::Ptr { name, .. } => {
-                format!("{name} + {}", expr_to_c(&buffer_indexing_expr))
-            }
-            CBuffer::StackArray { name, .. } => {
-                format!("&{name}[{}]", expr_to_c(&buffer_indexing_expr))
-            }
-            CBuffer::RegVars { .. } => {
-                let (name, vec_offset) = buffer.inner_reg_from_expr(&buffer_indexing_expr);
-                debug_assert!(vec_offset.as_constant().is_some());
-                if vec_offset == 0 {
-                    format!("&{name}")
-                } else {
-                    format!("&{name}[{}]", expr_to_c(&vec_offset))
-                }
-            }
-        }
+        self.c_index_ptr_bound(buffer, &buffer_indexing_expr)
     }
 
     /// Returns C lvalue expressions for each vector in VRF tensor `tensor`.
@@ -3288,7 +3090,7 @@ impl<Tgt: Target> Default for CpuCodeGenerator<Tgt> {
 }
 
 /// Yields the element offset of each vector in a tensor with `volume`.
-fn vector_offsets(volume: u32, vector_size: u32) -> impl Iterator<Item = i32> {
+pub fn vector_offsets(volume: u32, vector_size: u32) -> impl Iterator<Item = i32> {
     debug_assert_eq!(volume % vector_size, 0);
     (0..volume)
         .step_by(usize::try_from(vector_size).unwrap())
