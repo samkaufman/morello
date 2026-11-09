@@ -2565,14 +2565,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             )?;
                         }
                         writeln!(w, "{}}}", indent(depth))?;
-                        writeln!(
-                            w,
-                            "{}{} = sum8({});",
-                            indent(depth),
-                            exprs[2],
-                            vector_accum_names[0]
-                        )?;
-                        for accum_name in vector_accum_names.iter().skip(1) {
+                        for accum_name in &vector_accum_names {
                             writeln!(w, "{}{} += sum8({});", indent(depth), exprs[2], accum_name)?;
                         }
                         Ok(())
@@ -4132,6 +4125,29 @@ mod tests {
                 .unwrap_or_else(|| panic!("{kernel:?} should emit a loop stepping by 64"));
             assert!(kernel_loop.contains("< 128;"), "{kernel:?}: {kernel_loop}");
         }
+    }
+
+    #[test]
+    fn test_dotproductloop_accumulates_into_output() {
+        use crate::layout::col_major;
+        use crate::lspec;
+        use CpuMemory::L1;
+
+        let mut lspec: LogicalSpec<Avx2Target> = lspec!(MatmulAccum(
+            [1, 1, 64, 1],
+            (f32, L1, row_major),
+            (f32, L1, col_major),
+            (f32, L1, row_major),
+            serial
+        ));
+        lspec.canonicalize().unwrap();
+        let spec = Spec(lspec, <Avx2Target as CpuTarget>::max_mem());
+        let mut source = String::new();
+        spec.select(CpuKernel::DotProductLoop)
+            .emit(false, None, &mut source)
+            .expect("codegen should succeed");
+        assert_eq!(source.matches("+= sum8(").count(), 4, "{source}");
+        assert!(!source.contains(" = sum8("), "{source}");
     }
 
     fn softmax_denominator_and_max_spec(rows: u32, cols: u32) -> Spec<Avx2Target> {
