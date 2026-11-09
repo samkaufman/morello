@@ -2586,7 +2586,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
-                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();
@@ -2626,7 +2626,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             step_idx_name,
-                            lhs_spec.shape()[1],
+                            lhs_spec.shape()[2],
                             VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (i, (_, even_lhs_name, odd_lhs_name, even_rhs_name, odd_rhs_name)) in
@@ -2706,7 +2706,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
 
                         let lhs_spec = arguments[0].spec();
                         debug_assert_eq!(
-                            lhs_spec.shape()[1].get() % DOT_PRODUCT_STRIP_SIZE.get(),
+                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
                             0
                         );
                         let step_idx_name = self.namer.fresh_name();
@@ -2744,7 +2744,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             step_idx_name,
-                            lhs_spec.shape()[1],
+                            lhs_spec.shape()[2],
                             VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (
@@ -2863,7 +2863,7 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             "{0}for (size_t {1} = 0; {1} < {2}; {1} += {3}) {{",
                             indent(depth),
                             step_idx_name,
-                            lhs_spec.shape()[1],
+                            lhs_spec.shape()[2],
                             VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
                         )?;
                         for (
@@ -3991,6 +3991,7 @@ mod tests {
     use crate::layout::row_major;
     use crate::scheduling::parallel_softmax::ParallelSplitSoftmaxDenominatorAndMax;
     use crate::scheduling::ActionT;
+    use crate::scheduling_sugar::SchedulingSugar;
     use crate::shape;
     use crate::spec::{LogicalSpec, PrimitiveBasics, PrimitiveSpecType, Spec};
     use crate::target::{Avx2Target, CpuMemory, CpuTarget};
@@ -4078,6 +4079,59 @@ mod tests {
             interleave_vector_halves_shuffle_indices(16),
             "0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15"
         );
+    }
+
+    #[test]
+    fn test_bf16_dotproductloops_iterate_over_all_of_k() {
+        use crate::{layout, lspec};
+        use CpuMemory::L1;
+
+        let lspecs: [(CpuKernel, LogicalSpec<Avx2Target>); 3] = [
+            (
+                CpuKernel::DotProductLoopBf16Bf16F32,
+                lspec!(MatmulAccum(
+                    [1, 1, 128, 1],
+                    (bf16, L1, row_major),
+                    (bf16, L1, layout![0, 2, 1]),
+                    (f32, L1, row_major),
+                    serial
+                )),
+            ),
+            (
+                CpuKernel::DotProductLoopF32Bf16F32,
+                lspec!(MatmulAccum(
+                    [1, 1, 128, 1],
+                    (f32, L1, row_major),
+                    (bf16, L1, layout![0, 2, 1]),
+                    (f32, L1, row_major),
+                    serial
+                )),
+            ),
+            (
+                CpuKernel::DotProductLoopF32InterleavedBf16F32,
+                lspec!(MatmulAccum(
+                    [1, 1, 128, 1],
+                    (f32, L1, layout![0, 1, 2, 2 oe(16)]),
+                    (bf16, L1, layout![0, 2, 1]),
+                    (f32, L1, row_major),
+                    serial
+                )),
+            ),
+        ];
+        for (kernel, mut lspec) in lspecs {
+            lspec.canonicalize().unwrap();
+            let spec = Spec(lspec, <Avx2Target as CpuTarget>::max_mem());
+            let mut source = String::new();
+            // Emit the benchmark harness; the other can't yet fill odd-even layouts.
+            spec.select(kernel)
+                .emit(true, None, &mut source)
+                .expect("codegen should succeed");
+            let kernel_loop = source
+                .lines()
+                .find(|l| l.contains("+= 64) {"))
+                .unwrap_or_else(|| panic!("{kernel:?} should emit a loop stepping by 64"));
+            assert!(kernel_loop.contains("< 128;"), "{kernel:?}: {kernel_loop}");
+        }
     }
 
     fn softmax_denominator_and_max_spec(rows: u32, cols: u32) -> Spec<Avx2Target> {
