@@ -1037,13 +1037,12 @@ impl CpuKernel {
                     )
             }
             CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
-                // TODO: Simplify with a closure instead of constructing all layouts AOT.
-                if !matches!(typ, PrimitiveSpecType::Matmul { accum: true }) {
-                    return false;
-                }
-                let layout0 = layout![0, 1, 2, 2 oe(16)];
-                let layout1 = layout![0, 2, 1, 1 oe(16)];
-                dotproductloop_bf16_applies(&operands, Dtype::Float32, [layout0, layout1])
+                matches!(typ, PrimitiveSpecType::Matmul { accum: true })
+                    && dotproductloop_bf16_applies(
+                        &operands,
+                        Dtype::Float32,
+                        [layout![0, 1, 2, 2 oe(16)]],
+                    )
             }
             CpuKernel::DotProductLoopBf16Bf16F32 => {
                 matches!(typ, PrimitiveSpecType::Matmul { accum: true })
