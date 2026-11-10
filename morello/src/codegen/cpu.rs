@@ -31,6 +31,7 @@ use crate::target::{
         DOT_PRODUCT_STRIP_SIZE, VECTOR_ACCUM_COUNT,
     },
     Avx512Kernel, CpuKernel, CpuMemory, CpuTarget, Kernel, Target, TargetId,
+    DOT_PRODUCT_VDPBF16PS_STRIP_SIZE,
 };
 use crate::utils::{ascii_name, indent, LinePrefixWrite};
 use crate::views::{Tensor, View, ViewE};
@@ -607,56 +608,36 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
         match kernel {
             Avx512Kernel::Cpu(_) => unreachable!("CPU kernels should use the generic emitter"),
             Avx512Kernel::DotProductLoopVdpbf16ps => {
-                let exprs = [
-                    self.c_ptr_arg(&arguments[0]),
-                    self.c_ptr_arg(&arguments[1]),
-                    self.c_value_arg(&arguments[2]),
-                ];
-
-                let lhs_spec = arguments[0].spec();
-                let k = lhs_spec.shape()[2].get();
-                let strip = 32;
-                let accum_count = vector_accum_count(k, strip)
+                let out_expr = self.c_value_arg(&arguments[2]);
+                let k = arguments[0].spec().shape()[2].get();
+                let accum_count = vector_accum_count(k, DOT_PRODUCT_VDPBF16PS_STRIP_SIZE.get())
                     .expect("AVX512 VDPBF16PS applies should have ensured accum_count");
-                let step_size = accum_count * strip;
-                let step_idx_name = self.namer.fresh_name();
-                let vector_accum_names = (0..usize::try_from(accum_count).unwrap())
-                    .map(|_| self.namer.fresh_name())
-                    .collect::<Vec<_>>();
+                let accum_names = self
+                    .namer
+                    .fresh_names(usize::try_from(accum_count).unwrap());
 
                 cline!(w, depth, "// DotProductLoopVdpbf16ps")?;
-                for accum_name in &vector_accum_names {
+                for accum_name in &accum_names {
                     cline!(w, depth, "__m512 {accum_name} = _mm512_setzero_ps();")?;
                 }
-                cline!(
-                    w,
-                    depth,
-                    "for (size_t {0} = 0; {0} < {1}; {0} += {2}) {{",
-                    step_idx_name,
-                    k,
-                    step_size,
-                )?;
-                for (i, accum_name) in vector_accum_names.iter().enumerate() {
-                    let offset = u32::try_from(i).expect("accum index should fit u32") * strip;
-                    cline!(
-                        w,
-                        depth + 1,
-                        "{0} = _mm512_dpbf16_ps({0}, (__m512bh)_mm512_loadu_si512((const void *)({1} + {2} + {3})), (__m512bh)_mm512_loadu_si512((const void *)({4} + {2} + {3})));",
-                        accum_name,
-                        exprs[0],
-                        step_idx_name,
-                        offset,
-                        exprs[1],
-                    )?;
-                }
-                cline!(w, depth, "}}")?;
-                for accum_name in &vector_accum_names {
+                let strip_loop = self.strip_loop(
+                    DOT_PRODUCT_VDPBF16PS_STRIP_SIZE,
+                    accum_count,
+                    [&arguments[0], &arguments[1]],
+                );
+                strip_loop.emit(w, depth, |w, depth, lane, [lhs, rhs]| {
+                    let accum_name = &accum_names[lane];
                     cline!(
                         w,
                         depth,
-                        "{} += _mm512_reduce_add_ps({});",
-                        exprs[2],
-                        accum_name,
+                        "{accum_name} = _mm512_dpbf16_ps({accum_name}, (__m512bh)_mm512_loadu_si512((const void *)({lhs})), (__m512bh)_mm512_loadu_si512((const void *)({rhs})));"
+                    )
+                })?;
+                for accum_name in &accum_names {
+                    cline!(
+                        w,
+                        depth,
+                        "{out_expr} += _mm512_reduce_add_ps({accum_name});"
                     )?;
                 }
                 Ok(())
@@ -1946,104 +1927,52 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                     }
                     Some(CpuKernel::DotProductLoop) => {
                         self.headers.emit_sum8 = true;
+                        let out_expr = self.c_value_arg(&arguments[2]);
 
-                        let exprs = [
-                            self.c_ptr_arg(&arguments[0]),
-                            self.c_ptr_arg(&arguments[1]),
-                            self.c_value_arg(&arguments[2]),
-                        ];
-
-                        let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE, 0);
+                        let k = arguments[0].spec().shape()[2].get();
                         let strip = DOT_PRODUCT_STRIP_SIZE.get();
-                        let chunk_count = lhs_spec.shape()[2].get() / strip;
+                        debug_assert_eq!(k % strip, 0);
                         let accum_count = (1..=VECTOR_ACCUM_COUNT)
                             .rev()
-                            .find(|c| chunk_count.is_multiple_of(*c))
+                            .find(|c| (k / strip).is_multiple_of(*c))
                             .expect("DotProductLoop applies should have ensured accum_count");
-                        let step_size = accum_count * strip;
-                        let step_idx_name = self.namer.fresh_name();
-                        let vector_accum_names = (0..usize::try_from(accum_count).unwrap())
-                            .map(|_| self.namer.fresh_name())
-                            .collect::<Vec<_>>();
+                        let accum_names = self
+                            .namer
+                            .fresh_names(usize::try_from(accum_count).unwrap());
 
                         let vtype =
                             get_vector(Tgt::vec_types(), Dtype::Float32, DOT_PRODUCT_STRIP_SIZE);
                         self.headers.vector_type_defs.insert(vtype);
                         cline!(w, depth, "// DotProductLoop")?;
-                        for accum_name in &vector_accum_names {
-                            cline!(w, depth, "{0} {1} = ({0}){{0}};", vtype.name, accum_name)?;
+                        for accum_name in &accum_names {
+                            cline!(w, depth, "{0} {accum_name} = ({0}){{0}};", vtype.name)?;
                         }
-                        cline!(
-                            w,
-                            depth,
-                            "for (size_t {0} = 0; {0} < {1}; {0} += {2}) {{",
-                            step_idx_name,
-                            lhs_spec.shape()[2],
-                            step_size
-                        )?;
-                        for (i, accum_name) in vector_accum_names.iter().enumerate() {
-                            let lhs_vec = self.namer.fresh_name();
-                            let rhs_vec = self.namer.fresh_name();
-                            cline!(w, depth + 1, "{0} {1};", vtype.name, lhs_vec)?;
-                            cline!(w, depth + 1, "{0} {1};", vtype.name, rhs_vec)?;
-                            cline!(
-                                w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3}, sizeof({0}));",
-                                lhs_vec,
-                                exprs[0],
-                                step_idx_name,
-                                i * DOT_PRODUCT_STRIP_SIZE.get() as usize
-                            )?;
-                            cline!(
-                                w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3}, sizeof({0}));",
-                                rhs_vec,
-                                exprs[1],
-                                step_idx_name,
-                                i * DOT_PRODUCT_STRIP_SIZE.get() as usize
-                            )?;
-                            cline!(
-                                w,
-                                depth + 1,
-                                "{0} += {1} * {2};",
-                                accum_name,
-                                lhs_vec,
-                                rhs_vec
-                            )?;
-                        }
-                        cline!(w, depth, "}}")?;
-                        for accum_name in &vector_accum_names {
-                            cline!(w, depth, "{} += sum8({});", exprs[2], accum_name)?;
+                        let strip_loop = self.strip_loop(
+                            DOT_PRODUCT_STRIP_SIZE,
+                            accum_count,
+                            [&arguments[0], &arguments[1]],
+                        );
+                        strip_loop.emit(w, depth, |w, depth, lane, [lhs_ptr, rhs_ptr]| {
+                            let [lhs_vec, rhs_vec] =
+                                [self.namer.fresh_name(), self.namer.fresh_name()];
+                            cline!(w, depth, "{} {lhs_vec};", vtype.name)?;
+                            cline!(w, depth, "{} {rhs_vec};", vtype.name)?;
+                            for (vec, ptr) in [(&lhs_vec, lhs_ptr), (&rhs_vec, rhs_ptr)] {
+                                cline!(
+                                    w,
+                                    depth,
+                                    "__builtin_memcpy(&{vec}, {ptr}, sizeof({vec}));"
+                                )?;
+                            }
+                            cline!(w, depth, "{} += {lhs_vec} * {rhs_vec};", accum_names[lane])
+                        })?;
+                        for accum_name in &accum_names {
+                            cline!(w, depth, "{out_expr} += sum8({accum_name});")?;
                         }
                         Ok(())
                     }
                     Some(CpuKernel::DotProductLoopBf16Bf16F32) => {
-                        let exprs = [
-                            self.c_ptr_arg(&arguments[0]),
-                            self.c_ptr_arg(&arguments[1]),
-                            self.c_value_arg(&arguments[2]),
-                        ];
-
-                        let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(
-                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
-                            0
-                        );
-                        let step_idx_name = self.namer.fresh_name();
-                        let loop_names = (0..VECTOR_ACCUM_COUNT as usize)
-                            .map(|_| {
-                                (
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                )
-                            })
-                            .collect::<Vec<_>>();
+                        let out_expr = self.c_value_arg(&arguments[2]);
 
                         let (shift_fn, _, _, _) = vec_func_names(16);
 
@@ -2055,50 +1984,43 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         );
 
                         cline!(w, depth, "// DotProductLoopBf16Bf16F32")?;
-                        for (accum_name, _, _, _, _) in &loop_names {
-                            cline!(w, depth, "{0} {1} = ({0}){{0}};", vf32.name, accum_name)?;
-                        }
-                        cline!(
+                        let accums = VecAccums::declare(
+                            self,
                             w,
                             depth,
-                            "for (size_t {0} = 0; {0} < {1}; {0} += {2}) {{",
-                            step_idx_name,
-                            lhs_spec.shape()[2],
-                            VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                            VecReduce::Add,
+                            VECTOR_ACCUM_COUNT,
+                            vf32,
                         )?;
-                        for (i, (_, even_lhs_name, odd_lhs_name, even_rhs_name, odd_rhs_name)) in
-                            loop_names.iter().enumerate()
-                        {
-                            for (j, odd_name, even_name) in [
-                                (0, odd_lhs_name, even_lhs_name),
-                                (1, odd_rhs_name, even_rhs_name),
-                            ] {
-                                let compressed_name = self.namer.fresh_name();
-                                cline!(w, depth + 1, "{0} {compressed_name};", vf32.name)?;
+                        let strip_loop = self.strip_loop(
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                            VECTOR_ACCUM_COUNT,
+                            [&arguments[0], &arguments[1]],
+                        );
+                        strip_loop.emit(w, depth, |w, depth, lane, [lhs_ptr, rhs_ptr]| {
+                            // Loads the bf16 strip at `ptr`, returning f32 vectors of its odd and
+                            // even elements.
+                            let mut load = |w: &mut W, ptr: &str| {
+                                let [compressed_name, odd_name, even_name] =
+                                    [(); 3].map(|_| self.namer.fresh_name());
+                                cline!(w, depth, "{0} {compressed_name};", vf32.name)?;
                                 cline!(
                                     w,
-                                    depth + 1,
-                                    "__builtin_memcpy(&{0}, {1} + {2} + {3}, sizeof({0}));",
-                                    compressed_name,
-                                    exprs[j],
-                                    step_idx_name,
-                                    i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                    depth,
+                                    "__builtin_memcpy(&{compressed_name}, {ptr}, sizeof({compressed_name}));"
                                 )?;
-
                                 cline!(
                                     w,
-                                    depth + 1,
-                                    "{0} {1} = ({0}){shift_fn}(({2}){compressed_name}, 16);",
+                                    depth,
+                                    "{0} {odd_name} = ({0}){shift_fn}(({1}){compressed_name}, 16);",
                                     vf32.name,
-                                    odd_name,
                                     vf32.native_type_name,
                                 )?;
                                 cline!(
                                     w,
-                                    depth + 1,
-                                    "{} {} = {};",
+                                    depth,
+                                    "{} {even_name} = {};",
                                     vf32.name,
-                                    even_name,
                                     bf16_even_lanes_expr(
                                         16,
                                         vf32.name,
@@ -2106,53 +2028,25 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                         &compressed_name,
                                     ),
                                 )?;
-                            }
-
-                            for (lhs, rhs, a) in [
-                                (even_lhs_name, even_rhs_name, &loop_names[i].0),
-                                (
-                                    odd_lhs_name,
-                                    odd_rhs_name,
-                                    &loop_names[(i + 2) % loop_names.len()].0,
-                                ),
-                            ] {
-                                cline!(w, depth + 1, "{0} += {lhs} * {rhs};", a)?;
-                            }
-                        }
-                        cline!(w, depth, "}}")?;
-                        for (accum_name, _, _, _, _) in &loop_names {
-                            cline!(w, depth, "{} += sum8({});", exprs[2], accum_name)?;
+                                Ok::<_, fmt::Error>((odd_name, even_name))
+                            };
+                            let (odd_lhs_name, even_lhs_name) = load(w, lhs_ptr)?;
+                            let (odd_rhs_name, even_rhs_name) = load(w, rhs_ptr)?;
+                            let even_product = format!("{even_lhs_name} * {even_rhs_name}");
+                            let odd_product = format!("{odd_lhs_name} * {odd_rhs_name}");
+                            accums.emit_update(w, depth, lane, &even_product)?;
+                            accums.emit_update(w, depth, lane + 2, &odd_product)
+                        })?;
+                        for accum_name in &accums.names {
+                            cline!(w, depth, "{out_expr} += sum8({accum_name});")?;
                         }
 
-                        self.headers.vector_type_defs.insert(vf32);
                         self.headers.vector_type_defs.insert(vbf16);
                         self.headers.emit_sum8 = true;
                         Ok(())
                     }
                     Some(CpuKernel::DotProductLoopF32Bf16F32) => {
-                        let exprs = [
-                            self.c_ptr_arg(&arguments[0]),
-                            self.c_ptr_arg(&arguments[1]),
-                            self.c_value_arg(&arguments[2]),
-                        ];
-
-                        let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(
-                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
-                            0
-                        );
-                        let step_idx_name = self.namer.fresh_name();
-                        let loop_names = (0..VECTOR_ACCUM_COUNT as usize)
-                            .map(|_| {
-                                (
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                )
-                            })
-                            .collect::<Vec<_>>();
+                        let out_expr = self.c_value_arg(&arguments[2]);
 
                         let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
                         let vbf16 = get_vector(
@@ -2162,110 +2056,69 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         );
 
                         cline!(w, depth, "// DotProductLoopF32Bf16F32")?;
-                        for (accum_name, _, _, _, _) in &loop_names {
-                            cline!(w, depth, "{0} {1} = ({0}){{0}};", vf32.name, accum_name)?;
-                        }
-                        cline!(
+                        let accums = VecAccums::declare(
+                            self,
                             w,
                             depth,
-                            "for (size_t {0} = 0; {0} < {1}; {0} += {2}) {{",
-                            step_idx_name,
-                            lhs_spec.shape()[2],
-                            VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                            VecReduce::Add,
+                            VECTOR_ACCUM_COUNT,
+                            vf32,
                         )?;
-                        for (
-                            i,
-                            (_, upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name),
-                        ) in loop_names.iter().enumerate()
-                        {
+                        let strip_loop = self.strip_loop(
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                            VECTOR_ACCUM_COUNT,
+                            [&arguments[0], &arguments[1]],
+                        );
+                        strip_loop.emit(w, depth, |w, depth, lane, [lhs_ptr, rhs_ptr]| {
+                            let [upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name] =
+                                [(); 4].map(|_| self.namer.fresh_name());
+
                             // Load already-dequantized f32 lhs into a pair of vectors.
-                            cline!(w, depth + 1, "{0} {upper_lhs_name};", vf32.name)?;
+                            cline!(w, depth, "{} {upper_lhs_name};", vf32.name)?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3}, sizeof({0}));",
-                                upper_lhs_name,
-                                exprs[0],
-                                step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                depth,
+                                "__builtin_memcpy(&{upper_lhs_name}, {lhs_ptr}, sizeof({upper_lhs_name}));"
                             )?;
-                            cline!(w, depth + 1, "{0} {lower_lhs_name};", vf32.name)?;
+                            cline!(w, depth, "{} {lower_lhs_name};", vf32.name)?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3} + 8, sizeof({0}));",
-                                lower_lhs_name,
-                                exprs[0],
-                                step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                depth,
+                                "__builtin_memcpy(&{lower_lhs_name}, {lhs_ptr} + 8, sizeof({lower_lhs_name}));"
                             )?;
 
                             // Load compressed bf16 rhs strip and dequantize.
                             let compressed_name = self.namer.fresh_name();
-                            cline!(w, depth + 1, "{} {compressed_name};", vf32.name)?;
+                            cline!(w, depth, "{} {compressed_name};", vf32.name)?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3}, sizeof({0}));",
-                                compressed_name,
-                                exprs[1],
-                                step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                depth,
+                                "__builtin_memcpy(&{compressed_name}, {rhs_ptr}, sizeof({compressed_name}));"
                             )?;
-                            cline!(w, depth + 1, "{} {};", vf32.name, upper_rhs_name)?;
-                            cline!(w, depth + 1, "{} {};", vf32.name, lower_rhs_name)?;
+                            cline!(w, depth, "{} {upper_rhs_name};", vf32.name)?;
+                            cline!(w, depth, "{} {lower_rhs_name};", vf32.name)?;
                             cline!(
                                 w,
-                                depth + 1,
+                                depth,
                                 "cvtbf16_fp32_256({compressed_name}, &{upper_rhs_name}, &{lower_rhs_name});"
                             )?;
 
-                            for (lhs, rhs, a) in [
-                                (upper_lhs_name, upper_rhs_name, &loop_names[i].0),
-                                (
-                                    lower_lhs_name,
-                                    lower_rhs_name,
-                                    &loop_names[(i + 2) % loop_names.len()].0,
-                                ),
-                            ] {
-                                cline!(w, depth + 1, "{a} += {lhs} * {rhs};")?;
-                            }
-                        }
-                        cline!(w, depth, "}}")?;
-                        for (accum_name, _, _, _, _) in &loop_names {
-                            cline!(w, depth, "{} += sum8({});", exprs[2], accum_name)?;
+                            let upper_product = format!("{upper_lhs_name} * {upper_rhs_name}");
+                            let lower_product = format!("{lower_lhs_name} * {lower_rhs_name}");
+                            accums.emit_update(w, depth, lane, &upper_product)?;
+                            accums.emit_update(w, depth, lane + 2, &lower_product)
+                        })?;
+                        for accum_name in &accums.names {
+                            cline!(w, depth, "{out_expr} += sum8({accum_name});")?;
                         }
 
-                        self.headers.vector_type_defs.insert(vf32);
                         self.headers.vector_type_defs.insert(vbf16);
                         self.headers.emit_sum8 = true;
                         self.headers.emit_cvtbf16_fp32 = true;
                         Ok(())
                     }
                     Some(CpuKernel::DotProductLoopF32InterleavedBf16F32) => {
-                        let exprs = [
-                            self.c_ptr_arg(&arguments[0]),
-                            self.c_ptr_arg(&arguments[1]),
-                            self.c_value_arg(&arguments[2]),
-                        ];
-
-                        let lhs_spec = arguments[0].spec();
-                        debug_assert_eq!(
-                            lhs_spec.shape()[2].get() % DOT_PRODUCT_STRIP_SIZE.get(),
-                            0
-                        );
-                        let step_idx_name = self.namer.fresh_name();
-                        let loop_names = (0..VECTOR_ACCUM_COUNT as usize)
-                            .map(|_| {
-                                (
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                    self.namer.fresh_name(),
-                                )
-                            })
-                            .collect::<Vec<_>>();
+                        let out_expr = self.c_value_arg(&arguments[2]);
 
                         let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
                         let vbf16 = get_vector(
@@ -2275,73 +2128,58 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         );
 
                         cline!(w, depth, "// DotProductLoopF32InterleavedBf16F32")?;
-                        for (accum_name, _, _, _, _) in &loop_names {
-                            cline!(w, depth, "{0} {1} = ({0}){{0}};", vf32.name, accum_name)?;
-                        }
-                        cline!(
+                        let accums = VecAccums::declare(
+                            self,
                             w,
                             depth,
-                            "for (size_t {0} = 0; {0} < {1}; {0} += {2}) {{",
-                            step_idx_name,
-                            lhs_spec.shape()[2],
-                            VECTOR_ACCUM_COUNT * DOT_PRODUCT_BF16_STRIP_SIZE.get()
+                            VecReduce::Add,
+                            VECTOR_ACCUM_COUNT,
+                            vf32,
                         )?;
-                        for (
-                            i,
-                            (_, upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name),
-                        ) in loop_names.iter().enumerate()
-                        {
+                        let strip_loop = self.strip_loop(
+                            DOT_PRODUCT_BF16_STRIP_SIZE,
+                            VECTOR_ACCUM_COUNT,
+                            [&arguments[0], &arguments[1]],
+                        );
+                        strip_loop.emit(w, depth, |w, depth, lane, [lhs_ptr, rhs_ptr]| {
+                            let [upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name] =
+                                [(); 4].map(|_| self.namer.fresh_name());
+
                             // Load already-dequantized f32 lhs into a pair of vectors.
-                            cline!(w, depth + 1, "{} {upper_lhs_name};", vf32.name)?;
+                            cline!(w, depth, "{} {upper_lhs_name};", vf32.name)?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3}, sizeof({0}));",
-                                upper_lhs_name,
-                                exprs[0],
-                                step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                depth,
+                                "__builtin_memcpy(&{upper_lhs_name}, {lhs_ptr}, sizeof({upper_lhs_name}));"
                             )?;
-                            cline!(w, depth + 1, "{} {lower_lhs_name};", vf32.name)?;
+                            cline!(w, depth, "{} {lower_lhs_name};", vf32.name)?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3} + 8, sizeof({0}));",
-                                lower_lhs_name,
-                                exprs[0],
-                                step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                depth,
+                                "__builtin_memcpy(&{lower_lhs_name}, {lhs_ptr} + 8, sizeof({lower_lhs_name}));"
                             )?;
 
                             // Load compressed bf16 rhs strip and dequantize without crossing lanes.
                             let compressed_name = self.namer.fresh_name();
-                            cline!(w, depth + 1, "{} {compressed_name};", vf32.name)?;
+                            cline!(w, depth, "{} {compressed_name};", vf32.name)?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "__builtin_memcpy(&{0}, {1} + {2} + {3}, sizeof({0}));",
-                                compressed_name,
-                                exprs[1],
-                                step_idx_name,
-                                i * DOT_PRODUCT_BF16_STRIP_SIZE.get() as usize
+                                depth,
+                                "__builtin_memcpy(&{compressed_name}, {rhs_ptr}, sizeof({compressed_name}));"
                             )?;
-
                             let (shift_fn, _, _, _) = vec_func_names(16);
                             cline!(
                                 w,
-                                depth + 1,
-                                "{0} {1} = ({0}){shift_fn}(({2}){3}, 16);",
+                                depth,
+                                "{0} {upper_rhs_name} = ({0}){shift_fn}(({1}){compressed_name}, 16);",
                                 vf32.name,
-                                upper_rhs_name,
                                 vf32.native_type_name,
-                                compressed_name
                             )?;
                             cline!(
                                 w,
-                                depth + 1,
-                                "{0} {1} = {2};",
+                                depth,
+                                "{} {lower_rhs_name} = {};",
                                 vf32.name,
-                                lower_rhs_name,
                                 bf16_even_lanes_expr(
                                     16,
                                     vf32.name,
@@ -2350,23 +2188,15 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                 ),
                             )?;
 
-                            for (lhs, rhs, a) in [
-                                (upper_lhs_name, upper_rhs_name, &loop_names[i].0),
-                                (
-                                    lower_lhs_name,
-                                    lower_rhs_name,
-                                    &loop_names[(i + 2) % loop_names.len()].0,
-                                ),
-                            ] {
-                                cline!(w, depth + 1, "{a} += {lhs} * {rhs};")?;
-                            }
-                        }
-                        cline!(w, depth, "}}")?;
-                        for (accum_name, _, _, _, _) in &loop_names {
-                            cline!(w, depth, "{} += sum8({});", exprs[2], accum_name)?;
+                            let upper_product = format!("{upper_lhs_name} * {upper_rhs_name}");
+                            let lower_product = format!("{lower_lhs_name} * {lower_rhs_name}");
+                            accums.emit_update(w, depth, lane, &upper_product)?;
+                            accums.emit_update(w, depth, lane + 2, &lower_product)
+                        })?;
+                        for accum_name in &accums.names {
+                            cline!(w, depth, "{out_expr} += sum8({accum_name});")?;
                         }
 
-                        self.headers.vector_type_defs.insert(vf32);
                         self.headers.vector_type_defs.insert(vbf16);
                         self.headers.emit_sum8 = true;
                         Ok(())

@@ -1,6 +1,6 @@
 use super::cpu::{vector_accum_count, CpuMemoryBimap, VECTOR_ACCUM_COUNT};
 use super::{cpu::CpuTarget, CpuKernel, Kernel, TargetId};
-use crate::common::Dtype;
+use crate::common::{DimSize, Dtype};
 use crate::cost::MainCost;
 use crate::grid::canon::CanonicalBimap;
 use crate::grid::general::BiMap;
@@ -14,6 +14,9 @@ use crate::{codegen::c_utils::VecType, views::View};
 use nonzero::nonzero as nz;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
+
+/// Elements of each operand consumed by one VDPBF16PS in [Avx512Kernel::DotProductLoopVdpbf16ps].
+pub(crate) const DOT_PRODUCT_VDPBF16PS_STRIP_SIZE: DimSize = nz!(32u32);
 
 crate::target::x86::define_x86_vec_types!(
     X86_AVX512_VEC_TYPES,
@@ -179,11 +182,12 @@ impl Kernel for Avx512Kernel {
         match self {
             Avx512Kernel::Cpu(cpu_kernel) => cpu_kernel.memory_allocated(parameters),
             Avx512Kernel::DotProductLoopVdpbf16ps => {
-                let strip = 32;
                 let accum_count = parameters
                     .first()
                     .and_then(|parameter| parameter.spec().shape().get(2).copied())
-                    .and_then(|k| vector_accum_count(k.get(), strip))
+                    .and_then(|k| {
+                        vector_accum_count(k.get(), DOT_PRODUCT_VDPBF16PS_STRIP_SIZE.get())
+                    })
                     .unwrap_or(VECTOR_ACCUM_COUNT);
                 MemoryAllocation::simple_for_cpu([0, u64::from(accum_count) + 2, 0, 0])
             }
@@ -224,8 +228,9 @@ impl Kernel for Avx512Kernel {
                 let Some(k) = lhs_parameter.spec().shape().get(2).map(|d| d.get()) else {
                     return 0;
                 };
-                let instr_count = k / 32;
-                let accum_count = vector_accum_count(k, 32).unwrap_or(VECTOR_ACCUM_COUNT);
+                let strip = DOT_PRODUCT_VDPBF16PS_STRIP_SIZE.get();
+                let instr_count = k / strip;
+                let accum_count = vector_accum_count(k, strip).unwrap_or(VECTOR_ACCUM_COUNT);
 
                 // VDPBF16PS ZMM,..,M512 has RThroughput of 0.5 cycles (1 unit) on Zen 5
                 const REDUCTION_COST: MainCost = 4;
@@ -319,7 +324,7 @@ fn vdpbf16ps_applies_to_logical_spec(logical_spec: &LogicalSpec<Avx512Target>) -
         return false;
     }
 
-    if vector_accum_count(lhs_shape[2].get(), 32).is_none() {
+    if vector_accum_count(lhs_shape[2].get(), DOT_PRODUCT_VDPBF16PS_STRIP_SIZE.get()).is_none() {
         return false;
     }
 

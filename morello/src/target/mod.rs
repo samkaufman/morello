@@ -7,6 +7,7 @@ mod x86;
 
 pub use arm::ArmTarget;
 pub use avx2::Avx2Target;
+pub(crate) use avx512::DOT_PRODUCT_VDPBF16PS_STRIP_SIZE;
 pub use avx512::{Avx512Kernel, Avx512Target};
 pub use cpu::{CpuKernel, CpuMemory, CpuSolver, CpuTarget};
 
