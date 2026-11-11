@@ -1971,7 +1971,11 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                         }
                         Ok(())
                     }
-                    Some(CpuKernel::DotProductLoopBf16Bf16F32) => {
+                    Some(
+                        cpu_kernel @ (CpuKernel::DotProductLoopBf16Bf16F32
+                        | CpuKernel::DotProductLoopF32Bf16F32
+                        | CpuKernel::DotProductLoopF32InterleavedBf16F32),
+                    ) => {
                         let out_expr = self.c_value_arg(&arguments[2]);
 
                         let (shift_fn, _, _, _) = vec_func_names(16);
@@ -1982,8 +1986,10 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             Dtype::Bfloat16,
                             DOT_PRODUCT_BF16_STRIP_SIZE,
                         );
+                        self.headers.vector_type_defs.insert(vbf16);
+                        self.headers.emit_sum8 = true;
 
-                        cline!(w, depth, "// DotProductLoopBf16Bf16F32")?;
+                        cline!(w, depth, "// {cpu_kernel:?}")?;
                         let accums = VecAccums::declare(
                             self,
                             w,
@@ -1998,28 +2004,31 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                             [&arguments[0], &arguments[1]],
                         );
                         strip_loop.emit(w, depth, |w, depth, lane, [lhs_ptr, rhs_ptr]| {
-                            // Loads the bf16 strip at `ptr`, returning f32 vectors of its odd and
-                            // even elements.
-                            let mut load = |w: &mut W, ptr: &str| {
-                                let [compressed_name, odd_name, even_name] =
-                                    [(); 3].map(|_| self.namer.fresh_name());
-                                cline!(w, depth, "{0} {compressed_name};", vf32.name)?;
+                            let [lhs0, lhs1, rhs0, rhs1] = [(); 4].map(|_| self.namer.fresh_name());
+
+                            let load = |w: &mut W, name: &str, src: &str| {
+                                cline!(w, depth, "{} {name};", vf32.name)?;
                                 cline!(
                                     w,
                                     depth,
-                                    "__builtin_memcpy(&{compressed_name}, {ptr}, sizeof({compressed_name}));"
-                                )?;
+                                    "__builtin_memcpy(&{name}, {src}, sizeof({name}));"
+                                )
+                            };
+
+                            let mut deinterleave = |w: &mut W, ptr: &str, odd: &str, even: &str| {
+                                let compressed_name = self.namer.fresh_name();
+                                load(w, &compressed_name, ptr)?;
                                 cline!(
                                     w,
                                     depth,
-                                    "{0} {odd_name} = ({0}){shift_fn}(({1}){compressed_name}, 16);",
+                                    "{0} {odd} = ({0}){shift_fn}(({1}){compressed_name}, 16);",
                                     vf32.name,
                                     vf32.native_type_name,
                                 )?;
                                 cline!(
                                     w,
                                     depth,
-                                    "{} {even_name} = {};",
+                                    "{} {even} = {};",
                                     vf32.name,
                                     bf16_even_lanes_expr(
                                         16,
@@ -2027,178 +2036,42 @@ impl<Tgt: CpuTarget> CpuCodeGenerator<Tgt> {
                                         vf32.native_type_name,
                                         &compressed_name,
                                     ),
-                                )?;
-                                Ok::<_, fmt::Error>((odd_name, even_name))
+                                )
                             };
-                            let (odd_lhs_name, even_lhs_name) = load(w, lhs_ptr)?;
-                            let (odd_rhs_name, even_rhs_name) = load(w, rhs_ptr)?;
-                            let even_product = format!("{even_lhs_name} * {even_rhs_name}");
-                            let odd_product = format!("{odd_lhs_name} * {odd_rhs_name}");
-                            accums.emit_update(w, depth, lane, &even_product)?;
-                            accums.emit_update(w, depth, lane + 2, &odd_product)
+
+                            match cpu_kernel {
+                                CpuKernel::DotProductLoopBf16Bf16F32 => {
+                                    deinterleave(w, lhs_ptr, &lhs1, &lhs0)?;
+                                    deinterleave(w, rhs_ptr, &rhs1, &rhs0)?;
+                                }
+                                CpuKernel::DotProductLoopF32InterleavedBf16F32 => {
+                                    // The lhs is already dequantized, odd elements first.
+                                    load(w, &lhs0, lhs_ptr)?;
+                                    load(w, &lhs1, &format!("{lhs_ptr} + 8"))?;
+                                    deinterleave(w, rhs_ptr, &rhs0, &rhs1)?;
+                                }
+                                _ => {
+                                    // The lhs is already dequantized, in order.
+                                    load(w, &lhs0, lhs_ptr)?;
+                                    load(w, &lhs1, &format!("{lhs_ptr} + 8"))?;
+                                    let compressed_name = self.namer.fresh_name();
+                                    load(w, &compressed_name, rhs_ptr)?;
+                                    cline!(w, depth, "{} {rhs0};", vf32.name)?;
+                                    cline!(w, depth, "{} {rhs1};", vf32.name)?;
+                                    cline!(
+                                        w,
+                                        depth,
+                                        "cvtbf16_fp32_256({compressed_name}, &{rhs0}, &{rhs1});"
+                                    )?;
+                                    self.headers.emit_cvtbf16_fp32 = true;
+                                }
+                            }
+                            accums.emit_update(w, depth, lane, &format!("{lhs0} * {rhs0}"))?;
+                            accums.emit_update(w, depth, lane + 2, &format!("{lhs1} * {rhs1}"))
                         })?;
                         for accum_name in &accums.names {
                             cline!(w, depth, "{out_expr} += sum8({accum_name});")?;
                         }
-
-                        self.headers.vector_type_defs.insert(vbf16);
-                        self.headers.emit_sum8 = true;
-                        Ok(())
-                    }
-                    Some(CpuKernel::DotProductLoopF32Bf16F32) => {
-                        let out_expr = self.c_value_arg(&arguments[2]);
-
-                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
-                        let vbf16 = get_vector(
-                            Tgt::vec_types(),
-                            Dtype::Bfloat16,
-                            DOT_PRODUCT_BF16_STRIP_SIZE,
-                        );
-
-                        cline!(w, depth, "// DotProductLoopF32Bf16F32")?;
-                        let accums = VecAccums::declare(
-                            self,
-                            w,
-                            depth,
-                            VecReduce::Add,
-                            VECTOR_ACCUM_COUNT,
-                            vf32,
-                        )?;
-                        let strip_loop = self.strip_loop(
-                            DOT_PRODUCT_BF16_STRIP_SIZE,
-                            VECTOR_ACCUM_COUNT,
-                            [&arguments[0], &arguments[1]],
-                        );
-                        strip_loop.emit(w, depth, |w, depth, lane, [lhs_ptr, rhs_ptr]| {
-                            let [upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name] =
-                                [(); 4].map(|_| self.namer.fresh_name());
-
-                            // Load already-dequantized f32 lhs into a pair of vectors.
-                            cline!(w, depth, "{} {upper_lhs_name};", vf32.name)?;
-                            cline!(
-                                w,
-                                depth,
-                                "__builtin_memcpy(&{upper_lhs_name}, {lhs_ptr}, sizeof({upper_lhs_name}));"
-                            )?;
-                            cline!(w, depth, "{} {lower_lhs_name};", vf32.name)?;
-                            cline!(
-                                w,
-                                depth,
-                                "__builtin_memcpy(&{lower_lhs_name}, {lhs_ptr} + 8, sizeof({lower_lhs_name}));"
-                            )?;
-
-                            // Load compressed bf16 rhs strip and dequantize.
-                            let compressed_name = self.namer.fresh_name();
-                            cline!(w, depth, "{} {compressed_name};", vf32.name)?;
-                            cline!(
-                                w,
-                                depth,
-                                "__builtin_memcpy(&{compressed_name}, {rhs_ptr}, sizeof({compressed_name}));"
-                            )?;
-                            cline!(w, depth, "{} {upper_rhs_name};", vf32.name)?;
-                            cline!(w, depth, "{} {lower_rhs_name};", vf32.name)?;
-                            cline!(
-                                w,
-                                depth,
-                                "cvtbf16_fp32_256({compressed_name}, &{upper_rhs_name}, &{lower_rhs_name});"
-                            )?;
-
-                            let upper_product = format!("{upper_lhs_name} * {upper_rhs_name}");
-                            let lower_product = format!("{lower_lhs_name} * {lower_rhs_name}");
-                            accums.emit_update(w, depth, lane, &upper_product)?;
-                            accums.emit_update(w, depth, lane + 2, &lower_product)
-                        })?;
-                        for accum_name in &accums.names {
-                            cline!(w, depth, "{out_expr} += sum8({accum_name});")?;
-                        }
-
-                        self.headers.vector_type_defs.insert(vbf16);
-                        self.headers.emit_sum8 = true;
-                        self.headers.emit_cvtbf16_fp32 = true;
-                        Ok(())
-                    }
-                    Some(CpuKernel::DotProductLoopF32InterleavedBf16F32) => {
-                        let out_expr = self.c_value_arg(&arguments[2]);
-
-                        let vf32 = get_vector(Tgt::vec_types(), Dtype::Float32, nz!(8u32));
-                        let vbf16 = get_vector(
-                            Tgt::vec_types(),
-                            Dtype::Bfloat16,
-                            DOT_PRODUCT_BF16_STRIP_SIZE,
-                        );
-
-                        cline!(w, depth, "// DotProductLoopF32InterleavedBf16F32")?;
-                        let accums = VecAccums::declare(
-                            self,
-                            w,
-                            depth,
-                            VecReduce::Add,
-                            VECTOR_ACCUM_COUNT,
-                            vf32,
-                        )?;
-                        let strip_loop = self.strip_loop(
-                            DOT_PRODUCT_BF16_STRIP_SIZE,
-                            VECTOR_ACCUM_COUNT,
-                            [&arguments[0], &arguments[1]],
-                        );
-                        strip_loop.emit(w, depth, |w, depth, lane, [lhs_ptr, rhs_ptr]| {
-                            let [upper_lhs_name, lower_lhs_name, upper_rhs_name, lower_rhs_name] =
-                                [(); 4].map(|_| self.namer.fresh_name());
-
-                            // Load already-dequantized f32 lhs into a pair of vectors.
-                            cline!(w, depth, "{} {upper_lhs_name};", vf32.name)?;
-                            cline!(
-                                w,
-                                depth,
-                                "__builtin_memcpy(&{upper_lhs_name}, {lhs_ptr}, sizeof({upper_lhs_name}));"
-                            )?;
-                            cline!(w, depth, "{} {lower_lhs_name};", vf32.name)?;
-                            cline!(
-                                w,
-                                depth,
-                                "__builtin_memcpy(&{lower_lhs_name}, {lhs_ptr} + 8, sizeof({lower_lhs_name}));"
-                            )?;
-
-                            // Load compressed bf16 rhs strip and dequantize without crossing lanes.
-                            let compressed_name = self.namer.fresh_name();
-                            cline!(w, depth, "{} {compressed_name};", vf32.name)?;
-                            cline!(
-                                w,
-                                depth,
-                                "__builtin_memcpy(&{compressed_name}, {rhs_ptr}, sizeof({compressed_name}));"
-                            )?;
-                            let (shift_fn, _, _, _) = vec_func_names(16);
-                            cline!(
-                                w,
-                                depth,
-                                "{0} {upper_rhs_name} = ({0}){shift_fn}(({1}){compressed_name}, 16);",
-                                vf32.name,
-                                vf32.native_type_name,
-                            )?;
-                            cline!(
-                                w,
-                                depth,
-                                "{} {lower_rhs_name} = {};",
-                                vf32.name,
-                                bf16_even_lanes_expr(
-                                    16,
-                                    vf32.name,
-                                    vf32.native_type_name,
-                                    &compressed_name,
-                                ),
-                            )?;
-
-                            let upper_product = format!("{upper_lhs_name} * {upper_rhs_name}");
-                            let lower_product = format!("{lower_lhs_name} * {lower_rhs_name}");
-                            accums.emit_update(w, depth, lane, &upper_product)?;
-                            accums.emit_update(w, depth, lane + 2, &lower_product)
-                        })?;
-                        for accum_name in &accums.names {
-                            cline!(w, depth, "{out_expr} += sum8({accum_name});")?;
-                        }
-
-                        self.headers.vector_type_defs.insert(vbf16);
-                        self.headers.emit_sum8 = true;
                         Ok(())
                     }
                     Some(CpuKernel::PhysicalTransposeByte128) => {
